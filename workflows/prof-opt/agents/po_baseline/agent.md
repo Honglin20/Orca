@@ -155,7 +155,7 @@ probe.** The probe parks on a full house because its wait is convergent:
 same-run watchdogs reach terminal states and release their cards. At the
 baseline's entry no same-run training exists yet, so a full house means
 cross-run occupancy or foreign live processes — and the ledger never
-preempts across runs (v6 §3.2). Failing loud with the claim output quoted
+preempts across runs. Failing loud with the claim output quoted
 is the honest outcome; parking would deadlock on a releaser that never
 comes.
 

@@ -93,7 +93,7 @@ terminal record — torn launch").
 
 - `status` / `stage` / `reason`: from the table above (plus the harvest
   disclosure when it fired).
-- **winner (§9)**: among vids with a `success` row, pick the smallest
+- **winner**: among vids with a `success` row, pick the smallest
   `gap` from the success row; ties broken by the smallest
   `makespan_cycles` in the vid's merged history snapshot (the latency
   row's measured value); further ties by vid (lexicographic, pinned so

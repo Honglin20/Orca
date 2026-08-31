@@ -19,6 +19,13 @@ replay never re-kills), the early-stop kill refuses a pid that fails the
 (success / accuracy_fail), a crash without rc re-launches (budget 3 ->
 probe_insufficient), and re-entry is idempotent in all three states. Every
 curve is a mock log file — nothing trains, no GPU/NPU is ever required.
+
+The closing section carries the four §13.2 scenario smokes: the
+single-variant convergence loop (one vid repairing in place), the
+two-card parallel/block/release ledger sequence, the streaming early-stop
+end-to-end (curve growth -> kill -> terminal -> derived dashboard), and
+the gate's report exits (success with an in-flight survivor + the round
+cap awaiting in-flight terminals).
 """
 from __future__ import annotations
 
@@ -2162,3 +2169,165 @@ def test_probe_emit_watchdog_liveness_negative_branches(tmp_path):
          "device": 0, "ts": "2026-08-31T00:00:00+00:00"}), encoding="utf-8")
     redeemed = _check_probe(art)
     assert redeemed.returncode == 0, redeemed.stderr
+
+
+# ── §13.2 scenario smokes: script-level sequences over the real scripts ──────
+
+def test_scenario_single_variant_convergence_loop(tmp_path):
+    """§13.2-1: ONE vid iterates in place until it reaches the frozen line.
+    The recheck's repair ledger counts each miss, no second vid ever
+    appears, and the rerouting signal (direction.json) stays absent — the
+    elimination path belongs to the >= 5 budget, not this round."""
+    art = _recheck_ws(tmp_path, target=500)
+    _recheck_variant(art, "r1-01", 700)
+    vd = art / "variants" / "r1-01"
+
+    def _remeasure(makespan: int) -> dict:
+        (vd / "profile" / "profile_summary.json").write_text(json.dumps(
+            {"schema_version": 1, "onnx": "smoke.onnx",
+             "makespan_cycles": makespan, "op_count": 2}), encoding="utf-8")
+        verdict = vd / "verdict.json"
+        if verdict.is_file():
+            verdict.unlink()
+        proc = _run_recheck(art)
+        assert proc.returncode == 0, proc.stderr
+        return json.loads(proc.stdout)
+
+    out = _remeasure(700)
+    assert out["latency_pass_count"] == 0
+    trace = json.loads((vd / "repair_trace.json").read_text(encoding="utf-8"))
+    assert trace["repair_count"] == 1 and len(trace["attempts"]) == 1
+
+    out = _remeasure(520)                       # still above the 500 line
+    assert out["latency_pass_count"] == 0
+    trace = json.loads((vd / "repair_trace.json").read_text(encoding="utf-8"))
+    assert trace["repair_count"] == 2
+
+    out = _remeasure(500)                       # the repair lands exactly ON it
+    assert out["latency_pass_count"] == 1
+    trace = json.loads((vd / "repair_trace.json").read_text(encoding="utf-8"))
+    assert trace["repair_count"] == 2           # a pass appends no attempt
+    verdict = json.loads((vd / "verdict.json").read_text(encoding="utf-8"))
+    assert verdict["outcome"] == "latency_pass"
+
+    # the SAME vid carries the whole loop; no elimination artifacts
+    latest = history_lib.read_latest(art / "history.jsonl")
+    assert set(latest) == {"r1-01"}
+    assert latest["r1-01"]["outcome"] == "latency_pass"
+    assert not (art / "rounds" / "001" / "direction.json").exists()
+
+
+def test_scenario_two_cards_two_variants_parallel_block_release(tmp_path):
+    """§13.2-2: on a synthetic two-card backend two variants hold the two
+    cards in PARALLEL; a third entry meets the full house ({"ok": false} —
+    exactly the condition the probe parks on); one terminal release frees
+    its card and the next claim takes THAT card."""
+    art = tmp_path / "ws"
+    _write_train_device(art, count=2)
+    v1 = json.loads(_alloc(art, "acquire", "--vid", "r1-01").stdout)
+    v2 = json.loads(_alloc(art, "acquire", "--vid", "r2-01").stdout)
+    assert v1["ok"] is True and v1["idx"] == 0
+    assert v2["ok"] is True and v2["idx"] == 1     # parallel, both held
+
+    busy = json.loads(_alloc(art, "acquire", "--vid", "r3-01").stdout)
+    assert busy["ok"] is False                     # the park condition
+
+    rel = _alloc(art, "release", "--idx", str(v1["idx"]))
+    assert rel.returncode == 0, rel.stderr         # r1-01 reached a terminal
+    v3 = json.loads(_alloc(art, "acquire", "--vid", "r3-01").stdout)
+    assert v3["ok"] is True and v3["idx"] == 0     # the freed card
+    held = sorted(json.loads((art / "devices" / f"{i}.lock").read_text(
+        encoding="utf-8"))["vid"] for i in (0, 1))
+    assert held == ["r2-01", "r3-01"]
+
+
+def test_scenario_streaming_early_stop_end_to_end(tmp_path):
+    """§13.2-3: curve growth through the REAL watchdog — warmup epochs are
+    seen but never judged, the streak builds to 10, the kill lands on the
+    attributed group, the terminal (train_status / history / shard / lock /
+    rules marker) lands on disk, and the derived dashboard reflects it."""
+    art = _watch_ws(tmp_path, epochs=20, log_epochs=range(1, 3),
+                    candidate="0.5")
+    vd = art / "variants" / "r1-01"
+    sleeper = _attributed_session_sleeper("train.rendered.sh")
+    (vd / "train" / "train.pid").write_text(f"{sleeper.pid}\n",
+                                            encoding="utf-8")
+
+    warm = _watch_run(art, "--once")               # warmup = epochs <= 2
+    assert warm.returncode == 0, warm.stderr
+    status = _train_status(art)
+    assert status["stage"] == "training" and status["over_budget_streak"] == 0
+    assert sleeper.poll() is None
+
+    with open(vd / "train" / "train.log", "a", encoding="utf-8") as fh:
+        for e in range(3, 13):                     # judged epochs -> streak 10
+            fh.write(_EPOCH_LINE.format(e=e, m="0.5") + "\n")
+    kill = _watch_run(art, "--once")
+    assert kill.returncode == 0, kill.stderr
+    sleeper.wait(timeout=20)
+
+    status = _train_status(art)
+    assert status["stage"] == "killed"
+    assert status["over_budget_streak"] == 10
+    assert status["stopped_at_epoch"] == 12
+    row = _latest_row(art)
+    assert row["outcome"] == "accuracy_fail"
+    assert row["stopped_at_epoch"] == 12 and row["gap"] == pytest.approx(0.4)
+    assert not (art / "devices" / "0.lock").exists()
+    assert (vd / ".rules_pending").is_file()
+
+    proc = _run_cli([sys.executable, str(_SCRIPTS / "dashboard_snapshot.py"),
+                     "--artifacts", str(art)])
+    assert proc.returncode == 0, proc.stderr
+    dash = json.loads((art / "dashboard.json").read_text(encoding="utf-8"))
+    row = next(r for r in dash["variants"] if r["vid"] == "r1-01")
+    assert row["status"] == "accuracy_fail"
+    assert "r1-01" in dash["curves"]               # the curve file survived
+
+
+def test_scenario_gate_report_exit_and_round_cap(tmp_path):
+    """§13.2-4: a success row exits the loop to report EVEN while another
+    variant is still in flight (eligibility kept, nothing killed); at the
+    round cap with no success the gate still reports and names the vids the
+    terminal harvest must await — and the in-flight vid's train_status is
+    exactly the non-terminal stage the report parks on."""
+    art = tmp_path / "ws"
+    _write_anchor(art, target=500)
+    for rnd in (1, 2, 3):
+        (art / "rounds" / f"{rnd:03d}").mkdir(parents=True)
+    hist = art / "history.jsonl"
+    _impl(hist, "r1-01", "sig:a")                  # in flight, no terminal
+    history_lib.append_latency(hist, "r1-01", structural_check="pass",
+                               makespan_cycles=460, latency_gate="pass",
+                               pred_actual_ratio=None, outcome="latency_pass")
+    _impl(hist, "r2-01", "sig:b")
+    history_lib.append_latency(hist, "r2-01", structural_check="pass",
+                               makespan_cycles=480, latency_gate="pass",
+                               pred_actual_ratio=None, outcome="latency_pass")
+    history_lib.append_terminal(hist, "r2-01", outcome="success", gap=0.02,
+                                stopped_at_epoch=20, final_acc=0.88)
+    (art / "variants" / "r1-01").mkdir(parents=True, exist_ok=True)
+    (art / "variants" / "r1-01" / "train_status.json").write_text(json.dumps(
+        {"vid": "r1-01", "stage": "training", "epoch": 7, "metric": 0.8,
+         "gap": 0.1, "over_budget_streak": 0, "stopped_at_epoch": None,
+         "device": 1, "ts": "2026-09-01T00:00:00+00:00"}), encoding="utf-8")
+
+    out = decide(art, max_rounds=100)
+    assert out["decision"] == "report"
+    assert out["success_vids"] == ["r2-01"]
+    assert out["in_flight"] == ["r1-01"]           # kept eligible, not killed
+
+    cap = tmp_path / "cap-ws"
+    _write_anchor(cap, target=500)
+    for rnd in (1, 2):
+        (cap / "rounds" / f"{rnd:03d}").mkdir(parents=True)
+    hist2 = cap / "history.jsonl"
+    _impl(hist2, "r1-01", "sig:a")
+    history_lib.append_latency(hist2, "r1-01", structural_check="pass",
+                               makespan_cycles=460, latency_gate="pass",
+                               pred_actual_ratio=None, outcome="latency_pass")
+    capped = decide(cap, max_rounds=2)
+    assert capped["decision"] == "report"          # the cap never loops
+    assert capped["success_vids"] == []
+    assert capped["in_flight"] == ["r1-01"]
+    assert "awaits" in capped["reason"]

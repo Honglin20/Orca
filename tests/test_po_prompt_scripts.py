@@ -22,7 +22,6 @@ _AGENTS = _REPO / "workflows" / "prof-opt" / "agents"
 _FLATTEN = _AGENTS / "po_flatten" / "scripts"
 _BASELINE = _AGENTS / "po_baseline" / "scripts"
 _CONTRACT = _AGENTS / "po_contract" / "scripts"
-_FULL_TRAIN = _AGENTS / "po_full_train" / "scripts"
 _PO = _AGENTS / "_po_scripts"
 sys.path.insert(0, str(_PO))
 
@@ -157,25 +156,6 @@ def test_shadow_pkgs_csv_resolution_order(tmp_path: Path):
     r = _run([sys.executable, str(_CONTRACT / "shadow_pkgs_csv.py"),
               "--artifacts", str(empty)])
     assert r.returncode == 1 and "shadow_pkgs not found" in r.stderr
-
-
-# ── po_full_train extraction ──────────────────────────────────────────────────
-
-def test_train_state_verdicts(tmp_path: Path):
-    d = tmp_path / "final"; d.mkdir()
-    # DEAD: rc absent, pid belongs to an already-reaped child
-    proc = subprocess.Popen(["true"]); proc.wait()
-    (d / ".train_pid").write_text(str(proc.pid), encoding="utf-8")
-    r = _run([sys.executable, str(_FULL_TRAIN / "train_state.py"), str(d)])
-    assert r.returncode == 0 and r.stdout.startswith("DEAD no-rc pid=")
-    # RUNNING: the live pid of this very pytest process
-    (d / ".train_pid").write_text(str(os.getpid()), encoding="utf-8")
-    r = _run([sys.executable, str(_FULL_TRAIN / "train_state.py"), str(d)])
-    assert r.stdout.startswith(f"RUNNING pid={os.getpid()}")
-    # DONE: rc file wins regardless of the pid
-    (d / ".train_rc").write_text("0", encoding="utf-8")
-    r = _run([sys.executable, str(_FULL_TRAIN / "train_state.py"), str(d)])
-    assert r.stdout == "DONE rc=0\n"
 
 
 # ── po_baseline extraction ─────────────────────────────────────────────────────

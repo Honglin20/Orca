@@ -1,27 +1,24 @@
 """test_po_scripts.py — unit tests for the prof-opt shared deterministic scripts.
 
-Covers: history_lib (builder field sets + dedup branches + joint retry
-budget + probe-row eval annotations with the gap field), gate_decide (the
-sequential-gate decision order + round cap + torn-workspace invariant),
-advance_round (latency/accuracy dual mode, the (round, mode) idempotency
-key, torn-write repair, direction.json failed-sigs), analyze (fixture-driven
-hot patterns / pipeline breakdown / cost table + strict unknown-key failure
-+ the frozen origin anchor), predict_delta (per-shape-class row pricing
-incl. the small-site E2E regression + params normalization idempotency),
-the placeholder profiler's delta-direction guarantee, render_run (<<k>>
-token chain), check_contracts (fairness-invariant token/budget enforcement),
-run_baseline_chain (non-blocking baseline + finalizer guardian; profiling
-mode from profile_mode.json), the po_flatten reuse gate (fresh_start
-whole-workspace wipe + lock states + profiling-mode consistency), and
-deploy_scripts' orphan retirement + version stamp. Shared-layer coverage:
-metric_curve pinned-depth compare, stop_at_epoch (process-group kill at
-epoch k), check_bottleneck, push_curves, verdict_decide (anchor-budget
-promote/final-budget gates), extract_user_pkg, and po_propose
-check_prerequisites. The v5 recheck section pins the mode-conditioned gate
-(placeholder/mfu from profile_mode.json; strict-improvement vs incumbent in
-the latency phase, the frozen target line in the recovery phase). v5
-mechanics (round_state, rules_pool, resolve_profile_mode, gate_node stamp
-wiring, smoke) live in test_po_v5.py.
+Covers: history_lib (builder rejection + the dedup branches over raw rows —
+permanent read-compat, joint retry budget, probe-config fingerprint),
+gate_decide (loop continuation + the missing-anchor invariant), analyze
+(fixture-driven hot patterns / pipeline breakdown / cost table + strict
+unknown-key failure + the frozen origin anchor), predict_delta (per-shape-
+class row pricing incl. the small-site E2E regression + params normalization
+idempotency), the placeholder profiler's delta-direction guarantee,
+render_run (<<k>> token chain), check_contracts (fairness-invariant
+token/budget enforcement), run_baseline_chain (non-blocking baseline +
+finalizer guardian; profiling mode from profile_mode.json), the po_flatten
+reuse gate (fresh_start whole-workspace wipe + lock states + profiling-mode
+consistency), and deploy_scripts' orphan retirement + version stamp.
+Shared-layer coverage: metric_curve pinned-depth compare, check_bottleneck,
+push_curves (top-10 / pareto / docs manifest), dashboard_snapshot, and the
+extract_user_pkg / po_propose check_prerequisites helpers. The recheck
+section pins the unified mfu gate's fail-loud matrix. The v6 mechanics
+(device ledger, watchdog, terminal rows, gate decision order, scenario
+smokes) live in test_po_v6.py; round_state / rules_pool /
+resolve_profile_mode / gate_node stamp wiring live in test_po_v5.py.
 """
 from __future__ import annotations
 
@@ -43,54 +40,10 @@ import history_lib  # noqa: E402
 import push_curves  # noqa: E402
 from analyze import ContractError, analyze  # noqa: E402
 from gate_decide import decide  # noqa: E402
-from advance_round import advance  # noqa: E402
 from predict_delta import predict_delta  # noqa: E402
-
-# v6 (prof-opt-v6 P0) retired the advance/mode/dual-gate/probe-row mechanics.
-# Their v5 test cases are SKIPPED in place — not deleted — so the phase range
-# stays bisectable; P5-T4 reclaims or migrates them per content class.
-_RETIRED_V6 = pytest.mark.skip(
-    reason="retired in v6 (prof-opt-v6 P0), cleanup in P5")
 
 
 # ── history_lib ───────────────────────────────────────────────────────────────
-
-@_RETIRED_V6
-def test_history_builder_field_sets(tmp_path: Path):
-    hist = tmp_path / "history.jsonl"
-    history_lib.append_implemented(
-        hist, "r1-01", round=1, seq=1, parent_vid=None,
-        change_sig="activation:gelu->relu:blocks.0", probe_epochs=1,
-        probe_max_steps=500, probe_data_value=2000, target_modules=["blocks.0"],
-        predicted_delta_cycles=-100,
-        base_at_proposal={"vid": None, "makespan_cycles": 15288})
-    history_lib.append_latency(
-        hist, "r1-01", structural_check="pass", makespan_cycles=900,
-        latency_gate="pass", pred_actual_ratio=0.9, outcome="latency_pass")
-    history_lib.append_probe(
-        hist, "r1-01", proxy_acc=0.83,
-        promote_gate="pass", outcome="accuracy_pass", gap=0.02,
-        eval_skipped_no_epoch_ckpt=False, monitor_failed=False,
-        eval_acc=0.91, eval_failed=False)
-
-    rows = history_lib.read_rows(hist)
-    assert len(rows) == 3
-    impl, lat, probe = rows
-    assert set(impl) >= set(history_lib.IMPL_FIELDS) | {"version", "ts"}
-    assert set(lat) >= set(history_lib.LATENCY_FIELDS) | set(history_lib.IMPL_FIELDS)
-    assert set(probe) >= set(history_lib.PROBE_FIELDS) | set(history_lib.LATENCY_FIELDS)
-    assert [r["version"] for r in rows] == [1, 2, 3]
-
-    latest = history_lib.read_latest(hist)
-    assert latest["r1-01"]["outcome"] == "accuracy_pass"
-    assert latest["r1-01"]["makespan_cycles"] == 900  # merged snapshot carries L0 fields
-    assert latest["r1-01"]["gap"] == 0.02
-
-    # the advance marker row keeps the promoted field set (LATENCY_FIELDS)
-    advanced = history_lib.append_advanced(hist, "r1-01")
-    assert advanced["outcome"] == "advanced"
-    assert history_lib.read_latest(hist)["r1-01"]["outcome"] == "advanced"
-
 
 def test_history_builder_rejects_unknown_fields(tmp_path: Path):
     hist = tmp_path / "history.jsonl"
@@ -110,55 +63,36 @@ def test_history_builder_rejects_unknown_fields(tmp_path: Path):
 def _write_sig_history(hist: Path, sig: str, outcomes: list[str],
                        probe_epochs: int = 1, probe_max_steps: int | None = 500,
                        probe_data_value=None):
+    """Raw JSONL rows, written directly: the read side judges any
+    well-formed row, and dedup must also judge OLD workspace rows whose
+    outcomes predate v6's append_terminal builder — so the fixture never
+    goes through the (v6-only) write path."""
     for i, outcome in enumerate(outcomes, 1):
         vid = f"r1-{i:02d}"
-        history_lib.append_implemented(
-            hist, vid, round=1, seq=i, parent_vid=None, change_sig=sig,
-            probe_epochs=probe_epochs, probe_max_steps=probe_max_steps,
-            probe_data_value=probe_data_value,
-            target_modules=["m"], predicted_delta_cycles=-10,
-            base_at_proposal={"vid": None, "makespan_cycles": 100})
+        row = {"vid": vid, "round": 1, "seq": i, "parent_vid": None,
+               "change_sig": sig, "probe_epochs": probe_epochs,
+               "probe_max_steps": probe_max_steps,
+               "probe_data_value": probe_data_value,
+               "target_modules": ["m"], "predicted_delta_cycles": -10,
+               "implemented": True,
+               "base_at_proposal": {"vid": None, "makespan_cycles": 100},
+               "version": 1, "ts": "2026-09-01T00:00:00+00:00"}
         if outcome == "latency_pass":
-            history_lib.append_latency(hist, vid, structural_check="pass",
-                                       makespan_cycles=100, latency_gate="pass",
-                                       pred_actual_ratio=1.0, outcome="latency_pass")
+            row.update({"structural_check": "pass", "makespan_cycles": 100,
+                        "latency_gate": "pass", "pred_actual_ratio": 1.0,
+                        "outcome": "latency_pass"})
         elif outcome == "probe_insufficient":
-            history_lib.append_latency(hist, vid, structural_check="pass",
-                                       makespan_cycles=100, latency_gate="pass",
-                                       pred_actual_ratio=1.0, outcome="latency_pass")
-            history_lib.append_probe(hist, vid, proxy_acc=0.4,
-                                     promote_gate="fail", outcome="probe_insufficient")
-        elif outcome == "promoted":
-            # v4 read-compat row: never written by v5, still dedup-blocks
-            history_lib.append_latency(hist, vid, structural_check="pass",
-                                       makespan_cycles=100, latency_gate="pass",
-                                       pred_actual_ratio=1.0, outcome="latency_pass")
-            history_lib.append_probe(hist, vid, proxy_acc=0.9,
-                                     promote_gate="pass", outcome="promoted")
-        elif outcome == "advanced":
-            history_lib.append_latency(hist, vid, structural_check="pass",
-                                       makespan_cycles=100, latency_gate="pass",
-                                       pred_actual_ratio=1.0, outcome="latency_pass")
-            history_lib.append_advanced(hist, vid)
-        elif outcome in ("accuracy_pass", "accuracy_fail"):
-            history_lib.append_latency(hist, vid, structural_check="pass",
-                                       makespan_cycles=100, latency_gate="pass",
-                                       pred_actual_ratio=1.0, outcome="latency_pass")
-            history_lib.append_probe(hist, vid, proxy_acc=0.9,
-                                     promote_gate="pass" if outcome == "accuracy_pass" else "fail",
-                                     outcome=outcome, gap=0.05)
-        else:  # structural_mismatch / variant_broken / unsupported_op
-            if outcome in ("structural_mismatch", "variant_broken"):
-                history_lib.append_outcome(hist, vid, outcome)
-            else:
-                history_lib.append_latency(hist, vid, structural_check="fail",
-                                           makespan_cycles=None, latency_gate=None,
-                                           pred_actual_ratio=None, outcome=outcome)
+            row.update({"outcome": "probe_insufficient", "stage": "train",
+                        "max_retries_hit": True})
+        else:  # advanced / promoted (read-compat) + the L0 eliminations
+            row.update({"outcome": outcome})
+        with open(hist, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")
 
 
 @pytest.mark.parametrize("outcomes,blocked", [
     (["promoted"], True),                      # v4 read-compat: still permanent
-    (["advanced"], True),                      # permanent: a round advanced it
+    (["advanced"], True),                      # permanent: read-compat row
     (["unsupported_op"], True),                # permanent: structurally infeasible
     (["latency_pass"], False),                 # process state never blocks
     (["accuracy_fail"], False),                # composed re-proposals use NEW sigs
@@ -167,7 +101,6 @@ def _write_sig_history(hist: Path, sig: str, outcomes: list[str],
     (["structural_mismatch", "variant_broken"], True),   # joint budget exhausted
     (["variant_broken", "variant_broken"], True),        # same class twice: exhausted
 ])
-@_RETIRED_V6
 def test_history_dedup_branches(tmp_path: Path, outcomes, blocked):
     hist = tmp_path / "history.jsonl"
     _write_sig_history(hist, "activation:x->y", outcomes)
@@ -175,7 +108,6 @@ def test_history_dedup_branches(tmp_path: Path, outcomes, blocked):
     assert state["blocked"] is blocked, state
 
 
-@_RETIRED_V6
 def test_history_dedup_probe_config_retry(tmp_path: Path):
     hist = tmp_path / "history.jsonl"
     _write_sig_history(hist, "norm:relax:m", ["probe_insufficient"],
@@ -191,7 +123,6 @@ def test_history_dedup_probe_config_retry(tmp_path: Path):
     assert more_data["blocked"] is False    # data-subset value change reopens it
 
 
-@_RETIRED_V6
 def test_history_dedup_null_max_steps_is_a_pinned_budget(tmp_path: Path):
     """Regression (review): a project WITHOUT a step-truncation mechanism pins
     max_steps=null. null is a budget value, not "unset" — a same-budget
@@ -207,7 +138,6 @@ def test_history_dedup_null_max_steps_is_a_pinned_budget(tmp_path: Path):
     assert got_steps["blocked"] is False  # a real budget change reopens it
 
 
-@_RETIRED_V6
 def test_history_cli_requires_and_passes_null_budget(tmp_path: Path):
     """The po_propose node drives the CLI, not the function: pin the CLI
     surface — null budgets must survive the round trip, and a missing flag
@@ -243,7 +173,7 @@ def test_history_cli_requires_and_passes_null_budget(tmp_path: Path):
     assert "--probe-max-steps" in missing.stderr
 
 
-# ── gate_decide (v5: sequential gates, round cap only) ────────────────────────
+# ── gate_decide: loop continuation + anchor invariant ─────────────────────────
 
 _GATE_BASE_MAKESPAN = 1000  # fixture baseline; anchor ratio 0.5 -> target 501
 
@@ -270,49 +200,15 @@ def _gate_artifacts(tmp_path: Path, *, rounds: list[int],
     return art
 
 
-# a fully-closed accuracy winner: latency_pass -> accuracy_pass -> advanced
-# (the ANY-version-row rule must see the accuracy_pass under the advanced)
-_ACCURACY_WINNER_R1 = [
-    {"vid": "r1-01", "round": 1, "outcome": "latency_pass",
-     "makespan_cycles": 450, "proxy_acc": 0.9, "promote_gate": "none"},
-    {"vid": "r1-01", "round": 1, "outcome": "accuracy_pass",
-     "makespan_cycles": 450, "proxy_acc": 0.9, "promote_gate": "pass",
-     "gap": 0.05},
-    {"vid": "r1-01", "round": 1, "outcome": "advanced",
-     "makespan_cycles": 450, "proxy_acc": 0.9, "promote_gate": "pass"},
-]
+# a vid whose round closed without reaching the line (no terminal pass)
 _NO_PASS_R1 = [
     {"vid": "r1-01", "round": 1, "outcome": "latency_fail",
      "makespan_cycles": 800},
 ]
 
 
-@_RETIRED_V6
-def test_gate_full_train_on_accuracy_pass_any_version_row(tmp_path: Path):
-    """Decision 1: best under the frozen line AND an accuracy_pass in ANY
-    version row (the advance's `advanced` row does not erase it)."""
-    art = _gate_artifacts(tmp_path, rounds=[1], history_rows=_ACCURACY_WINNER_R1,
-                          best={"vid": "r1-01", "makespan_cycles": 450,
-                                "proxy_acc": 0.9})
-    out = decide(art, max_rounds=5)
-    assert out["decision"] == "full-train"
-    assert out["mode"] == "accuracy"
-    assert out["target_cycles"] == 501
-    assert out["best"]["vid"] == "r1-01"
-
-
-@_RETIRED_V6
-def test_gate_loops_when_gates_unmet(tmp_path: Path):
-    art = _gate_artifacts(tmp_path, rounds=[1], history_rows=_NO_PASS_R1,
-                          best=None)
-    out = decide(art, max_rounds=5)
-    assert out["decision"] == "loop"
-    assert out["mode"] == "latency"
-    assert out["best"] is None
-
-
-def test_gate_loops_across_consecutive_zero_advance_rounds(tmp_path: Path):
-    """v5 has no stall/platoona exit: many zero-advance rounds still loop
+def test_gate_loops_across_consecutive_failing_rounds(tmp_path: Path):
+    """v6 has no stall/plateau exit: many failing rounds still loop
     (the plateau's answer is proposal rerouting, not stopping)."""
     rows = [dict(_NO_PASS_R1[0], vid=f"r{r}-01", round=r)
             for r in range(1, 6)]
@@ -320,72 +216,6 @@ def test_gate_loops_across_consecutive_zero_advance_rounds(tmp_path: Path):
                           history_rows=rows, best=None)
     out = decide(art, max_rounds=100)
     assert out["decision"] == "loop"
-
-
-@_RETIRED_V6
-def test_gate_best_met_line_without_accuracy_pass_still_loops(tmp_path: Path):
-    """Under the line but the accuracy gate never passed (accuracy_fail or
-    probe pending): NOT full-train — the recovery rounds continue."""
-    rows = [dict(_ACCURACY_WINNER_R1[0]),
-            {"vid": "r1-01", "round": 1, "outcome": "accuracy_fail",
-             "makespan_cycles": 450, "proxy_acc": 0.4,
-             "promote_gate": "fail", "gap": 0.5}]
-    art = _gate_artifacts(tmp_path, rounds=[1], history_rows=rows,
-                          best={"vid": "r1-01", "makespan_cycles": 450,
-                                "proxy_acc": 0.4})
-    out = decide(art, max_rounds=5)
-    assert out["decision"] == "loop"
-    assert out["mode"] == "accuracy"
-
-
-@_RETIRED_V6
-def test_gate_hard_cap_with_best_is_best_effort(tmp_path: Path):
-    art = _gate_artifacts(tmp_path, rounds=[1, 2], history_rows=_NO_PASS_R1,
-                          best={"vid": "r1-01", "makespan_cycles": 800,
-                                "proxy_acc": None})
-    out = decide(art, max_rounds=2)
-    assert out["decision"] == "full-train-best-effort"  # cap + best present
-
-
-@_RETIRED_V6
-def test_gate_finish_failed_when_no_best_at_cap(tmp_path: Path):
-    art = _gate_artifacts(tmp_path, rounds=[1, 2],
-                          history_rows=_NO_PASS_R1, best=None)
-    out = decide(art, max_rounds=2)
-    assert out["decision"] == "finish-failed"
-
-
-@_RETIRED_V6
-def test_gate_accuracy_pass_wins_over_the_cap(tmp_path: Path):
-    """Decision 1 is judged FIRST: even at the round cap, an accuracy-passed
-    best under the line is a clean full-train, not best-effort."""
-    art = _gate_artifacts(tmp_path, rounds=[1, 2],
-                          history_rows=_ACCURACY_WINNER_R1,
-                          best={"vid": "r1-01", "makespan_cycles": 450,
-                                "proxy_acc": 0.9})
-    out = decide(art, max_rounds=2)
-    assert out["decision"] == "full-train"
-
-
-@_RETIRED_V6
-def test_gate_hard_cap_never_loops_at_max_rounds(tmp_path: Path):
-    art = _gate_artifacts(tmp_path, rounds=[1, 2],
-                          history_rows=_NO_PASS_R1, best=None)
-    out = decide(art, max_rounds=2)
-    assert out["round"] == 2
-    assert out["decision"] != "loop"
-    assert out["decision"] == "finish-failed"
-
-
-@_RETIRED_V6
-def test_gate_invariant_accuracy_mode_without_probe_row_rc2(tmp_path: Path):
-    """mode=accuracy but best.vid has no probe row at all: the workspace is
-    torn — exit 2, never a guessed decision."""
-    art = _gate_artifacts(tmp_path, rounds=[1], history_rows=_NO_PASS_R1,
-                          best={"vid": "r1-01", "makespan_cycles": 450,
-                                "proxy_acc": None})
-    with pytest.raises(ValueError, match="invariant"):
-        decide(art, max_rounds=5)
 
 
 def test_gate_missing_origin_anchor_rc2(tmp_path: Path):
@@ -408,379 +238,6 @@ def test_gate_no_longer_reads_proposals_json(tmp_path: Path):
         "frozen_at_round": 0}), encoding="utf-8")
     out = decide(art, max_rounds=5)
     assert out["decision"] == "loop"
-
-
-# ── advance_round (v5: dual-mode, (round, mode) key, torn repair) ─────────────
-
-def _v5_advance_artifacts(tmp_path: Path, baseline: int = 1000,
-                          ratio: float = 0.5) -> Path:
-    """Workspace with an origin anchor (ratio 0.5 -> target 501) and a
-    round-1 directory; incumbent before any best = the anchor baseline."""
-    art = tmp_path / "advance-artifacts"
-    (art / "rounds" / "001").mkdir(parents=True)
-    (art / "base").mkdir(parents=True)
-    (art / "base" / "model.onnx").write_text("onnx-of-round0-base", encoding="utf-8")
-    (art / "base" / "origin_anchor.json").write_text(json.dumps({
-        "baseline_makespan_cycles": baseline, "latency_reduction_min": ratio,
-        "accuracy_budget": 0.1,
-        "target_cycles": int(baseline * (1 - ratio)) + 1,
-        "frozen_at_round": 0}), encoding="utf-8")
-    (art / "shadow" / "pkg").mkdir(parents=True)
-    (art / "shadow" / "pkg" / "model.py").write_text("# shadow round0\n", encoding="utf-8")
-    return art
-
-
-def _v5_variant(art: Path, vid: str, round_no: int, makespan: int, *,
-                probe: str | None = None, gap: float | None = None,
-                proxy_acc: float = 0.8, advanced: bool = False,
-                latency: bool = True, shadow_tag: str | None = None,
-                sig: str | None = None):
-    """On-disk variant + its history rows: implemented -> [latency_pass] ->
-    [accuracy_pass|accuracy_fail] -> [advanced]."""
-    vd = art / "variants" / vid
-    (vd / "onnx").mkdir(parents=True, exist_ok=True)
-    (vd / "onnx" / "model.onnx").write_text(f"onnx-of-{shadow_tag or vid}", encoding="utf-8")
-    (vd / "profile").mkdir(parents=True, exist_ok=True)
-    (vd / "profile" / "profile_summary.json").write_text(
-        json.dumps({"schema_version": 1, "onnx": "x", "makespan_cycles": makespan,
-                    "op_count": 1}), encoding="utf-8")
-    shadow = vd / "shadow" / "pkg"
-    shadow.mkdir(parents=True, exist_ok=True)
-    (shadow / "model.py").write_text(f"# shadow {shadow_tag or vid}\n", encoding="utf-8")
-    (vd / "shadow" / "pkg" / "__pycache__").mkdir(exist_ok=True)
-    (vd / "shadow" / "pkg" / "__pycache__" / "model.cpython-311.pyc").write_text(
-        "stale bytecode", encoding="utf-8")
-
-    hist = art / "history.jsonl"
-    history_lib.append_implemented(
-        hist, vid, round=round_no, seq=1, parent_vid=None,
-        change_sig=sig or f"sig:{vid}", probe_epochs=1, probe_max_steps=500,
-        probe_data_value=None,
-        target_modules=["m"], predicted_delta_cycles=-10,
-        base_at_proposal={"vid": None, "makespan_cycles": 1000})
-    if latency:
-        history_lib.append_latency(hist, vid, structural_check="pass",
-                                   makespan_cycles=makespan, latency_gate="pass",
-                                   pred_actual_ratio=1.0, outcome="latency_pass")
-    if probe == "accuracy_pass":
-        history_lib.append_probe(hist, vid, proxy_acc=proxy_acc,
-                                 promote_gate="pass", outcome="accuracy_pass",
-                                 gap=gap if gap is not None else 0.05)
-    elif probe == "accuracy_fail":
-        history_lib.append_probe(hist, vid, proxy_acc=proxy_acc,
-                                 promote_gate="fail", outcome="accuracy_fail",
-                                 gap=gap if gap is not None else 0.5)
-    if advanced:
-        history_lib.append_advanced(hist, vid)
-
-
-def _marker(art: Path) -> dict:
-    return json.loads((art / ".round_advanced").read_text(encoding="utf-8"))
-
-
-def _direction(art: Path, round_no: int) -> dict:
-    return json.loads((art / "rounds" / f"{round_no:03d}" / "direction.json")
-                      .read_text(encoding="utf-8"))
-
-
-@_RETIRED_V6
-def test_advance_latency_r1_then_r2_replaces_base_and_shadow(tmp_path: Path):
-    art = _v5_advance_artifacts(tmp_path)
-    _v5_variant(art, "r1-01", round_no=1, makespan=900)   # < incumbent 1000
-
-    out1 = advance(art)
-    assert out1 == {"advanced": True, "round": 1, "mode": "latency",
-                    "vid": "r1-01", "improved": True, "best_updated": True,
-                    "reason": "winner advanced"}
-    assert (art / "base" / "model.onnx").read_text(encoding="utf-8") == "onnx-of-r1-01"
-    assert (art / "shadow" / "pkg" / "model.py").read_text(encoding="utf-8") == "# shadow r1-01\n"
-    # __pycache__ must not leak into the global shadow
-    assert not (art / "shadow" / "pkg" / "__pycache__").exists()
-    assert (art / "base" / "profile" / "profile_summary.json").is_file()
-    best1 = json.loads((art / "best.json").read_text(encoding="utf-8"))
-    assert best1["vid"] == "r1-01" and best1["makespan_cycles"] == 900
-    assert best1["proxy_acc"] is None          # latency-mode advances carry no acc
-    assert best1["round"] == 1
-    assert _marker(art) == {"round": 1, "mode": "latency", "vid": "r1-01",
-                            "improved": True, "best_updated": True}
-    assert history_lib.read_latest(art / "history.jsonl")["r1-01"]["outcome"] == "advanced"
-
-    # idempotency key: (round, mode) match -> pure no-op even after new history
-    out_again = advance(art)
-    assert out_again["advanced"] is False
-
-    # round 2 strictly better (above the line: latency phase) -> replacement
-    (art / "rounds" / "002").mkdir()
-    _v5_variant(art, "r2-01", round_no=2, makespan=700)
-    out2 = advance(art)
-    assert out2["advanced"] is True and out2["round"] == 2 and out2["vid"] == "r2-01"
-    assert (art / "base" / "model.onnx").read_text(encoding="utf-8") == "onnx-of-r2-01"
-    best2 = json.loads((art / "best.json").read_text(encoding="utf-8"))
-    assert best2["vid"] == "r2-01" and best2["makespan_cycles"] == 700
-
-
-@_RETIRED_V6
-def test_advance_latency_small_strict_step_also_advances(tmp_path: Path):
-    """v5 retired the absolute/relative/ratio thresholds: a 50-cycle step
-    that is STRICTLY below the incumbent is a legitimate advance."""
-    art = _v5_advance_artifacts(tmp_path)
-    (art / "best.json").write_text(json.dumps(
-        {"vid": "r0-99", "makespan_cycles": 900, "proxy_acc": None,
-         "round": 0, "profile_dir": "x"}), encoding="utf-8")
-    _v5_variant(art, "r1-01", round_no=1, makespan=850)   # 50 better, strict
-    out = advance(art)
-    assert out["advanced"] is True and out["vid"] == "r1-01"
-    assert _direction(art, 1)["improved"] is True
-
-
-@_RETIRED_V6
-def test_advance_zero_improvement_marker_and_failed_sigs(tmp_path: Path):
-    """No candidate at all (no latency_pass row under the incumbent): the
-    common actions are skipped entirely — marker-only, best.json absent,
-    direction.json records the fail evidence for the next round's rerouting."""
-    art = _v5_advance_artifacts(tmp_path)
-    _v5_variant(art, "r1-01", round_no=1, makespan=900, latency=False,
-                sig="sig:worse-a")
-    _v5_variant(art, "r1-02", round_no=1, makespan=800, probe="accuracy_fail",
-                gap=0.6, sig="sig:accfail-b", shadow_tag="r1-02")
-    out = advance(art)
-    assert out["advanced"] is False and out["vid"] is None
-    assert out["improved"] is False and out["best_updated"] is False
-    assert not (art / "best.json").exists()
-    marker = _marker(art)
-    assert marker == {"round": 1, "mode": "latency", "vid": None,
-                      "improved": False, "best_updated": False}
-    d = _direction(art, 1)
-    assert d["failed_sigs"] == ["sig:accfail-b"]   # only latest-row fails count
-    assert d["improved"] is False and d["advanced_vid"] is None
-
-
-@_RETIRED_V6
-def test_advance_latency_fail_rows_feed_failed_sigs(tmp_path: Path):
-    art = _v5_advance_artifacts(tmp_path)
-    hist = art / "history.jsonl"
-    # r1-01: latest row latency_fail (worse than the anchor incumbent)
-    _v5_variant(art, "r1-01", round_no=1, makespan=1100, latency=False,
-                sig="sig:lat-fail")
-    history_lib.append_latency(hist, "r1-01", structural_check="pass",
-                               makespan_cycles=1100, latency_gate="fail",
-                               pred_actual_ratio=None, outcome="latency_fail")
-    # r1-02: accuracy_fail probe row (no best yet -> mode stays latency)
-    _v5_variant(art, "r1-02", round_no=1, makespan=800, probe="accuracy_fail",
-                gap=0.4, sig="sig:acc-fail")
-    out = advance(art)
-    assert out["advanced"] is False
-    assert _direction(art, 1)["failed_sigs"] == ["sig:acc-fail", "sig:lat-fail"]
-
-
-@_RETIRED_V6
-def test_advance_accuracy_mode_only_accuracy_pass_advances(tmp_path: Path):
-    art = _v5_advance_artifacts(tmp_path)
-    # existing best under the line -> mode accuracy (recovery phase)
-    (art / "best.json").write_text(json.dumps(
-        {"vid": "r0-99", "makespan_cycles": 450, "proxy_acc": 0.4,
-         "round": 0, "profile_dir": "x"}), encoding="utf-8")
-    # survivor within the line but FAILING the accuracy gate -> no advance
-    _v5_variant(art, "r1-01", round_no=1, makespan=460, probe="accuracy_fail",
-                gap=0.5)
-    out = advance(art)
-    assert out["advanced"] is False and out["mode"] == "accuracy"
-    assert _marker(art)["mode"] == "accuracy"
-    assert (art / "base" / "model.onnx").read_text(encoding="utf-8") == \
-        "onnx-of-round0-base"   # base fixed: no copy without accuracy_pass
-
-
-@_RETIRED_V6
-def test_advance_accuracy_pass_winner_ranked_by_gap(tmp_path: Path):
-    art = _v5_advance_artifacts(tmp_path)
-    (art / "best.json").write_text(json.dumps(
-        {"vid": "r0-99", "makespan_cycles": 450, "proxy_acc": 0.4,
-         "round": 0, "profile_dir": "x"}), encoding="utf-8")
-    _v5_variant(art, "r1-01", round_no=1, makespan=460, probe="accuracy_pass",
-                gap=0.10)
-    _v5_variant(art, "r1-02", round_no=1, makespan=480, probe="accuracy_pass",
-                gap=0.05, shadow_tag="r1-02")
-    out = advance(art)
-    assert out["advanced"] is True and out["vid"] == "r1-02"   # smallest gap
-    best = json.loads((art / "best.json").read_text(encoding="utf-8"))
-    assert best["vid"] == "r1-02" and best["proxy_acc"] == 0.8  # accuracy-mode acc kept
-    assert best["round"] == 1
-    assert (art / "shadow" / "pkg" / "model.py").read_text(encoding="utf-8") == \
-        "# shadow r1-02\n"
-
-
-@_RETIRED_V6
-def test_advance_accuracy_tie_break_gap_then_makespan_then_vid(tmp_path: Path):
-    """The full accuracy ranking chain (gap -> makespan -> vid), direction
-    already normalized by the verdict layer: equal gaps fall through to the
-    smaller makespan, equal both to the vid order."""
-    art = _v5_advance_artifacts(tmp_path)
-    (art / "best.json").write_text(json.dumps(
-        {"vid": "r0-99", "makespan_cycles": 450, "proxy_acc": 0.4,
-         "round": 0, "profile_dir": "x"}), encoding="utf-8")
-    # equal gap 0.05, DIFFERENT makespans: the smaller makespan wins
-    _v5_variant(art, "r1-01", round_no=1, makespan=490, probe="accuracy_pass",
-                gap=0.05)
-    _v5_variant(art, "r1-02", round_no=1, makespan=470, probe="accuracy_pass",
-                gap=0.05, shadow_tag="r1-02")
-    out = advance(art)
-    assert out["vid"] == "r1-02"
-
-    # equal gap AND makespan: the vid order decides (no proxy_acc anywhere
-    # in the ranking — the v4 higher-proxy hardcode is gone)
-    art2 = _v5_advance_artifacts(tmp_path / "b")
-    (art2 / "best.json").write_text(json.dumps(
-        {"vid": "r0-99", "makespan_cycles": 450, "proxy_acc": 0.4,
-         "round": 0, "profile_dir": "x"}), encoding="utf-8")
-    _v5_variant(art2, "r1-02", round_no=1, makespan=470, probe="accuracy_pass",
-                gap=0.05, proxy_acc=0.99)      # HIGHER acc, loses on vid order
-    _v5_variant(art2, "r1-01", round_no=1, makespan=470, probe="accuracy_pass",
-                gap=0.05, proxy_acc=0.10, shadow_tag="r1-01")
-    out2 = advance(art2)
-    assert out2["vid"] == "r1-01"              # lexicographic, acc irrelevant
-
-
-@_RETIRED_V6
-def test_advance_accuracy_above_line_never_a_candidate(tmp_path: Path):
-    art = _v5_advance_artifacts(tmp_path)
-    (art / "best.json").write_text(json.dumps(
-        {"vid": "r0-99", "makespan_cycles": 450, "proxy_acc": 0.4,
-         "round": 0, "profile_dir": "x"}), encoding="utf-8")
-    # accuracy_pass but makespan ABOVE target: eliminated mechanically
-    _v5_variant(art, "r1-01", round_no=1, makespan=600, probe="accuracy_pass",
-                gap=0.02)
-    out = advance(art)
-    assert out["advanced"] is False
-    assert (art / "base" / "model.onnx").read_text(encoding="utf-8") == \
-        "onnx-of-round0-base"
-
-
-@_RETIRED_V6
-def test_advance_round_mode_idempotency_key_both_modes_once(tmp_path: Path):
-    """Same round, both phases: the (round, mode) key admits one latency and
-    one accuracy advance each; the later direction.json overwrites."""
-    art = _v5_advance_artifacts(tmp_path)
-    _v5_variant(art, "r1-01", round_no=1, makespan=450)     # <= 501: flips mode
-    # first advance runs BEFORE any best exists -> latency mode (incumbent
-    # is the anchor baseline 1000)
-    out1 = advance(art)
-    assert out1["mode"] == "latency" and out1["vid"] == "r1-01"
-    # re-run: same (round, latency) -> no-op
-    assert advance(art)["advanced"] is False
-    # now best=450 <= 501 -> accuracy mode; the vid already advanced this
-    # round (benign first-entry needs its accuracy row; without one there is
-    # no candidate) -> marker-only for the accuracy key
-    _v5_variant(art, "r1-02", round_no=1, makespan=470, probe="accuracy_fail",
-                gap=0.5, shadow_tag="r1-02")
-    out2 = advance(art)
-    assert out2["mode"] == "accuracy" and out2["advanced"] is False
-    marker = _marker(art)
-    assert (marker["round"], marker["mode"]) == (1, "accuracy")
-    # the SAME-round latency+accuracy sequence each ran exactly once
-    assert _direction(art, 1)["mode"] == "accuracy"   # later write overwrote
-
-
-@_RETIRED_V6
-def test_advance_benign_first_entry_marker_only_no_recopy(tmp_path: Path):
-    """The benign first-entry: the same-round latency-advanced best.vid
-    passes the accuracy gate. Its advanced row already exists -> NO torn
-    repair, NO copy, marker-only (vid=null, improved=false)."""
-    art = _v5_advance_artifacts(tmp_path)
-    _v5_variant(art, "r1-01", round_no=1, makespan=450)
-    advance(art)   # latency advance: best=r1-01, advanced row written
-    base_after = (art / "base" / "model.onnx").read_text(encoding="utf-8")
-    # probe passes the gate on the SAME vid (first accuracy entry)
-    hist = art / "history.jsonl"
-    history_lib.append_probe(hist, "r1-01", proxy_acc=0.9,
-                             promote_gate="pass", outcome="accuracy_pass",
-                             gap=0.05)
-    out = advance(art)   # mode=accuracy, winner==incumbent
-    assert out["advanced"] is False and out["vid"] is None
-    assert out["improved"] is False
-    assert _marker(art) == {"round": 1, "mode": "accuracy", "vid": None,
-                            "improved": False, "best_updated": False}
-    # no re-copy happened (benign: the winner row was already advanced)
-    assert (art / "base" / "model.onnx").read_text(encoding="utf-8") == base_after
-
-
-@_RETIRED_V6
-def test_advance_stale_marker_replays_under_current_mode(tmp_path: Path):
-    """marker.round < current round (crash between rounds) -> replay the
-    advance under the CURRENT mode."""
-    art = _v5_advance_artifacts(tmp_path)
-    _v5_variant(art, "r1-01", round_no=1, makespan=900)
-    advance(art)
-    (art / "rounds" / "002").mkdir()
-    _v5_variant(art, "r2-01", round_no=2, makespan=700)
-    # simulate a crash AFTER history write but BEFORE marker update
-    (art / ".round_advanced").write_text(json.dumps(
-        {"round": 1, "mode": "latency", "vid": "r1-01"}), encoding="utf-8")
-    out = advance(art)
-    assert out["advanced"] is True and out["round"] == 2
-    assert (art / "shadow" / "pkg" / "model.py").read_text(encoding="utf-8") == \
-        "# shadow r2-01\n"
-
-
-@_RETIRED_V6
-def test_advance_torn_repair_a_winner_recomputation_hits(tmp_path: Path):
-    """Torn accuracy write: best.json written for the new winner, copy and
-    advanced row missing. Recomputation re-derives the same winner -> repair
-    by best.vid (copy + append_advanced + marker)."""
-    art = _v5_advance_artifacts(tmp_path)
-    (art / "best.json").write_text(json.dumps(
-        {"vid": "r0-99", "makespan_cycles": 900, "proxy_acc": None,
-         "round": 0, "profile_dir": "x"}), encoding="utf-8")
-    _v5_variant(art, "r1-01", round_no=1, makespan=450,
-                probe="accuracy_pass", gap=0.05)
-    # crash after best.json write, before copy/advanced/marker
-    (art / "best.json").write_text(json.dumps(
-        {"vid": "r1-01", "makespan_cycles": 450, "proxy_acc": 0.8,
-         "round": 1, "profile_dir": "x"}), encoding="utf-8")
-    out = advance(art)
-    assert out["advanced"] is True and out["vid"] == "r1-01"
-    assert out["reason"] == "torn write repaired"
-    assert (art / "base" / "model.onnx").read_text(encoding="utf-8") == "onnx-of-r1-01"
-    assert history_lib.read_latest(art / "history.jsonl")["r1-01"]["outcome"] == \
-        "advanced"
-    # converged: a second run is a no-op
-    assert advance(art)["advanced"] is False
-
-
-@_RETIRED_V6
-def test_advance_torn_repair_b_latency_candidate_suppressed(tmp_path: Path):
-    """Torn LATENCY write: best.json names this round's winner; the strict
-    improvement test can never re-admit it (incumbent == winner itself), so
-    recomputation finds NO candidate — repair still completes by best.vid."""
-    art = _v5_advance_artifacts(tmp_path)
-    _v5_variant(art, "r1-01", round_no=1, makespan=700)   # above line: latency
-    # crash after best.json write, before advanced row/copy/marker
-    (art / "best.json").write_text(json.dumps(
-        {"vid": "r1-01", "makespan_cycles": 700, "proxy_acc": None,
-         "round": 1, "profile_dir": "x"}), encoding="utf-8")
-    out = advance(art)
-    assert out["advanced"] is True and out["vid"] == "r1-01"
-    assert out["reason"] == "torn write repaired"
-    assert (art / "shadow" / "pkg" / "model.py").read_text(encoding="utf-8") == \
-        "# shadow r1-01\n"
-    assert history_lib.read_latest(art / "history.jsonl")["r1-01"]["outcome"] == \
-        "advanced"
-    marker = _marker(art)
-    assert (marker["round"], marker["mode"]) == (1, "latency")
-    assert marker["improved"] is True
-
-
-@_RETIRED_V6
-def test_advance_worse_promotion_keeps_base(tmp_path: Path):
-    art = _v5_advance_artifacts(tmp_path)
-    _v5_variant(art, "r1-01", round_no=1, makespan=900)
-    advance(art)
-    (art / "rounds" / "002").mkdir()
-    _v5_variant(art, "r2-01", round_no=2, makespan=950)  # worse than 900
-    out = advance(art)
-    assert out["advanced"] is False and out["vid"] is None
-    assert (art / "base" / "model.onnx").read_text(encoding="utf-8") == "onnx-of-r1-01"
-    best = json.loads((art / "best.json").read_text(encoding="utf-8"))
-    assert best["vid"] == "r1-01" and best["round"] == 1
 
 
 # ── analyze ───────────────────────────────────────────────────────────────────
@@ -1640,7 +1097,8 @@ def test_check_contracts_gate_rejects_retired_quickrun_status(tmp_path: Path):
 def test_check_contracts_gate_rejects_zero_based_epoch_sequence(tmp_path: Path):
     """A pattern that matches the quickrun log but extracts 0-based epochs
     (0, 1, ...) passes every syntax/boundary check yet breaks every
-    downstream consumer (metric_curve extract, stop_at_epoch) only after the
+    downstream consumer (metric_curve extract and the variant watchdogs)
+    only after the
     full baseline has already run - the gate must re-run the extraction on
     the REAL quickrun log and fail here, at the contract stage."""
     art = _contracts_workspace(tmp_path)
@@ -2046,9 +1504,10 @@ def test_prof_opt_execution_nodes_use_thin_output_envelopes():
         "po_flatten": {"flatten_passed", "readiness_path", "error",
                        "generated_artifacts"},
         "po_baseline": {"status", "error", "generated_artifacts"},
-        "po_propose": {"status", "error", "generated_artifacts"},
-        "po_probe": {"status", "error", "generated_artifacts"},
-        "po_full_train": {"status", "error", "generated_artifacts"},
+        "po_propose": {"status", "error", "repair_count",
+                       "generated_artifacts"},
+        "po_probe": {"status", "error", "device", "epoch1_ok",
+                     "generated_artifacts"},
     }
     for node in wf["nodes"]:
         if node["name"] not in expected:
@@ -2057,224 +1516,6 @@ def test_prof_opt_execution_nodes_use_thin_output_envelopes():
         props = set(schema["properties"])
         assert set(schema["required"]) == props
         assert props == expected[node["name"]], node["name"]
-
-
-def test_check_full_train_emit_gate(tmp_path: Path):
-    """The po_full_train pre-return gate checks terminal artifacts, not
-    outcome quality."""
-    art = tmp_path / "art"
-    final = art / "final"
-    final.mkdir(parents=True)
-    budget = {"epochs": 1, "seed": 0,
-              "data": {"dataset_knob": None, "data_value": None}}
-    (art / "contracts.json").write_text(json.dumps({
-        "train": {"ckpt_output_rule": "{out_dir}/ckpt.pth"},
-        "full_train_budget": budget,
-    }), encoding="utf-8")
-    (final / "final_acc.json").write_text(json.dumps({
-        "vid": "r1-01", "final_acc": 0.9, "baseline_full_acc": 0.8,
-        "baseline_full_acc_source": "baseline",
-        "full_train_budget": budget, "within_budget": True,
-        "metric_direction": "higher_better",
-    }), encoding="utf-8")
-    (final / "model.onnx").write_bytes(b"onnx")
-    (final / "train_status.md").write_text("training\n", encoding="utf-8")
-    (final / "final_metrics.jsonl").write_text(
-        '{"epoch": 1, "metric": 0.9}\n', encoding="utf-8")
-    (final / "ckpt.pth").write_bytes(b"weights")
-
-    proc = subprocess.run(
-        [sys.executable, str(_SCRIPTS / "check_full_train_emit.py"),
-         "--artifacts", str(art)],
-        capture_output=True, text=True, timeout=60)
-    assert proc.returncode == 0, proc.stderr
-
-    bad = json.loads((final / "final_acc.json").read_text(encoding="utf-8"))
-    del bad["final_acc"]
-    (final / "final_acc.json").write_text(json.dumps(bad), encoding="utf-8")
-    proc2 = subprocess.run(
-        [sys.executable, str(_SCRIPTS / "check_full_train_emit.py"),
-         "--artifacts", str(art)],
-        capture_output=True, text=True, timeout=60)
-    assert proc2.returncode == 1
-    assert "missing final_acc" in proc2.stderr
-
-
-@_RETIRED_V6
-def test_check_propose_emit_gate(tmp_path: Path):
-    """The propose pre-return gate checks round disk closure, not verdict
-    quality."""
-    art = tmp_path / "art"
-    (art / "scripts").mkdir(parents=True)
-    shutil.copy(_SCRIPTS / "round_state.py", art / "scripts" / "round_state.py")
-    shutil.copy(_SCRIPTS / "history_lib.py", art / "scripts" / "history_lib.py")
-    (art / "base").mkdir(parents=True)
-    (art / "base" / "origin_anchor.json").write_text(
-        json.dumps({"target_cycles": 100}), encoding="utf-8")
-    (art / "profile_mode.json").write_text(
-        json.dumps({"mode": "placeholder"}), encoding="utf-8")
-    (art / "base" / "bottleneck_analysis.json").write_text(json.dumps({
-        "schema_version": 1, "base_report": "base/bottleneck_report.json",
-        "summary": "s",
-        "top_bottlenecks": [{"name": "P1", "op_type": "Erf", "cycles": 1,
-                             "analysis": "a"}]}), encoding="utf-8")
-    rd = art / "rounds" / "001"
-    rd.mkdir(parents=True)
-    proposals = {
-        "round": 1, "exhausted": False, "filtered_count": 0,
-        "exhausted_rationale": [],
-        "proposals": [{
-            "vid": "r1-01", "change_sig": "sig",
-            "predicted_delta_cycles": -10, "edited_files": ["pkg/model.py"],
-            "target_pattern_id": "P1", "predicted_acc_impact": "low",
-            "sota_reference": "ref",
-        }],
-    }
-    (rd / "proposals.json").write_text(json.dumps(proposals), encoding="utf-8")
-    (art / "history.jsonl").write_text(
-        '{"vid": "r1-01", "round": 1, "change_sig": "sig"}\n',
-        encoding="utf-8")
-    (rd / "verdicts.jsonl").write_text('{"vid": "r1-01"}\n', encoding="utf-8")
-    (rd / "direction.json").write_text('{}', encoding="utf-8")
-    (rd / "analysis.md").write_text("# latency\n", encoding="utf-8")
-    (art / ".round_advanced").write_text(
-        '{"round": 1, "mode": "latency"}', encoding="utf-8")
-
-    proc = subprocess.run(
-        [sys.executable, str(_SCRIPTS / "check_propose_emit.py"),
-         "--artifacts", str(art)],
-        capture_output=True, text=True, timeout=60)
-    assert proc.returncode == 0, proc.stderr
-
-    # placeholder mode: a target_pattern_id outside the analysis list fails
-    proposals["proposals"][0]["target_pattern_id"] = "P9"
-    (rd / "proposals.json").write_text(json.dumps(proposals), encoding="utf-8")
-    proc1b = subprocess.run(
-        [sys.executable, str(_SCRIPTS / "check_propose_emit.py"),
-         "--artifacts", str(art)],
-        capture_output=True, text=True, timeout=60)
-    assert proc1b.returncode == 1
-    assert "not a name in base/bottleneck_analysis.json" in proc1b.stderr
-
-    (rd / "proposals.json").unlink()
-    proc2 = subprocess.run(
-        [sys.executable, str(_SCRIPTS / "check_propose_emit.py"),
-         "--artifacts", str(art)],
-        capture_output=True, text=True, timeout=60)
-    assert proc2.returncode == 1
-    assert "proposals.json missing" in proc2.stderr
-
-
-@_RETIRED_V6
-def test_check_propose_emit_mfu_freeform_target(tmp_path: Path):
-    """mfu mode: target_pattern_id is a free-form label and the gate never
-    requires the placeholder bottleneck_analysis.json."""
-    art = tmp_path / "art"
-    (art / "scripts").mkdir(parents=True)
-    shutil.copy(_SCRIPTS / "round_state.py", art / "scripts" / "round_state.py")
-    shutil.copy(_SCRIPTS / "history_lib.py", art / "scripts" / "history_lib.py")
-    (art / "base").mkdir(parents=True)
-    (art / "base" / "origin_anchor.json").write_text(
-        json.dumps({"target_cycles": 100}), encoding="utf-8")
-    (art / "profile_mode.json").write_text(
-        json.dumps({"mode": "mfu"}), encoding="utf-8")
-    rd = art / "rounds" / "001"
-    rd.mkdir(parents=True)
-    (rd / "proposals.json").write_text(json.dumps({
-        "round": 1, "exhausted": False, "filtered_count": 0,
-        "exhausted_rationale": [],
-        "proposals": [{
-            "vid": "r1-01", "change_sig": "sig",
-            "predicted_delta_cycles": -10, "edited_files": ["pkg/model.py"],
-            "target_pattern_id": "dma-stall", "predicted_acc_impact": "low",
-            "sota_reference": "ref",
-        }],
-    }), encoding="utf-8")
-    (art / "history.jsonl").write_text(
-        '{"vid": "r1-01", "round": 1, "change_sig": "sig"}\n',
-        encoding="utf-8")
-    (rd / "verdicts.jsonl").write_text('{"vid": "r1-01"}\n', encoding="utf-8")
-    (rd / "direction.json").write_text('{}', encoding="utf-8")
-    (rd / "analysis.md").write_text("# latency\n", encoding="utf-8")
-    (art / ".round_advanced").write_text(
-        '{"round": 1, "mode": "latency"}', encoding="utf-8")
-
-    proc = subprocess.run(
-        [sys.executable, str(_SCRIPTS / "check_propose_emit.py"),
-         "--artifacts", str(art)],
-        capture_output=True, text=True, timeout=60)
-    assert proc.returncode == 0, proc.stderr
-
-
-@_RETIRED_V6
-def test_check_probe_emit_gate_latency_passthrough(tmp_path: Path):
-    """Latency passthrough only needs the proposal node's advance marker."""
-    art = tmp_path / "art"
-    (art / "scripts").mkdir(parents=True)
-    shutil.copy(_SCRIPTS / "round_state.py", art / "scripts" / "round_state.py")
-    shutil.copy(_SCRIPTS / "history_lib.py", art / "scripts" / "history_lib.py")
-    (art / "base").mkdir(parents=True)
-    (art / "base" / "origin_anchor.json").write_text(
-        json.dumps({"target_cycles": 100}), encoding="utf-8")
-    (art / "rounds" / "001").mkdir(parents=True)
-    (art / ".round_advanced").write_text(
-        '{"round": 1, "mode": "latency"}', encoding="utf-8")
-
-    proc = subprocess.run(
-        [sys.executable, str(_SCRIPTS / "check_probe_emit.py"),
-         "--artifacts", str(art)],
-        capture_output=True, text=True, timeout=60)
-    assert proc.returncode == 0, proc.stderr
-
-    (art / ".round_advanced").write_text(
-        '{"round": 1, "mode": "accuracy"}', encoding="utf-8")
-    proc2 = subprocess.run(
-        [sys.executable, str(_SCRIPTS / "check_probe_emit.py"),
-         "--artifacts", str(art)],
-        capture_output=True, text=True, timeout=60)
-    assert proc2.returncode == 1
-    assert "does not record (round, latency)" in proc2.stderr
-
-
-@_RETIRED_V6
-def test_check_probe_emit_gate_accuracy_first_entry(tmp_path: Path):
-    """Accuracy first entry requires the best vid to have a terminal probe
-    row in probe_results.jsonl."""
-    art = tmp_path / "art"
-    (art / "scripts").mkdir(parents=True)
-    shutil.copy(_SCRIPTS / "round_state.py", art / "scripts" / "round_state.py")
-    shutil.copy(_SCRIPTS / "history_lib.py", art / "scripts" / "history_lib.py")
-    (art / "base").mkdir(parents=True)
-    (art / "base" / "origin_anchor.json").write_text(
-        json.dumps({"target_cycles": 100}), encoding="utf-8")
-    (art / "best.json").write_text(
-        json.dumps({"vid": "r1-01", "makespan_cycles": 50}), encoding="utf-8")
-    rd = art / "rounds" / "001"
-    rd.mkdir(parents=True)
-    (art / "history.jsonl").write_text(
-        '{"vid": "r1-01", "round": 1, "outcome": "latency_pass"}\n'
-        '{"vid": "r1-01", "round": 1, "outcome": "accuracy_pass"}\n',
-        encoding="utf-8")
-    (rd / "probe_results.jsonl").write_text(
-        '{"vid": "r1-01", "outcome": "accuracy_pass"}\n', encoding="utf-8")
-    (rd / "analysis.md").write_text("# accuracy\n", encoding="utf-8")
-    (rd / "direction.json").write_text('{}', encoding="utf-8")
-    (art / ".round_advanced").write_text(
-        '{"round": 1, "mode": "accuracy"}', encoding="utf-8")
-
-    proc = subprocess.run(
-        [sys.executable, str(_SCRIPTS / "check_probe_emit.py"),
-         "--artifacts", str(art)],
-        capture_output=True, text=True, timeout=60)
-    assert proc.returncode == 0, proc.stderr
-
-    (rd / "probe_results.jsonl").write_text("", encoding="utf-8")
-    proc2 = subprocess.run(
-        [sys.executable, str(_SCRIPTS / "check_probe_emit.py"),
-         "--artifacts", str(art)],
-        capture_output=True, text=True, timeout=60)
-    assert proc2.returncode == 1
-    assert "probe_results.jsonl missing or empty" in proc2.stderr
 
 
 def test_baseline_chain_binds_training_to_claimed_device(tmp_path: Path):
@@ -2926,24 +2167,22 @@ def test_reuse_check_matching_lock_reaches_reuse(tmp_path: Path):
     assert "unreadable" not in proc.stderr
 
 
-def test_reuse_check_mismatch_is_promotion_history_guidance(tmp_path: Path):
-    """The readable-but-mismatched state is DESIGN BEHAVIOR on a workspace
-    with a promotion history: after a round advanced, the shadow tree moved
-    forward while BASELINE.lock still anchors the original baseline. The
-    failure copy must say exactly that (cross-run reuse holds only for
-    zero-promotion workspaces) and point at fresh_start=true — not a cryptic
-    anchor error."""
+def test_reuse_check_mismatch_is_anchor_change_guidance(tmp_path: Path):
+    """The readable-but-mismatched state is DESIGN BEHAVIOR when the anchor
+    truly changed: in v6 the base shadow never moves forward (there is no
+    promotion history), so a shadow that drifted from BASELINE.lock means
+    the model/ckpt anchor itself changed. The failure copy must say exactly
+    that and point at fresh_start=true — not a cryptic anchor error."""
     art = _reusable_ws(tmp_path)
-    # the promoted round replaced the shadow model; the lock still anchors v0
+    # the shadow model drifted from what the lock anchors
     (art / "shadow" / "pkg" / "model.py").write_text(
-        "# model v1 (promoted)\n", encoding="utf-8")
+        "# model v1 (changed)\n", encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(_REUSE_SH), "model.py", "", "0"],
         capture_output=True, text=True, timeout=60, env=_reuse_env(art))
     assert proc.returncode == 3
     assert "does not match" in proc.stderr
-    assert "promotion history" in proc.stderr
-    assert "zero promotions" in proc.stderr
+    assert "never moves forward" in proc.stderr
     assert "fresh_start=true" in proc.stderr
     assert "unreadable" not in proc.stderr   # states stay distinguishable
 
@@ -3154,7 +2393,7 @@ def test_deploy_scripts_retires_orphan_scripts(tmp_path: Path):
     assert json.loads(proc2.stdout)["orphans_removed"] == 0
 
 
-# ── v4 shared layer: gate_node syntax, metric_curve@k, stop_at_epoch ─────────
+# ── v4 shared layer: gate_node syntax, metric_curve@k ────────────────────────
 
 def test_gate_node_sh_parses_after_quote_fix():
     """D-V4-15: the --max-rounds argument had a transposed quote/paren
@@ -3225,322 +2464,6 @@ def test_metric_curve_compare_pins_depth_and_reports_anchor(tmp_path: Path):
     payload = json.loads(proc.stdout)
     assert payload["at_epoch"] == 2 and payload["epoch"] == 2
     assert payload["baseline_path"] == str(base)
-
-
-@_RETIRED_V6
-def test_history_probe_row_optional_eval_fields(tmp_path: Path):
-    """D-V4-18: probe rows carry optional eval/monitor annotations — written
-    only when passed, rejected when unknown, and NEVER part of the dedup
-    config fingerprint (an eval annotation must not reopen a same-config
-    probe_insufficient sig)."""
-    hist = tmp_path / "history.jsonl"
-    row = history_lib.append_probe(
-        hist, "r1-01", proxy_acc=0.83, promote_gate="pass", outcome="promoted",
-        gap=0.03, eval_skipped_no_epoch_ckpt=True, monitor_failed=False,
-        eval_acc=0.9, eval_failed=False)
-    assert row["eval_skipped_no_epoch_ckpt"] is True
-    assert row["eval_acc"] == 0.9
-    stored = history_lib.read_rows(hist)[0]
-    assert set(stored) >= set(history_lib.PROBE_FIELDS)
-    assert stored["monitor_failed"] is False
-    assert stored["gap"] == 0.03
-
-    # omitted optionals stay OUT of the row (old rows coexist harmlessly)
-    hist2 = tmp_path / "h2.jsonl"
-    history_lib.append_probe(hist2, "r1-01", proxy_acc=0.5,
-                             promote_gate="fail", outcome="probe_insufficient")
-    assert "eval_acc" not in history_lib.read_rows(hist2)[0]
-
-    # unknown fields still fail loud (closed field set)
-    with pytest.raises(TypeError):
-        history_lib.append_probe(hist2, "r1-02", proxy_acc=0.5,
-                                 promote_gate="fail", outcome="probe_insufficient",
-                                 eval_bonus=1)
-
-    # fingerprint unchanged: same probe config + eval annotations -> blocked
-    hist3 = tmp_path / "h3.jsonl"
-    _write_sig_history(hist3, "act:swap:m", ["probe_insufficient"],
-                       probe_max_steps=None, probe_data_value=None)
-    history_lib.append_probe(hist3, "r1-01", proxy_acc=0.4,
-                             promote_gate="fail", outcome="probe_insufficient",
-                             eval_failed=True)
-    state = history_lib.dedup_state(hist3, "act:swap:m", 1, None, None)
-    assert state["blocked"] is True
-    reopened = history_lib.dedup_state(hist3, "act:swap:m", 2, None, None)
-    assert reopened["blocked"] is False
-
-
-# ── stop_at_epoch (D-V4-3): stop-at-k process-group kill ──────────────────────
-
-_STOP_SH = _SCRIPTS / "stop_at_epoch.sh"
-
-
-def _stop_ws(tmp_path: Path, *, pattern: str | None = None) -> Path:
-    ws = tmp_path / "ws"
-    ws.mkdir(parents=True)
-    rule = {"kind": "stdout_regex",
-            "pattern": pattern or r"epoch (?P<epoch>\d+) loss=(?P<metric>[0-9.]+)"}
-    (ws / "contracts.json").write_text(json.dumps(
-        {"train": {"epoch_metric_extraction": rule}}), encoding="utf-8")
-    return ws
-
-
-def _write_worker(ws: Path, body: str) -> Path:
-    worker = ws / "worker.py"
-    worker.write_text(body, encoding="utf-8")
-    return worker
-
-
-# the wrapper form the probe node pins: group leader writes pid/rc and does
-# NOT exec (pid/rc each have their own writer); start_new_session = setsid
-def _launch_worker(ws: Path, worker: Path, log: Path):
-    pid, rc = ws / "pid", ws / "rc"
-    return subprocess.Popen(
-        ["bash", "-c",
-         f'echo $$ > "{pid}"; python3 "{worker}" "{log}"; echo $? > "{rc}"'],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        start_new_session=True)
-
-
-def _kill_group(ws: Path):
-    pid_file = ws / "pid"
-    if pid_file.is_file():
-        pid = pid_file.read_text(encoding="utf-8").strip()
-        if pid.isdigit():
-            subprocess.run(["kill", "-KILL", f"-{pid}"], capture_output=True)
-
-
-def _run_stop(ws: Path, log: Path, stop_epoch: int, *extra: str):
-    return subprocess.run(
-        ["bash", str(_STOP_SH), "--log", str(log),
-         "--contract", str(ws / "contracts.json"),
-         "--stop-epoch", str(stop_epoch), "--pid-file", str(ws / "pid"),
-         *extra],
-        capture_output=True, text=True, timeout=60)
-
-
-def test_stop_at_epoch_kills_group_and_reparses_actual_depth(tmp_path: Path):
-    """The core kill protocol: TERM -> graceful handler writes MORE epochs ->
-    the frozen-log re-parse reports the ACTUAL trained depth (3), never the
-    stop epoch (1) — understating the comparison depth is the false-reject
-    bug D-V4-3 exists to prevent."""
-    ws = _stop_ws(tmp_path)
-    log = ws / "train.log"
-    worker = _write_worker(ws, f'''
-import signal, sys, time
-def w(line):
-    with open({str(log)!r}, "a") as fh:
-        fh.write(line)
-w("epoch 1 loss=0.5\\n")
-def on_term(signum, frame):
-    w("epoch 2 loss=0.45\\n")
-    w("epoch 3 loss=0.40\\n")
-    sys.exit(0)
-signal.signal(signal.SIGTERM, on_term)
-time.sleep(120)
-''')
-    _launch_worker(ws, worker, log)
-    for _ in range(50):
-        if log.is_file() and "epoch 1" in log.read_text(encoding="utf-8"):
-            break
-        time.sleep(0.1)
-
-    proc = _run_stop(ws, log, 1, "--expect", "worker.py")
-    assert proc.returncode == 0, proc.stderr
-    status = json.loads(proc.stdout)
-    assert status["status"] == "killed"
-    assert status["stopped_at_epoch"] == 3    # actual parsed depth, NOT k=1
-    assert status["rc"] is None               # killed branch: rc stays null
-    on_disk = json.loads((ws / "stop_status.json").read_text(encoding="utf-8"))
-    assert on_disk == status
-
-    # idempotent: a second call replays the terminal record verbatim (never
-    # kills again — the group is gone, a reused pid must not be signalled)
-    proc2 = _run_stop(ws, log, 1)
-    assert proc2.returncode == 0, proc2.stderr
-    assert json.loads(proc2.stdout) == status
-
-
-def test_stop_at_epoch_escalates_to_kill_after_grace(tmp_path: Path):
-    """A TERM-immune worker survives the 10s grace -> KILL takes the group."""
-    ws = _stop_ws(tmp_path)
-    log = ws / "train.log"
-    worker = _write_worker(ws, f'''
-import signal, time
-signal.signal(signal.SIGTERM, signal.SIG_IGN)
-with open({str(log)!r}, "a") as fh:
-    fh.write("epoch 1 loss=0.5\\n")
-time.sleep(300)
-''')
-    _launch_worker(ws, worker, log)
-    for _ in range(50):
-        if log.is_file() and "epoch 1" in log.read_text(encoding="utf-8"):
-            break
-        time.sleep(0.1)
-
-    started = time.monotonic()
-    proc = _run_stop(ws, log, 1, "--expect", "worker.py")
-    elapsed = time.monotonic() - started
-    assert proc.returncode == 0, proc.stderr
-    status = json.loads(proc.stdout)
-    assert status["status"] == "killed"
-    assert status["stopped_at_epoch"] == 1
-    assert elapsed >= 10          # the grace window really elapsed
-    assert elapsed < 45           # ...but KILL ended it, no unbounded hang
-
-
-def test_stop_at_epoch_natural_done_records_rc_and_monitor_flag(tmp_path: Path):
-    """Worker finished on its own: natural_done + rc; epochs BEYOND k mark
-    monitor_failed (the kill never landed) while an exact-k finish does not."""
-    ws = _stop_ws(tmp_path)
-    log = ws / "train.log"
-    worker = _write_worker(ws, f'''
-with open({str(log)!r}, "a") as fh:
-    fh.write("epoch 1 loss=0.5\\nepoch 2 loss=0.45\\nepoch 3 loss=0.4\\n")
-''')
-    _launch_worker(ws, worker, log)
-    for _ in range(100):
-        if (ws / "rc").is_file():
-            break
-        time.sleep(0.1)
-
-    proc = _run_stop(ws, log, 1)
-    assert proc.returncode == 0, proc.stderr
-    status = json.loads(proc.stdout)
-    assert status["status"] == "natural_done"
-    assert status["stopped_at_epoch"] == 3
-    assert status["rc"] == 0
-    assert status["monitor_failed"] is True   # ran to 3, kill depth was 1
-
-    # exact-depth finish: 1 epoch trained, stop depth 1 -> no monitor flag
-    ws2 = _stop_ws(tmp_path / "exact")
-    log2 = ws2 / "train.log"
-    worker2 = _write_worker(ws2, f'''
-with open({str(log2)!r}, "a") as fh:
-    fh.write("epoch 1 loss=0.5\\n")
-''')
-    _launch_worker(ws2, worker2, log2)
-    for _ in range(100):
-        if (ws2 / "rc").is_file():
-            break
-        time.sleep(0.1)
-    proc2 = _run_stop(ws2, log2, 1)
-    status2 = json.loads(proc2.stdout)
-    assert status2["status"] == "natural_done"
-    assert status2["monitor_failed"] is False
-
-
-def test_stop_at_epoch_waits_below_depth_and_fails_loud_on_orphans(tmp_path: Path):
-    # below the stop depth + group alive -> waiting (caller keeps polling);
-    # a not-yet-created log is the same waiting state at epoch 0
-    ws = _stop_ws(tmp_path)
-    log = ws / "train.log"
-    worker = _write_worker(ws, f'''
-import time
-time.sleep(3)
-with open({str(log)!r}, "a") as fh:
-    fh.write("epoch 1 loss=0.5\\n")
-time.sleep(60)
-''')
-    _launch_worker(ws, worker, log)
-    time.sleep(0.5)
-    proc = _run_stop(ws, log, 1)
-    assert proc.returncode == 0, proc.stderr
-    assert json.loads(proc.stdout) == {"status": "waiting", "max_epoch": 0}
-    _kill_group(ws)
-
-    # dead group without rc and without stop_status -> fail loud (crash
-    # scene, no terminal state to fabricate)
-    ws2 = _stop_ws(tmp_path / "crash")
-    log2 = ws2 / "train.log"
-    log2.write_text("epoch 1 loss=0.5\n", encoding="utf-8")
-    dead = subprocess.Popen(["bash", "-c", "exit 0"], start_new_session=True)
-    dead.wait()
-    (ws2 / "pid").write_text(str(dead.pid), encoding="utf-8")
-    proc2 = _run_stop(ws2, log2, 1)
-    assert proc2.returncode == 2
-    assert "without an rc file" in proc2.stderr
-
-
-def test_stop_at_epoch_refuses_foreign_pid(tmp_path: Path):
-    """/proc cmdline attribution: a pid file naming an unrelated live group
-    must NEVER be signalled (pid reuse / wrong pid file)."""
-    ws = _stop_ws(tmp_path)
-    log = ws / "train.log"
-    log.write_text("epoch 1 loss=0.5\n", encoding="utf-8")
-    foreign = subprocess.Popen(["sleep", "300"], start_new_session=True)
-    try:
-        (ws / "pid").write_text(str(foreign.pid), encoding="utf-8")
-        proc = _run_stop(ws, log, 1)
-        assert proc.returncode == 2
-        assert "refusing to kill" in proc.stderr
-        assert foreign.poll() is None      # the foreign process survived
-    finally:
-        foreign.kill()
-        foreign.wait()
-
-
-def test_stop_at_epoch_rejects_pattern_and_shares_metric_curve_surface(tmp_path: Path):
-    """E3-06: --pattern is not an argument (single source), and the epoch
-    parse shares metric_curve extract's implementation — same depths under
-    the same contract, same drift when the pattern changes, same error
-    surface when the contract lacks the pattern."""
-    # --pattern rejected with a pointed message
-    proc = subprocess.run(
-        ["bash", str(_STOP_SH), "--log", "x", "--contract", "c.json",
-         "--stop-epoch", "1", "--pid-file", "p", "--pattern", "p"],
-        capture_output=True, text=True, timeout=30)
-    assert proc.returncode == 2
-    assert "--pattern is not accepted" in proc.stderr
-
-    log = tmp_path / "train.log"
-    log.write_text("epoch 1 loss=0.5\nepoch 2 loss=0.45\nepoch 3 loss=0.4\n"
-                   "acc 1 metric=0.9\n", encoding="utf-8")
-
-    def extract_depth(ws: Path) -> int:
-        out = ws / "extract.jsonl"
-        proc = subprocess.run(
-            [sys.executable, str(_SCRIPTS / "metric_curve.py"), "extract",
-             "--contract", str(ws / "contracts.json"), "--log", str(log),
-             "--out", str(out)],
-            capture_output=True, text=True, timeout=60)
-        assert proc.returncode == 0, proc.stderr
-        rows = [json.loads(line) for line in
-                out.read_text(encoding="utf-8").splitlines() if line.strip()]
-        return max(r["epoch"] for r in rows)
-
-    def stop_depth(ws: Path) -> int:
-        # finished worker (rc written) -> natural_done exposes the parsed depth
-        (ws / "rc").write_text("0", encoding="utf-8")
-        done = subprocess.Popen(["bash", "-c", "exit 0"], start_new_session=True)
-        done.wait()
-        (ws / "pid").write_text(str(done.pid), encoding="utf-8")
-        proc = _run_stop(ws, log, 1)
-        assert proc.returncode == 0, proc.stderr
-        return json.loads(proc.stdout)["stopped_at_epoch"]
-
-    ws = _stop_ws(tmp_path / "a")
-    assert extract_depth(ws) == 3 and stop_depth(ws) == 3
-
-    # pattern change: both sides switch TOGETHER (the extra 'acc' line only
-    # matches the second pattern — the shared parse must agree on 1 vs 3)
-    ws2 = _stop_ws(tmp_path / "b", pattern=r"acc (?P<epoch>\d+) metric=(?P<metric>[0-9.]+)")
-    assert extract_depth(ws2) == 1 and stop_depth(ws2) == 1
-
-    # contract lacking the pattern: the SAME error surface, both exit 2
-    bad = tmp_path / "bad"
-    bad.mkdir()
-    (bad / "contracts.json").write_text(json.dumps({"train": {}}), encoding="utf-8")
-    proc_stop = _run_stop(bad, log, 1)
-    assert proc_stop.returncode == 2
-    proc_ext = subprocess.run(
-        [sys.executable, str(_SCRIPTS / "metric_curve.py"), "extract",
-         "--contract", str(bad / "contracts.json"), "--log", str(log),
-         "--out", str(tmp_path / "x.jsonl")],
-        capture_output=True, text=True, timeout=60)
-    assert proc_ext.returncode == 2
-    surface = "lacks train.epoch_metric_extraction.pattern"
-    assert surface in proc_stop.stderr and surface in proc_ext.stderr
 
 
 # ── check_bottleneck (SPEC §5): closed schema + referential subset ───────────
@@ -4228,204 +3151,6 @@ def _run_recheck(art: Path) -> subprocess.CompletedProcess:
         capture_output=True, text=True, timeout=300, env=env)
 
 
-@_RETIRED_V6
-def test_run_latency_recheck_migration_regression(tmp_path: Path):
-    """The batch verify semantics on the reference fixture: two-layer
-    declaration check, re-profile, STRICT-improvement gate (568 < incumbent
-    712 — the v5 judgement has no absolute/relative/ratio thresholds), typed
-    history rows, and the calibrated verdict JSONs."""
-    art = _recheck_workspace(tmp_path)
-    proc = _run_recheck(art)
-    assert proc.returncode == 0, proc.stderr
-    out = json.loads(proc.stdout)
-    assert out["status"] == "executed"
-    assert out["verdicts_count"] == 2
-    assert out["latency_pass_count"] == 1
-    assert out["gate_mode"] == "latency"
-    assert out["summary"] == "2 verdicts [latency_pass=1 structural_mismatch=1]"
-    assert out["verdicts_path"] == str(art / "rounds" / "001" / "verdicts.jsonl")
-    assert json.loads((art / "variants" / "r1-01" / "verdict.json")
-                      .read_text(encoding="utf-8")) == _T8_PASS_VERDICT
-    assert json.loads((art / "variants" / "r1-02" / "verdict.json")
-                      .read_text(encoding="utf-8")) == _T8_MISMATCH_VERDICT
-
-    latest = history_lib.read_latest(art / "history.jsonl")
-    assert latest["r1-01"]["outcome"] == "latency_pass"
-    assert latest["r1-01"]["makespan_cycles"] == 568
-    assert latest["r1-01"]["pred_actual_ratio"] == 1.0   # informational only
-    assert latest["r1-02"]["outcome"] == "structural_mismatch"
-    # verdicts.jsonl is an append-only audit stream of both verdicts
-    rows = [json.loads(line) for line in
-            (art / "rounds" / "001" / "verdicts.jsonl").read_text(
-                encoding="utf-8").splitlines() if line.strip()]
-    assert [r["vid"] for r in rows] == ["r1-01", "r1-02"]
-
-    # skip key = verdict.json presence: a re-run over settled verdicts is a no-op
-    proc2 = _run_recheck(art)
-    assert proc2.returncode == 0, proc2.stderr
-    assert json.loads(proc2.stdout)["verdicts_count"] == 0
-
-    # the repair-loop pin: deleting a rejected variant's verdict re-opens it
-    # for a FRESH recheck (the node does exactly this before re-verifying a
-    # repaired variant)
-    (art / "variants" / "r1-02" / "verdict.json").unlink()
-    proc3 = _run_recheck(art)
-    assert proc3.returncode == 0, proc3.stderr
-    out3 = json.loads(proc3.stdout)
-    assert out3["verdicts_count"] == 1
-    assert json.loads((art / "variants" / "r1-02" / "verdict.json")
-                      .read_text(encoding="utf-8")) == _T8_MISMATCH_VERDICT
-
-    # empty profiler input (the workflow default): the script's own
-    # placeholder default applies — an omitted --profiler is NOT a hard
-    # error and produces the SAME verdicts (regression: the empty-string
-    # argument used to die at argparse)
-    for vid in ("r1-01", "r1-02"):
-        (art / "variants" / vid / "verdict.json").unlink()
-    env = dict(os.environ)
-    env["ORCA_ARTIFACTS_DIR"] = str(art)
-    proc4 = subprocess.run(["bash", str(_RECHECK_SH)],
-                           capture_output=True, text=True, timeout=300, env=env)
-    assert proc4.returncode == 0, proc4.stderr
-    out4 = json.loads(proc4.stdout)
-    assert out4["verdicts_count"] == 2 and out4["latency_pass_count"] == 1
-    assert json.loads((art / "variants" / "r1-01" / "verdict.json")
-                      .read_text(encoding="utf-8")) == _T8_PASS_VERDICT
-    assert json.loads((art / "variants" / "r1-02" / "verdict.json")
-                      .read_text(encoding="utf-8")) == _T8_MISMATCH_VERDICT
-
-
-@_RETIRED_V6
-def test_run_latency_recheck_small_strict_step_passes(tmp_path: Path):
-    """v5 retired the 100-cycle / 1% / ratio thresholds: a variant only ONE
-    cycle below the incumbent is a legitimate latency_pass (the pre-v5 gate
-    rejected exactly this small-step improvement)."""
-    art = _recheck_workspace(tmp_path, mode="mfu", best={
-        "vid": "r0-99", "makespan_cycles": 711, "proxy_acc": None,
-        "round": 0, "profile_dir": "x"})    # incumbent = best.json = 711
-    import placeholder_profiler  # noqa: E402
-    vdir = art / "variants" / "r1-01"
-    placeholder_profiler.profile(vdir / "onnx" / "model.onnx", vdir / "profile")
-    summary_path = vdir / "profile" / "profile_summary.json"
-    doc = json.loads(summary_path.read_text(encoding="utf-8"))
-    doc["makespan_cycles"] = 710            # exactly ONE cycle better
-    summary_path.write_text(json.dumps(doc), encoding="utf-8")
-    env = dict(os.environ)
-    env["ORCA_ARTIFACTS_DIR"] = str(art)
-    proc = subprocess.run(["bash", str(_RECHECK_SH)], capture_output=True,
-                          text=True, timeout=300, env=env)
-    assert proc.returncode == 0, proc.stderr
-    verdict = json.loads((vdir / "verdict.json").read_text(encoding="utf-8"))
-    assert verdict["makespan_cycles"] == 710
-    assert verdict["incumbent_cycles"] == 711
-    assert verdict["outcome"] == "latency_pass"   # strict improvement is enough
-
-
-@_RETIRED_V6
-def test_run_latency_recheck_recovery_mode_uses_target_line(tmp_path: Path):
-    """Accuracy (recovery) gate mode: the frozen target line is the filter —
-    a variant ABOVE the line is eliminated even though it beats the
-    incumbent; the gate mode comes from round_state (best under the line)."""
-    art = _recheck_workspace(tmp_path, best={
-        "vid": "r0-99", "makespan_cycles": 300, "proxy_acc": 0.4,
-        "round": 0, "profile_dir": "x"})   # 300 <= 357 -> accuracy mode
-    env = dict(os.environ)
-    env["ORCA_ARTIFACTS_DIR"] = str(art)
-    proc = subprocess.run(["bash", str(_RECHECK_SH)], capture_output=True,
-                          text=True, timeout=300, env=env)
-    assert proc.returncode == 0, proc.stderr
-    out = json.loads(proc.stdout)
-    assert out["gate_mode"] == "accuracy"
-    verdict = json.loads((art / "variants" / "r1-01" / "verdict.json")
-                         .read_text(encoding="utf-8"))
-    # 568 > target 357 -> mechanically eliminated in the recovery phase
-    assert verdict["gate_mode"] == "accuracy"
-    assert verdict["latency_gate"] == "fail"
-    assert verdict["outcome"] == "latency_fail"
-
-
-@_RETIRED_V6
-def test_run_latency_recheck_positive_prediction_is_informational(tmp_path: Path):
-    """The pre-v5 `predicted_delta_cycles >= 0` hard guard is retired: a
-    positive prediction no longer fails the run (the measured number is the
-    only judgement); the ratio field degrades to None."""
-    art = _recheck_workspace(tmp_path)
-    decl = art / "variants" / "r1-02" / "declaration.json"
-    doc = json.loads(decl.read_text(encoding="utf-8"))
-    doc["op_delta"] = _T8_OP_DELTA        # make it structurally pass
-    doc["predicted_delta_cycles"] = 10    # positive prediction
-    decl.write_text(json.dumps(doc), encoding="utf-8")
-    env = dict(os.environ)
-    env["ORCA_ARTIFACTS_DIR"] = str(art)
-    proc = subprocess.run(["bash", str(_RECHECK_SH)], capture_output=True,
-                          text=True, timeout=300, env=env)
-    assert proc.returncode == 0, proc.stderr
-    verdict = json.loads((art / "variants" / "r1-02" / "verdict.json")
-                         .read_text(encoding="utf-8"))
-    assert verdict["outcome"] == "latency_pass"
-    assert verdict["pred_actual_ratio"] is None
-    assert verdict["predicted_delta_cycles"] == 10
-
-
-@_RETIRED_V6
-def test_run_latency_recheck_reconciles_missing_history_rows(tmp_path: Path):
-    """Crash window between the verdict write and the history append: the
-    reconciliation pass re-appends the L0 row from the verdict file."""
-    art = _recheck_workspace(tmp_path)
-    proc = _run_recheck(art)
-    assert proc.returncode == 0, proc.stderr
-
-    # strip the L0 fields, simulating the crash-before-append state
-    hist = art / "history.jsonl"
-    rows = [r for r in history_lib.read_rows(hist)
-            if "structural_check" not in r]
-    hist.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
-
-    proc2 = _run_recheck(art)
-    assert proc2.returncode == 0, proc2.stderr
-    out2 = json.loads(proc2.stdout)
-    assert "reconciled" in out2["summary"]
-    latest = history_lib.read_latest(hist)
-    assert latest["r1-01"]["outcome"] == "latency_pass"
-    assert latest["r1-02"]["outcome"] == "structural_mismatch"
-
-
-@_RETIRED_V6
-def test_run_latency_recheck_mfu_mode_reads_four_piece(tmp_path: Path):
-    """mfu mode (from profile_mode.json): the recheck reads the four-piece
-    the node produced per variant (mfu-analyzer + mfu_adapter) BEFORE the
-    call and never profiles inline — the verdict must carry the four-piece
-    makespan verbatim (here 450, not the 568 an inline run would produce),
-    so the gate math is attributable to the real evaluation."""
-    art = _recheck_workspace(tmp_path, mode="mfu")
-    import placeholder_profiler  # noqa: E402
-
-    vdir = art / "variants" / "r1-01"
-    placeholder_profiler.profile(vdir / "onnx" / "model.onnx", vdir / "profile")
-    summary_path = vdir / "profile" / "profile_summary.json"
-    doc = json.loads(summary_path.read_text(encoding="utf-8"))
-    doc["makespan_cycles"] = 450     # make the four-piece value unmistakable
-    summary_path.write_text(json.dumps(doc), encoding="utf-8")
-
-    env = dict(os.environ)
-    env["ORCA_ARTIFACTS_DIR"] = str(art)
-    proc = subprocess.run(["bash", str(_RECHECK_SH)],
-                          capture_output=True, text=True, timeout=300, env=env)
-    assert proc.returncode == 0, proc.stderr
-    out = json.loads(proc.stdout)
-    assert out["status"] == "executed"
-    assert out["verdicts_count"] == 2          # r1-02 still gets its structural verdict
-    assert out["latency_pass_count"] == 1
-    verdict = json.loads((vdir / "verdict.json").read_text(encoding="utf-8"))
-    assert verdict["makespan_cycles"] == 450   # the four-piece number, verbatim
-    assert verdict["improvement_cycles"] == 712 - 450
-    assert verdict["outcome"] == "latency_pass"
-    # the skip key still applies on top of the mfu mode
-    proc2 = subprocess.run(["bash", str(_RECHECK_SH)],
-                           capture_output=True, text=True, timeout=300, env=env)
-    assert json.loads(proc2.stdout)["verdicts_count"] == 0
-
-
 def test_run_latency_recheck_mfu_fail_loud_matrix(tmp_path: Path):
     """Hard errors, never an inline fallback: in mfu mode a DONE variant
     without a four-piece, and --profiler (mutually exclusive with mfu mode)."""
@@ -4483,337 +3208,6 @@ def test_admission_clause_single_source():
     yaml_text = (_REPO / "workflows" / "prof-opt" / "workflow.yaml").read_text(encoding="utf-8")
     assert clause in yaml_text, (
         "the workflow description lost its one-sentence admission clause")
-
-
-# ── T14: eval@k degradation mechanics (D-V4-4 mechanical layer) ───────────────
-
-@_RETIRED_V6
-def test_eval_at_k_degradation_mechanics(tmp_path: Path):
-    """An eval@k that cannot load degrades to curve-only judgment. The
-    mechanical layer this test pins: the history row records the degradation
-    WITHOUT a fabricated eval number, and the degraded input face (a
-    curve-only pinned-depth compare) still yields a decision. The re-dispatch
-    control flow itself (retry once, then degrade) lives in the probe agent
-    protocol and is exercised by E2E."""
-    import metric_curve as mc
-
-    # degraded row: eval failed to load -> flagged, eval_acc omitted
-    hist = tmp_path / "history.jsonl"
-    history_lib.append_probe(hist, "r1-01", proxy_acc=0.83,
-                             promote_gate="pass", outcome="promoted",
-                             eval_failed=True)
-    stored = history_lib.read_rows(hist)[0]
-    assert stored["eval_failed"] is True
-    assert "eval_acc" not in stored       # no fabricated number on degradation
-    assert "eval_skipped_no_epoch_ckpt" not in stored  # ckpts EXIST here
-
-    # the addressable-but-skipped counterpart (curve-only by design)
-    hist2 = tmp_path / "h2.jsonl"
-    history_lib.append_probe(hist2, "r1-02", proxy_acc=0.80,
-                             promote_gate="pass", outcome="promoted",
-                             eval_skipped_no_epoch_ckpt=True)
-    stored2 = history_lib.read_rows(hist2)[0]
-    assert stored2["eval_skipped_no_epoch_ckpt"] is True
-    assert "eval_failed" not in stored2    # a design skip is not a failure
-
-    # the degraded judgment input face: with NO eval at all, the pinned-depth
-    # curve compare alone decides (higher_better, epoch 1, within budget)
-    def curve(path: Path, points):
-        path.write_text("".join(
-            json.dumps({"epoch": e, "metric": m}) + "\n" for e, m in points),
-            encoding="utf-8")
-
-    base = tmp_path / "base.jsonl"
-    cand = tmp_path / "cand.jsonl"
-    curve(base, [(1, 0.85), (2, 0.9)])
-    curve(cand, [(1, 0.83)])
-    out = mc.compare(mc.load_curve(base), mc.load_curve(cand),
-                     direction="higher_better", budget=0.05, at_epoch=1,
-                     baseline_path=str(base))
-    assert out["pass"] is True            # 0.85 - 0.83 <= 0.05
-    assert out["at_epoch"] == 1
-    out_fail = mc.compare(mc.load_curve(base), mc.load_curve(cand),
-                          direction="higher_better", budget=0.01, at_epoch=1,
-                          baseline_path=str(base))
-    assert out_fail["pass"] is False      # same face, honest fail
-
-
-# ── verdict_decide (v5): anchor-budget promote / final-budget gates ──────────
-# v6 retired `promote` (probe k-depth gate) and moved final-budget to
-# variants/<vid>/eval/final_acc.json — the v5 cases below are skipped in
-# place (see _RETIRED_V6); v6 coverage lives in test_po_v6.py.
-
-from verdict_decide import final_budget  # noqa: E402
-
-_VERDICT_SH = _SCRIPTS / "verdict_decide.py"
-
-
-def _probe_ws(tmp_path: Path, *, compare: dict, proxy: dict | None,
-              k_acc: dict | None, direction: str = "higher_better",
-              budget: float = 0.05) -> Path:
-    art = tmp_path / "ws"
-    (art / "variants" / "r1-01" / "metrics").mkdir(parents=True)
-    (art / "variants" / "r1-01" / "metrics" / "epoch_compare.json").write_text(
-        json.dumps(compare), encoding="utf-8")
-    if proxy is not None:
-        (art / "variants" / "r1-01" / "eval").mkdir(parents=True)
-        (art / "variants" / "r1-01" / "eval" / "proxy.json").write_text(
-            json.dumps(proxy), encoding="utf-8")
-    if k_acc is not None:
-        (art / "baseline").mkdir(parents=True)
-        (art / "baseline" / "baseline_k_acc.json").write_text(
-            json.dumps(k_acc), encoding="utf-8")
-    (art / "base").mkdir(parents=True)
-    (art / "base" / "origin_anchor.json").write_text(json.dumps({
-        "baseline_makespan_cycles": 1000, "latency_reduction_min": 0.5,
-        "accuracy_budget": budget, "target_cycles": 501,
-        "frozen_at_round": 0}), encoding="utf-8")
-    (art / "contracts.json").write_text(json.dumps(
-        {"eval": {"metric_direction": direction}}), encoding="utf-8")
-    return art
-
-
-_PASS_COMPARE = {"at_epoch": 1, "baseline_metric": 0.85,
-                 "candidate_metric": 0.84, "normalized_loss": 0.01,
-                 "budget": 0.05, "metric_direction": "higher_better",
-                 "pass": True}
-
-
-@_RETIRED_V6
-def test_verdict_promote_dual_gate_pass(tmp_path: Path):
-    """Both gates green -> accuracy_pass with gap = the worst gate gap; the
-    line is recomputed from the anchor RECORDED in epoch_compare.json."""
-    art = _probe_ws(tmp_path, compare=dict(_PASS_COMPARE),
-                    proxy={"vid": "r1-01", "metric_value": 0.84, "k": 1},
-                    k_acc={"baseline_k_acc": 0.86, "k": 1})
-    out = promote(art, "r1-01")
-    assert out["curve_pass"] is True
-    assert out["eval_acc"] == 0.84
-    assert out["eval_pass"] is True          # 0.84 >= 0.86 - 0.05
-    assert out["line"] == pytest.approx(0.80)  # 0.85 - 0.05
-    assert out["accuracy_pass"] is True
-    assert out["gap"] == pytest.approx(max(0.01, 0.86 - 0.84))  # worst gate
-
-
-@_RETIRED_V6
-def test_verdict_promote_eval_gate_blocks_with_eval_gap(tmp_path: Path):
-    """Curve passes, eval misses: accuracy_pass=false and gap = the EVAL
-    gap (the worst gate), not the curve gap."""
-    art = _probe_ws(tmp_path,
-                    compare=dict(_PASS_COMPARE, normalized_loss=0.01),
-                    proxy={"vid": "r1-01", "metric_value": 0.70, "k": 1},
-                    k_acc={"baseline_k_acc": 0.86, "k": 1})
-    out = promote(art, "r1-01")
-    assert out["curve_pass"] is True
-    assert out["eval_pass"] is False           # 0.70 < 0.86-0.05
-    assert out["accuracy_pass"] is False
-    assert out["gap"] == pytest.approx(0.86 - 0.70)   # the eval gap dominates
-
-
-@_RETIRED_V6
-def test_verdict_promote_curve_only_gap_is_curve_gap(tmp_path: Path):
-    """No proxy.json and no baseline_k_acc.json -> curve-only judgment: the
-    gap IS the curve's normalized_loss, and pass <=> gap <= budget."""
-    art = _probe_ws(tmp_path,
-                    compare=dict(_PASS_COMPARE, normalized_loss=0.04),
-                    proxy=None, k_acc=None)
-    out = promote(art, "r1-01")
-    assert out["eval_acc"] is None
-    assert out["eval_pass"] is True
-    assert out["accuracy_pass"] is True
-    assert out["gap"] == pytest.approx(0.04)
-
-    art2 = _probe_ws(tmp_path / "b",
-                     compare=dict(_PASS_COMPARE, normalized_loss=0.06,
-                                  **{"pass": False}),
-                     proxy=None, k_acc=None)
-    out2 = promote(art2, "r1-01")
-    assert out2["accuracy_pass"] is False
-    assert out2["gap"] == pytest.approx(0.06)   # 0.06 > 0.05 budget
-
-
-@_RETIRED_V6
-def test_verdict_promote_asymmetric_single_gate_branches(tmp_path: Path):
-    """Either eval-side file alone absent -> still curve-only judgment (the
-    gate needs BOTH numbers to apply); a present eval number is still
-    echoed, never fabricated away."""
-    art = _probe_ws(tmp_path, compare=dict(_PASS_COMPARE),
-                    proxy={"vid": "r1-01", "metric_value": 0.84, "k": 1},
-                    k_acc=None)
-    out = promote(art, "r1-01")
-    assert out["eval_acc"] == 0.84
-    assert out["eval_pass"] is True
-    assert out["accuracy_pass"] is True
-
-    art2 = _probe_ws(tmp_path / "b", compare=dict(_PASS_COMPARE),
-                     proxy=None, k_acc={"baseline_k_acc": 0.86, "k": 1})
-    out2 = promote(art2, "r1-01")
-    assert out2["eval_acc"] is None
-    assert out2["eval_pass"] is True
-    assert out2["accuracy_pass"] is True
-
-
-@pytest.mark.parametrize("proxy_text,error_kw", [
-    ('{"vid": "r1-01", "metric_value": "oops", "k": 1}', "metric_value"),
-    ("{not json", "proxy.json"),
-])
-@_RETIRED_V6
-def test_verdict_promote_fails_loud_on_present_but_malformed_eval(
-        tmp_path: Path, proxy_text: str, error_kw: str):
-    """A present-but-unreadable eval anchor FAILS — it must never silently
-    downgrade the judgment to curve-only (the _optional_number contract)."""
-    art = _probe_ws(tmp_path, compare=dict(_PASS_COMPARE),
-                    proxy=None, k_acc=None)
-    (art / "variants" / "r1-01" / "eval").mkdir(parents=True)
-    (art / "variants" / "r1-01" / "eval" / "proxy.json").write_text(
-        proxy_text, encoding="utf-8")
-    with pytest.raises(ValueError, match=error_kw):
-        promote(art, "r1-01")
-
-
-@_RETIRED_V6
-def test_verdict_promote_lower_better_line_direction(tmp_path: Path):
-    compare = {"at_epoch": 2, "baseline_metric": 0.20,
-               "candidate_metric": 0.23, "normalized_loss": 0.03,
-               "budget": 0.05, "metric_direction": "lower_better",
-               "pass": True}
-    art = _probe_ws(tmp_path, compare=compare,
-                    proxy={"vid": "r1-01", "metric_value": 0.23, "k": 2},
-                    k_acc={"baseline_k_acc": 0.21, "k": 2},
-                    direction="lower_better")
-    out = promote(art, "r1-01")
-    assert out["line"] == pytest.approx(0.25)   # b + slack for lower_better
-    assert out["eval_pass"] is True             # 0.23 <= 0.21 + 0.05
-    assert out["accuracy_pass"] is True
-    assert out["gap"] == pytest.approx(max(0.03, 0.23 - 0.21))
-
-
-@pytest.mark.parametrize("compare,error_kw", [
-    ({"baseline_metric": 0.85, "normalized_loss": 0.01}, "pass"),
-    ({"pass": "true", "baseline_metric": 0.85, "normalized_loss": 0.01}, "pass"),
-    ({"pass": True, "normalized_loss": 0.01}, "baseline_metric"),
-    ({"pass": True, "baseline_metric": 0.85}, "normalized_loss"),
-])
-@_RETIRED_V6
-def test_verdict_promote_fails_loud_on_malformed_compare(tmp_path: Path, compare,
-                                                         error_kw):
-    art = _probe_ws(tmp_path, compare=compare, proxy=None, k_acc=None)
-    with pytest.raises(ValueError, match=error_kw):
-        promote(art, "r1-01")
-
-
-@_RETIRED_V6
-def test_verdict_promote_missing_anchor_rc2(tmp_path: Path):
-    art = _probe_ws(tmp_path, compare=dict(_PASS_COMPARE), proxy=None,
-                    k_acc=None)
-    (art / "base" / "origin_anchor.json").unlink()
-    with pytest.raises(FileNotFoundError, match="origin_anchor"):
-        promote(art, "r1-01")
-
-
-@_RETIRED_V6
-def test_verdict_cli_rejects_budget_and_reads_anchor(tmp_path: Path):
-    """The --budget flag is RETIRED on both subcommands (argparse rejects);
-    the budget comes from the origin anchor only."""
-    art = _probe_ws(tmp_path, compare=dict(_PASS_COMPARE), proxy=None,
-                    k_acc=None)
-    for sub in (["promote", "--vid", "r1-01"], ["final-budget"]):
-        proc = subprocess.run(
-            [sys.executable, str(_VERDICT_SH), *sub,
-             "--artifacts", str(art), "--budget", "0.05"],
-            capture_output=True, text=True, timeout=60)
-        assert proc.returncode != 0
-        assert "--budget" in proc.stderr
-
-    ok = subprocess.run(
-        [sys.executable, str(_VERDICT_SH), "promote",
-         "--artifacts", str(art), "--vid", "r1-01"],
-        capture_output=True, text=True, timeout=60)
-    assert ok.returncode == 0, ok.stderr
-    payload = json.loads(ok.stdout)
-    assert payload["accuracy_pass"] is True and payload["gap"] == 0.01
-
-
-@_RETIRED_V6
-def test_verdict_final_budget_reads_anchor_both_directions(tmp_path: Path):
-    art = tmp_path / "final-ws"
-    (art / "final").mkdir(parents=True)
-    (art / "base").mkdir(parents=True)
-    (art / "base" / "origin_anchor.json").write_text(json.dumps({
-        "baseline_makespan_cycles": 1000, "latency_reduction_min": 0.5,
-        "accuracy_budget": 0.05, "target_cycles": 501,
-        "frozen_at_round": 0}), encoding="utf-8")
-    (art / "final" / "final_acc.json").write_text(json.dumps(
-        {"vid": "r1-01", "final_acc": 0.90, "baseline_full_acc": 0.92,
-         "metric_direction": "higher_better", "within_budget": None}),
-        encoding="utf-8")
-    assert final_budget(art) == {"within_budget": True}   # 0.9 >= 0.92-0.05
-
-    (art / "final" / "final_acc.json").write_text(json.dumps(
-        {"vid": "r1-01", "final_acc": 0.90, "baseline_full_acc": 0.92,
-         "metric_direction": "higher_better", "within_budget": None},
-    ), encoding="utf-8")
-    (art / "base" / "origin_anchor.json").write_text(json.dumps({
-        "baseline_makespan_cycles": 1000, "latency_reduction_min": 0.5,
-        "accuracy_budget": 0.01, "target_cycles": 501,
-        "frozen_at_round": 0}), encoding="utf-8")
-    assert final_budget(art) == {"within_budget": False}  # 0.9 < 0.92-0.01
-
-    (art / "final" / "final_acc.json").write_text(json.dumps(
-        {"vid": "r1-01", "final_acc": 2.1, "baseline_full_acc": 2.0,
-         "metric_direction": "lower_better", "within_budget": None}),
-        encoding="utf-8")
-    (art / "base" / "origin_anchor.json").write_text(json.dumps({
-        "baseline_makespan_cycles": 1000, "latency_reduction_min": 0.5,
-        "accuracy_budget": 0.05, "target_cycles": 501,
-        "frozen_at_round": 0}), encoding="utf-8")
-    assert final_budget(art) == {"within_budget": False}  # 2.1 > 2.0+0.05
-
-
-@_RETIRED_V6
-def test_verdict_final_budget_cli_fails_loud_on_bad_inputs(tmp_path: Path):
-    """The final verdict's inputs are hand-assembled by the full-train agent
-    — a hyphen slip in the direction or a non-numeric metric is exactly the
-    transcription error class the script exists to catch (exit 2, never a
-    guessed verdict)."""
-    art = tmp_path / "fw"
-    (art / "final").mkdir(parents=True)
-    (art / "base").mkdir(parents=True)
-    (art / "base" / "origin_anchor.json").write_text(json.dumps({
-        "baseline_makespan_cycles": 1000, "latency_reduction_min": 0.5,
-        "accuracy_budget": 0.05, "target_cycles": 501,
-        "frozen_at_round": 0}), encoding="utf-8")
-    final = art / "final" / "final_acc.json"
-    base = {"vid": "r1-01", "final_acc": 0.90, "baseline_full_acc": 0.92,
-            "metric_direction": "higher_better", "within_budget": None}
-
-    def run_cli():
-        return subprocess.run(
-            [sys.executable, str(_VERDICT_SH), "final-budget",
-             "--artifacts", str(art)],
-            capture_output=True, text=True, timeout=60)
-
-    final.write_text(json.dumps(dict(base, metric_direction="higher-better")),
-                     encoding="utf-8")
-    proc = run_cli()
-    assert proc.returncode == 2
-    assert "metric_direction" in proc.stderr
-
-    final.write_text(json.dumps(dict(base, final_acc="n/a")), encoding="utf-8")
-    proc = run_cli()
-    assert proc.returncode == 2
-    assert "final_acc" in proc.stderr
-
-    final.write_text(json.dumps(dict(base, baseline_full_acc=None)),
-                     encoding="utf-8")
-    proc = run_cli()
-    assert proc.returncode == 2
-    assert "baseline_full_acc" in proc.stderr
-
-    final.unlink()
-    proc = run_cli()
-    assert proc.returncode == 2
-    assert "final_acc.json" in proc.stderr
 
 
 # ── extract_user_pkg (cleanliness round): fail-loud path resolution ───────────
