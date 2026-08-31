@@ -15,7 +15,7 @@ every bad input fails loud (stderr message, exit 2).
             The round a re-entered propose node works in:
             max(current + 1, 1) — one round is one variant (v6 §4.2), so the
             next proposal always goes to a fresh round directory. The v5
-            `.round_advanced` marker linkage is retired (base never
+            round-advance marker linkage is retired (the base never
             advances); a leftover marker file from an old workspace is
             ignored.
 """

@@ -150,6 +150,15 @@ backend/count from `train_device.json`), binds the render to it
 state. A render failure after the claim releases the lock explicitly — the
 chain owns this; never claim or release cards by hand.
 
+**A full house here fails loud — deliberately, and differently from the
+probe.** The probe parks on a full house because its wait is convergent:
+same-run watchdogs reach terminal states and release their cards. At the
+baseline's entry no same-run training exists yet, so a full house means
+cross-run occupancy or foreign live processes — and the ledger never
+preempts across runs (v6 §3.2). Failing loud with the claim output quoted
+is the honest outcome; parking would deadlock on a releaser that never
+comes.
+
 **After EVERY chain invocation that reports a non-failed state, run the
 anchor-freeze check** (mechanical, idempotent — once the anchor exists it is
 a no-op):

@@ -18,7 +18,8 @@ is fixed (first match wins, v6 §8.1):
 Exiting never disturbs in-flight work: a success row only truncates FUTURE
 proposal rounds; trainings already released by the probe keep running and
 keep their judgment eligibility for po_report's terminal harvest (v6 §8.1).
-best.json / mode / .round_advanced are no longer read (retired in v6).
+best.json and the v5 mode/round-advance markers are no longer read
+(retired in v6).
 
 stdout: single-line JSON {"decision", "round", "target_cycles",
 "success_vids", "in_flight", "reason"}; in_flight = vids with a

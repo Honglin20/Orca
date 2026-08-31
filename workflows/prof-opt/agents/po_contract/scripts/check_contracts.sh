@@ -248,9 +248,8 @@ if mode != "--reuse-check":
     # quickrun log into exactly 2 epochs CONTIGUOUS FROM 1. The syntax /
     # named-group / boundary checks above cannot see a 0-based epoch base - a
     # pattern that matches "epoch 0, 1, ..." passes them but breaks every
-    # downstream consumer (metric_curve extract in the baseline finalizer,
-    # stop_at_epoch in the probe) only AFTER the full training has already
-    # run. Deterministic re-run here, never the analyst's own claim.
+    # downstream consumer (metric_curve extract in the baseline finalizer and
+    # the variant watchdogs) only AFTER the full training has already run. Deterministic re-run here, never the analyst's own claim.
     if pattern is not None:
         qr_path = art / "contract_work" / "train_quickrun.json"
         try:

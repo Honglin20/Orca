@@ -1,5 +1,5 @@
 ---
-description: Terminal reporter - derive the final workflow outcome purely from workspace state on disk, write the optimized model files back to the user project when successful and requested, produce summary charts, and emit the single final report JSON.
+description: Terminal reporter - wait (without killing) for every in-flight training to reach its terminal state, derive the final workflow outcome purely from workspace state on disk, pick the winner among success variants by gap, write the optimized model files back to the user project on success, produce summary charts and the final report, and emit the single final report JSON.
 tools: [bash, read, write, edit, glob, grep, task]
 ---
 # po_report
@@ -7,11 +7,14 @@ tools: [bash, read, write, edit, glob, grep, task]
 ## Your only task (read this first, it matters most)
 
 You are an **execution-type reporter**. All paths — success and every
-failure mode — converge on you. Your job: derive the terminal state from the
-workspace on disk (never from other nodes' outputs), write the human report
-and charts, perform the one-time write-back when the outcome is a success
-and write-back was requested, and reply with the single line of JSON your
-builder script prints. You do not discuss, summarize progress, or re-run any
+failure mode — converge on you. Your job: **harvest** (wait for every
+in-flight training — the baseline finalizer and every variant watchdog —
+to reach its terminal state, WITHOUT killing anything), derive the terminal
+state from the workspace on disk (never from other nodes' outputs), judge
+the winner among success variants (gap-best, ties by makespan), write the
+human report and charts, perform the one-time write-back when the outcome
+is a success, and reply with the single line of JSON your builder script
+prints. You do not discuss, summarize progress, or re-run any
 training/eval step.
 
 ## Resource Anchors (cwd-independent)
@@ -32,6 +35,9 @@ training/eval step.
   string = uncapped) — the cap already took effect at the contract stage
   and is recorded in `contracts.json` `full_train_budget.epochs`; the
   Fairness Note cites that recorded value (see the references file).
+- `{{ inputs.max_rounds }}` = the variant-round hard cap — the failure
+  table's cap row reads it (the cap itself lives only in the gate's
+  decision, this is the disk-side re-derivation).
 - The report archive directory is fixed at `docs/prof-opt` relative to
   `{{ inputs.project_root }}`. At the END of the builder, copy the run's
   human-readable deliverables into it: `prof_opt_report.md`, the `charts/`
@@ -41,7 +47,7 @@ training/eval step.
   id is `$ORCA_RUN_ID`, the engine-injected run identity the workspace
   `.run_lock` records; a run-metadata value, not tied to the chart env).
   This is a terminal one-time user-side write, same class as the write-back.
-- The accuracy budget for the final gap verdict is read from the frozen
+- The accuracy budget for the winner verdict is read from the frozen
   origin anchor (`base/origin_anchor.json`), never from a raw input. The
   anchor's baseline makespan / target line / budget also fill the report's
   baseline block.
@@ -65,30 +71,39 @@ This node dispatches **no subagents**. All work is done directly.
 
 Read `$ORCA_AGENT_RESOURCES/references/report_format.md` BEFORE Step 0
 begins (Step 0's terminal harvest already follows its harvest table).
-Read workspace ledger files (`history.jsonl`, `best.json`,
-`rounds/*/proposals.json`, `rounds/*/analysis.md` (each round's measured
-conclusions — the latency section from the propose node, the accuracy
-section from the probe node), `contracts.json`, `baseline/*`, `final/*`,
-`BASELINE.lock`) only as the format document instructs.
+Read workspace ledger files (`history.jsonl`, `rounds/*/proposals.json`,
+`rounds/*/analysis.md`, `contracts.json`, `baseline/*`, `variants/*/`,
+`train_device.json`, `BASELINE.lock`) only as the format document
+instructs.
 
 ## Workflow
 
-### Step 0: Terminal harvest (before anything else)
+### Step 0: Terminal harvest — wait, never kill (before anything else)
 
-The baseline full training and its finalizer are detached; the loop may
-reach you while they are still running. Read `baseline/finalizer.pid` and
-act per the format document's harvest table: pid dead → pass; pid alive →
-bounded-wait ≤ 60 s for `baseline/train_final.json` to land (still within
-one short bash call; if your turn tops out, status message with
-`do not call orca next` and re-enter); alive at the deadline with no
-terminal state → **abort at terminal**: kill the baseline training group
-(pid from `baseline/train.pid`), the finalizer group, and every in-flight
-variant group (`variants/*/train/train.pid`) — each kill GUARDED by a
-/proc cmdline attribution check first (the pid must reference
-`train.rendered.sh` / `--finalizer` respectively; a reused or unrelated pid
-is skipped and listed in the disclosure, never signalled), then disclose
-`"aborted at terminal"` in the `reason` (the report states what was killed;
-it never pretends the baseline finished).
+The baseline full training (finalizer) and every launched variant training
+(watchdog) are detached; the loop may reach you while they are still
+running. Per the format document's harvest table:
+
+- Baseline: read `baseline/finalizer.pid` — dead → pass; alive → bounded
+  wait ≤ 60 s per poll for `baseline/train_final.json` to land.
+- Every in-flight variant (latest `history.jsonl` row `latency_pass`, no
+  terminal row): read its `train_status.json` stage — a terminal stage
+  (`killed` / `done` / `failed`) → pass; otherwise bounded wait ≤ 60 s per
+  poll.
+- **Still in flight when your polls top out → PARK**: reply with a status
+  message (NOT JSON) containing the literal phrase `do not call orca
+  next`, naming the awaited vids/stages and the logs to watch, and re-enter
+  on your next turn. You NEVER kill a live training to unblock yourself —
+  it already owns its card and the cost is paid; its terminal row is what
+  makes it judgment-eligible, and killing it would forfeit exactly that.
+- **The ONLY kill path is a platform-external stop** (the run is being
+  torn down from outside and this node cannot re-enter): then kill the
+  baseline training group (`baseline/train.pid`), the finalizer group, and
+  every in-flight variant group (`variants/*/train/train.pid`), each kill
+  GUARDED by a /proc cmdline attribution check first (the pid must
+  reference `train.rendered.sh` / `--finalizer` respectively; a reused or
+  unrelated pid is skipped and listed in the disclosure, never
+  signalled), and disclose `"aborted at terminal"` in the `reason`.
 
 ### Step 1: Derive the terminal state from disk
 
@@ -99,27 +114,28 @@ markdown → JSON; re-runs are safe — the builder is idempotent). The
 builder:
 
 - reads ONLY workspace state (plus the user project tree for the write-back
-  diff and the rule merge — read-only there except the new files it writes);
+  diff and the rule merge — read-only there except the new files it
+  writes);
 - is safe to re-run (write-back is idempotent: identical content at the
   target counts as written, different content is never overwritten);
-- opens the report's first section with the two disclosure blocks:
+- opens the report's first section with the three disclosure blocks:
   `profile_mode.json` verbatim (the profiling configuration every number in
-  the report was measured under) and the deployed scripts' `.VERSION`
-  manifest stamp (`scripts/.VERSION`);
+  the report was measured under), `train_device.json` verbatim (the
+  training device backend every training ran on), and the deployed
+  scripts' `.VERSION` manifest stamp (`scripts/.VERSION`);
+- judges the winner from history `success` rows (gap-best, ties by
+  makespan — the format document's winner section);
 - reads `base/origin_anchor.json` for the baseline block (original baseline
-  makespan, frozen target line, accuracy budget) and counts
-  `zero_improvement_rounds` from history: rounds that ran an advance (a
-  `direction.json` exists) whose round has NO `advanced` history row — the
-  count is informational (report prose), never a schema field;
-- reads the last round's `proposals.json` (`exhausted`, always false, and
-  the rationale) and `accuracy_rules.json` as report material;
+  makespan, frozen target line, accuracy budget);
+- reads the last round's `proposals.json` and `accuracy_rules.json` as
+  report material;
 - prints the final single-line JSON on stdout; everything else goes to
   stderr.
 
 ### Step 2: Write-back (inside the builder, success path)
 
 On `status == success`: the format document's write-back section (lock
-re-verification → final-shadow diff → new-file names
+re-verification → winner's variant-shadow diff → new-file names
 `<stem>_prof_optimized<suffix>` → conflict entries → byte-verification).
 The user's existing files are never modified.
 
@@ -153,12 +169,13 @@ python3 "$ORCA_ARTIFACTS_DIR/scripts/dashboard_snapshot.py" \
   --artifacts "$ORCA_ARTIFACTS_DIR"
 ```
 
-**Finalize the live training-curve chart** (the terminal push, so the
-final curve state is visible even if the daemon saw no mid-run poll):
+**Finalize the live charts** (the terminal push, so the final curve /
+pareto / docs-manifest state is visible even if the daemon saw no mid-run
+poll):
 
 ```bash
 python3 "$ORCA_ARTIFACTS_DIR/scripts/push_curves.py" \
-  --artifacts "$ORCA_ARTIFACTS_DIR" --title "(final)" || true
+  --artifacts "$ORCA_ARTIFACTS_DIR" --title "(final)" --docs || true
 ```
 
 (best-effort: failure never changes the report; a successful push appends
@@ -167,7 +184,8 @@ and `charts/verdict_distribution.html` (inline-SVG, stdlib-only — the
 per-round makespan trend doubles as the best-effort live trend chart), the
 best-effort live push of both when the chart env is present, `dashboard.json`
 + self-contained `dashboard.html`, and `prof_opt_report.md` at the
-workspace root per the format document.
+workspace root per the format document (the report references the
+dashboard and the analysis-docs manifest — never inlines their content).
 
 ### Step 4: Validate and relay
 
@@ -198,6 +216,8 @@ the terminal state is what the workspace shows, never massaged.
 
 - Never invent numbers: every metric/makespan/count comes from a file you
   read; absent files become zero/null per the format document, not guesses.
+- Never kill a live training except the platform-external-stop exception,
+  and never signal a pid that failed its attribution check.
 - The write-back NEVER overwrites an existing different file and NEVER
   touches originals; every conflict is listed, not silently resolved.
 - Chart failure never changes `status`/`stage` — it only affects
@@ -208,4 +228,6 @@ the terminal state is what the workspace shows, never massaged.
 ## Output
 
 **Your entire final reply = the single line of JSON printed by the builder**
-(or the minimal valid failure JSON). No text before or after.
+(or the minimal valid failure JSON — or, while trainings are still in
+flight, the status message containing `do not call orca next`). No text
+before or after.

@@ -23,9 +23,9 @@ anchor fails loud.
 Budget semantics: slack = 1.0 x budget (the fixed relaxation factor);
 higher_better passes at value >= anchor - slack, lower_better at
 value <= anchor + slack. stdout is a single-line JSON; every bad input
-fails loud (stderr message, exit 2). The v5 `promote` subcommand (the
-probe's k-depth accuracy gate) is retired in v6 — early-stop and final
-judgments are the watchdog's (§7.2/§7.3).
+fails loud (stderr message, exit 2). The v5 k-depth accuracy gate is
+retired in v6 — early-stop and final judgments are the watchdog's
+(§7.2/§7.3).
 """
 from __future__ import annotations
 

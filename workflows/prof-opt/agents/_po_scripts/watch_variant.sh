@@ -25,7 +25,7 @@
 #                    streak): gap <= budget -> streak = 0; gap > budget ->
 #                    streak += 1. streak >= 10 -> kill the process group
 #                    (TERM -> 10s grace -> KILL, /proc cmdline attribution
-#                    check first — the v5 stop_at_epoch kill semantics) ->
+#                    check first — the inherited v5 kill semantics) ->
 #                    stopped_at_epoch = the FROZEN log's re-parsed max epoch
 #                    (lines written between the kill decision and the
 #                    group's death are real trained epochs) -> terminal
@@ -554,7 +554,7 @@ PY
   return 0
 }
 
-# ── §7.2 early-stop kill (stop_at_epoch semantics, attribution first) ────────
+# ── §7.2 early-stop kill (attribution first) ───────────────────────────────────
 early_stop_kill() { # early_stop_kill <gap> <streak> <epoch>; rc 1 = the training
   # died by itself first (the next cycle reads its rc)
   local gap="$1" streak="$2" epoch="$3" pid grace frozen
@@ -615,7 +615,7 @@ supervise_cycle() {
   fi
 
   # crash scene: group dead WITHOUT an rc file -> re-launch <= 3. Liveness is
-  # group-alive only here — the SAME model stop_at_epoch uses for its waiting
+  # group-alive only here — the SAME model the v5 stopper used for its waiting
   # branches (attribution is the KILL-time check: an unattributed live pid is
   # refused there, never killed; relaunching here on it would race a second
   # training against the kill decision).

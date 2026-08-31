@@ -8,10 +8,10 @@ with that vid.
 
 v6 row semantics (§4.3): impl / latency_pass / latency_fail / success /
 accuracy_fail / probe_insufficient. Terminal outcomes are written ONLY via
-append_terminal (the watchdog's terminal action); the v5
-append_advanced / append_probe builders and the advanced / promote_gate /
-proxy_acc fields are retired (kept on old workspace rows for READ
-compatibility only — never written anymore).
+append_terminal (the watchdog's terminal action); the v5-only builders and
+their field sets (round advance, probe gate, proxy accuracy) are retired
+(kept on old workspace rows for READ compatibility only — never written
+anymore).
 
 Read side:
     read_rows(path)            -> all rows in append order

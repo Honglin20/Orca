@@ -393,7 +393,7 @@ print(vid)' "$ART/devices/$idx.lock" 2>/dev/null || echo "")"
     return 1; }
   ok="$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read()).get("ok"))')"
   if [ "$ok" != "True" ]; then
-    echo "FATAL: no free training device for the baseline (busy_real/locked per the claim output above; a stale dead-pid lock is reclaimed by the claim itself)" >&2
+    echo "FATAL: no free training device for the baseline (busy_real/locked per the claim output above; a stale dead-pid lock is reclaimed by the claim itself) — the baseline fails loud instead of parking, deliberately unlike the probe's wait state: at entry no same-run training exists whose terminal state would release the card, so a full house means cross-run occupancy, and the ledger never preempts across runs (v6 §3.2)" >&2
     return 1
   fi
   idx="$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["idx"])')"
@@ -614,13 +614,23 @@ finalizer_main() {
       relaunches=$((relaunches + 1))
       if [ "$relaunches" -gt 3 ]; then
         fin_log "stage=relaunch_exhausted attempts=$relaunches"
-        write_train_final failed null relaunch_exhausted
+        write_train_final failed null relaunch_exhausted \
+          "training group died without an rc 3 times — crash scenes per attempt in baseline/train.attempt*.log and baseline/wrapper.attempt*.log"
         exit 0
       fi
       fin_log "stage=relaunch attempt=$relaunches (train group died without rc)"
-      # sub-command output silenced: finalizer.log lines start ISO8601 only
-      launch_full_train >/dev/null 2>&1 || {
-        write_train_final failed null relaunch_failed; exit 0; }
+      # relaunch stderr is CAPTURED, never discarded: a failed relaunch's
+      # FATAL root cause (claim refused, render failure, ...) must reach
+      # train_final.json — swallowing it here would leave an unattributable
+      # terminal state
+      local relaunch_err
+      relaunch_err="$(launch_full_train 2>&1 >/dev/null)" || {
+        write_train_final failed null relaunch_failed \
+          "relaunch failed: $(printf '%s' "$relaunch_err" | tail -n 1) (full relaunch stderr in finalizer.log)"
+        printf '%s\n' "$relaunch_err" | while IFS= read -r line; do
+          fin_log "stage=relaunch_stderr $line"
+        done
+        exit 0; }
       # the relaunch re-adopted the new wrapper; take ownership back so the
       # claim survives until THIS finalizer's terminal write. A failed adopt
       # here is a FATAL (the claim would sit on the dying wrapper's pid) —

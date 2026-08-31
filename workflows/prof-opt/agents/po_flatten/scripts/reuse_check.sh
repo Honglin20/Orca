@@ -195,7 +195,7 @@ if [[ "$LOCK_VERDICT" == *'"unreadable": true'* ]]; then
 fi
 if [[ "$LOCK_VERDICT" != *'"match": true'* ]]; then
   echo "FATAL: BASELINE.lock does not match current key inputs. $LOCK_VERDICT" >&2
-  echo "HINT: most often this is design behavior on a workspace with a promotion history: after a round advanced, the shadow tree moved forward while BASELINE.lock still anchors the original baseline — cross-run reuse only holds for a workspace with zero promotions (or the model/ckpt/shadow anchor truly changed). Re-run with fresh_start=true to rebuild the workspace from scratch." >&2
+  echo "HINT: most often the model/ckpt/shadow anchor truly changed (v6: the base shadow never moves forward — there is no promotion history). Re-run with fresh_start=true to rebuild the workspace from scratch." >&2
   exit 3
 fi
 
