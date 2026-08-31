@@ -77,6 +77,22 @@ def load_curve(path: Path) -> list[dict[str, int | float]]:
     return rows
 
 
+def normalize_loss(baseline: float, candidate: float, direction: str) -> float:
+    """Direction-normalized loss: positive ALWAYS means the candidate is worse.
+
+    Single source for the gap formula — the streaming early-stop judgment,
+    the final-budget verdict and any reporting view must never drift apart
+    on what "gap" means.
+    """
+    if direction == "higher_better":
+        return baseline - candidate
+    if direction == "lower_better":
+        return candidate - baseline
+    raise MetricCurveError(
+        "direction must be higher_better or lower_better, got "
+        f"{direction!r}")
+
+
 def compare(baseline: list[dict[str, int | float]],
             candidate: list[dict[str, int | float]],
             *, direction: str, budget: float,
@@ -110,8 +126,7 @@ def compare(baseline: list[dict[str, int | float]],
         epoch = at_epoch
     base = base_epochs[epoch]
     cand = cand_epochs[epoch]
-    # Positive loss always means the candidate is worse after normalization.
-    loss = base - cand if direction == "higher_better" else cand - base
+    loss = normalize_loss(base, cand, direction)
     passed = loss <= budget
     return {
         "epoch": epoch,

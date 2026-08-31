@@ -14,10 +14,11 @@ already reached a terminal row is out of scope):
      counts) OR the training already reached a terminal state
      (variants/<vid>/train_status.json stage in killed|done|failed — the
      watchdog's product) with the terminal file on disk.
-  4. watchdog: variants/<vid>/watchdog.pid exists. While the deployed
-     watchdog is the interface stub (it exits immediately by contract), pid
-     LIVENESS is deliberately not asserted; the real watchdog restores the
-     alive check.
+  4. watchdog: variants/<vid>/watchdog.pid records a LIVE pid (with /proc
+     cmdline attribution — a recycled pid never counts) OR the training
+     already reached a terminal state (a guardian that terminalized and
+     exited before this gate ran is a legitimate fast path, its terminal
+     file is the proof).
   5. liveness record: variants/<vid>/train/liveness.json parses and records
      epoch1_ok true.
 
@@ -141,11 +142,31 @@ def _check_vid(art: Path, vid: str, target: int, problems: list[str]) -> None:
                 f"{vid} training pid {pid} is alive but its cmdline does not "
                 "reference train.rendered.sh (pid reuse — not our training)")
 
-    # 4. watchdog pid file (liveness deliberately deferred: the deployed
-    #    watchdog is the interface stub and exits immediately)
-    if not (vdir / "watchdog.pid").is_file():
+    # 4. watchdog guardian: pid alive (attributed) OR terminal state (the
+    #    real guardian loops until terminal — a dead pid with no terminal
+    #    train_status.json means the training is unsupervised)
+    wpid_path = vdir / "watchdog.pid"
+    if not wpid_path.is_file():
         problems.append(f"{vid} watchdog.pid missing (the launch is "
                         "incomplete without its guardian)")
+    else:
+        try:
+            wpid = int(wpid_path.read_text(encoding="utf-8").strip())
+        except ValueError:
+            problems.append(f"{vid} watchdog.pid is not an int: "
+                            f"{wpid_path.read_text(encoding='utf-8')!r}")
+        else:
+            if not terminal:
+                if not _pid_alive(wpid):
+                    problems.append(
+                        f"{vid} watchdog pid {wpid} is dead with no terminal "
+                        "train_status.json (stage killed|done|failed) — the "
+                        "training is unsupervised")
+                elif not _pid_attributed(wpid, "watch_variant.sh"):
+                    problems.append(
+                        f"{vid} watchdog pid {wpid} is alive but its cmdline "
+                        "does not reference watch_variant.sh (pid reuse — not "
+                        "our guardian)")
 
     # 5. liveness record
     try:

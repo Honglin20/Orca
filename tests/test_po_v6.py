@@ -12,16 +12,23 @@ recheck boundary (makespan == target passes), the ledger aggregator's
 purity (same shard set -> same output, full rebuildability), and the
 deployed-set stamp roundtrip over the three new scripts.
 
-Device-facing cases are fully synthetic (PATH stubs / hand-written lock
-files) — no real GPU/NPU is ever required.
+P3 adds the watchdog face (§7): warmup is never judged, the over-budget
+streak counts once per NEW epoch (9 does not kill / 10 kills / a terminal
+replay never re-kills), the early-stop kill refuses a pid that fails the
+/proc attribution check, natural completion runs the final-budget verdict
+(success / accuracy_fail), a crash without rc re-launches (budget 3 ->
+probe_insufficient), and re-entry is idempotent in all three states. Every
+curve is a mock log file — nothing trains, no GPU/NPU is ever required.
 """
 from __future__ import annotations
 
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1351,7 +1358,9 @@ def test_device_alloc_adopt_rebinds_ownership_fail_loud(tmp_path):
     assert missing.returncode == 2 and "no lock" in missing.stderr
 
 
-def test_watch_variant_stub_pins_signature(tmp_path):
+def test_watch_variant_pins_signature_and_fails_loud_on_torn_ws(tmp_path):
+    """The P2 signature stays; the real body now fails loud on a torn
+    workspace instead of exiting 0 unsupervised (the stub's old behavior)."""
     art = tmp_path / "ws"
     art.mkdir()
     env = dict(os.environ)
@@ -1366,15 +1375,19 @@ def test_watch_variant_stub_pins_signature(tmp_path):
     bad_device = _run_cli([_BASH, str(_WATCH_SH), "--vid", "r1-01",
                            "--device", "x"], env=env)
     assert bad_device.returncode == 2
+    unknown = _run_cli([_BASH, str(_WATCH_SH), "--vid", "r1-01",
+                        "--device", "0", "--bogus"], env=env)
+    assert unknown.returncode == 2
 
-    ok = _run_cli([_BASH, str(_WATCH_SH), "--vid", "r1-01", "--device", "0"],
-                  env=env)
-    assert ok.returncode == 0, ok.stderr
+    # well-formed invocation over a torn workspace (no contracts) -> FATAL
+    torn = _run_cli([_BASH, str(_WATCH_SH), "--vid", "r1-01",
+                     "--device", "0"], env=env)
+    assert torn.returncode == 2
+    assert "contracts.json" in torn.stderr
     vdir = art / "variants" / "r1-01"
-    pid = (vdir / "watchdog.pid").read_text(encoding="utf-8").strip()
-    assert pid.isdigit()
-    log = (vdir / "watchdog.log").read_text(encoding="utf-8")
-    assert "vid=r1-01" in log and "device=0" in log
+    # the pid file lands before any supervision decision (the probe node's
+    # launch confirmation keys on it)
+    assert (vdir / "watchdog.pid").read_text(encoding="utf-8").strip().isdigit()
 
 
 def _probe_ws(tmp_path: Path, *, makespan: int = 400,
@@ -1404,7 +1417,12 @@ def _probe_ws(tmp_path: Path, *, makespan: int = 400,
             encoding="utf-8")
     _write_lock(art, 0, lock_vid, os.getpid())
     if watchdog:
-        (vd / "watchdog.pid").write_text("4242\n", encoding="utf-8")
+        # the real guardian loops until terminal — the emit gate probes its
+        # pid for liveness + attribution, so the fake one is session-leading
+        # and cmdline-attributed (auto-reaped after the test)
+        (vd / "watchdog.pid").write_text(
+            f"{_attributed_session_sleeper('watch_variant.sh').pid}\n",
+            encoding="utf-8")
     if liveness is not None:
         record = {"vid": "r1-01", "epoch1_ok": True, "device": 0,
                   "train_pid": 111, "ts": "2026-08-31T00:00:00+00:00"}
@@ -1425,6 +1443,36 @@ def _attributed_sleeper() -> subprocess.Popen:
     return subprocess.Popen(
         [_BASH, "-c", "while :; do sleep 30; done # train.rendered.sh"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+# session-leading sleepers (own process group): the watchdog's group kill
+# and the emit gate's group-liveness probe must never reach the test runner's
+# own process group, so every fake worker/guardian below is setsid'd
+_GUARDIANS: list[subprocess.Popen] = []
+
+
+@pytest.fixture(autouse=True)
+def _reap_session_sleepers():
+    yield
+    for proc in _GUARDIANS:
+        if proc.poll() is None:
+            try:                       # take the whole group: the leader's
+                os.killpg(proc.pid, signal.SIGTERM)  # `sleep` child too
+            except (ProcessLookupError, PermissionError):
+                proc.terminate()
+            proc.wait()
+    _GUARDIANS.clear()
+
+
+def _attributed_session_sleeper(token: str) -> subprocess.Popen:
+    """A live SESSION-LEADING process whose /proc cmdline references `token`
+    (group kill safe). Registered for automatic reaping."""
+    proc = subprocess.Popen(
+        [_BASH, "-c", f"while :; do sleep 30; done # {token}"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True)
+    _GUARDIANS.append(proc)
+    return proc
 
 
 def test_probe_emit_green_launch_state(tmp_path):
@@ -1556,3 +1604,561 @@ def test_probe_emit_pid_attribution_and_input_failures(tmp_path):
         f"{os.getpid()}\n", encoding="utf-8")
     proc3 = _check_probe(art3)
     assert proc3.returncode == 1 and "target_cycles unavailable" in proc3.stderr
+
+
+# ── P3: watch_variant.sh — warmup / streak boundaries / early-stop kill ──────
+
+_EPOCH_LINE = "epoch {e} metric {m}"
+
+
+def _watch_ws(tmp_path: Path, *, epochs: int = 20, log_epochs=None,
+              candidate: str = "0.5", baseline: str = "0.9",
+              direction: str = "higher_better",
+              rc: int | None = None, with_lock: bool = True) -> Path:
+    """A fully-launched variant workspace for the watchdog: deployed scripts,
+    contracts + anchor + baseline curve/full-acc, the seeded ledger shard,
+    the history rows, a mock train log, and (optionally) the device lock.
+
+    The eval "run" is a stub template that cats a metric file sitting next
+    to the resolved ckpt — the eval CHAIN (render -> run -> extract) is the
+    real one, only the training/eval bodies are fake."""
+    art = tmp_path / "ws"
+    (art / "scripts").mkdir(parents=True)
+    for src in ("metric_curve.py", "verdict_decide.py", "history_lib.py",
+                "ledger_aggregate.py", "device_alloc.py", "render_run.sh",
+                "assert_shadow.py"):
+        shutil.copy(_SCRIPTS / src, art / "scripts" / src)
+    (art / "orca_inject").mkdir(parents=True)
+    for src in ("header.env", "sitecustomize.py"):
+        shutil.copy(_SCRIPTS / "orca_inject" / src, art / "orca_inject" / src)
+    (art / "templates").mkdir(parents=True)
+    (art / "templates" / "run_eval.template.sh").write_text(
+        'cat "<<ckpt>>.metric"\n', encoding="utf-8")
+    (art / "contracts.json").write_text(json.dumps({
+        "interpreter": {"sys_executable": sys.executable},
+        "full_train_budget": {"epochs": epochs, "seed": 7},
+        "eval": {"metric_extraction": {
+                     "kind": "stdout_regex",
+                     "pattern": r"final metric: ([0-9]*\.?[0-9]+)"},
+                 "metric_direction": direction, "tier": "A"},
+        "train": {"ckpt_output_rule": "{out_dir}/ckpt_*.pt",
+                  "epoch_metric_extraction":
+                      r"epoch (?P<epoch>[0-9]+) metric (?P<metric>[0-9]*\.?[0-9]+)",
+                  "ckpt_per_epoch": False},
+        "shadow": {"shadow_pkgs": ["pkg"]}}), encoding="utf-8")
+    (art / "readiness").mkdir(parents=True)
+    (art / "readiness" / "readiness.json").write_text(
+        json.dumps({"project_root": str(tmp_path)}), encoding="utf-8")
+    _write_anchor(art, budget=0.05)
+    (art / "baseline").mkdir(parents=True)
+    # the baseline curve is metric_curve extract's JSONL output (the raw
+    # text form is only the train LOG's format)
+    (art / "baseline" / "baseline_metrics.jsonl").write_text(
+        "".join(json.dumps({"epoch": e, "metric": float(baseline)}) + "\n"
+                for e in range(1, epochs + 1)), encoding="utf-8")
+    (art / "baseline" / "baseline_full_acc.json").write_text(json.dumps(
+        {"baseline_full_acc": float(baseline), "ckpt": "baseline/last.pt",
+         "full_train_budget": {"epochs": epochs, "seed": 7}}), encoding="utf-8")
+
+    vd = art / "variants" / "r1-01"
+    (vd / "metrics").mkdir(parents=True)
+    for shadow in (art / "shadow", vd / "shadow"):
+        (shadow / "pkg").mkdir(parents=True)
+        (shadow / "pkg" / "__init__.py").write_text("#\n", encoding="utf-8")
+    (vd / "train").mkdir(parents=True)
+    # the relaunch path really executes this stub: it "trains" epochs fast
+    # and touches the ckpts the contract's rule predicts
+    (vd / "train" / "train.rendered.sh").write_text(
+        "#!/usr/bin/env bash\n"
+        'cd "$(dirname "$0")"\n'
+        f"for i in $(seq 1 {epochs}); do echo \"epoch $i metric 0.85\"; "
+        "sleep 0.05; touch \"ckpt_$i.pt\"; done\n", encoding="utf-8")
+    if log_epochs is not None:
+        (vd / "train" / "train.log").write_text(
+            "".join(_EPOCH_LINE.format(e=e, m=candidate) + "\n"
+                    for e in log_epochs), encoding="utf-8")
+    if rc is not None:
+        (vd / "train" / "rc").write_text(f"{rc}\n", encoding="utf-8")
+    if with_lock:
+        _write_lock(art, 0, "r1-01", os.getpid())
+    # the shard exactly as the proposal node seeds it (§5.1 Step 6)
+    (vd / "ledger_entry.json").write_text(json.dumps(
+        {"vid": "r1-01", "status": "latency_pass", "epoch": None,
+         "metric": None, "gap": None, "device": None,
+         "change_summary": "swap erf activation for relu in block m",
+         "ts": "2026-08-31T00:00:00+00:00"}), encoding="utf-8")
+    hist = art / "history.jsonl"
+    _impl(hist, "r1-01", "sig:r1-01")
+    history_lib.append_latency(hist, "r1-01", structural_check="pass",
+                               makespan_cycles=400, latency_gate="pass",
+                               pred_actual_ratio=None, outcome="latency_pass")
+    return art
+
+
+def _watch_run(art: Path, *extra: str) -> subprocess.CompletedProcess:
+    env = dict(os.environ)
+    env["ORCA_ARTIFACTS_DIR"] = str(art)
+    return _run_cli([_BASH, str(_WATCH_SH), "--vid", "r1-01",
+                     "--device", "0", *extra], env=env, timeout=180)
+
+
+def _train_status(art: Path) -> dict:
+    return json.loads((art / "variants" / "r1-01" / "train_status.json")
+                      .read_text(encoding="utf-8"))
+
+
+def _latest_row(art: Path) -> dict:
+    return history_lib.read_latest(art / "history.jsonl")["r1-01"]
+
+
+def _watch_shard(art: Path) -> dict:
+    return json.loads((art / "variants" / "r1-01" / "ledger_entry.json")
+                      .read_text(encoding="utf-8"))
+
+
+def _write_final_metric_ckpts(art: Path, epochs: int,
+                              metric_line: str) -> None:
+    """The fake eval products: one ckpt + one .metric file per epoch, staged
+    mtimes so the LAST epoch's ckpt resolves as the final one."""
+    td = art / "variants" / "r1-01" / "train"
+    for i in range(1, epochs + 1):
+        (td / f"ckpt_{i}.pt").write_text("", encoding="utf-8")
+        (td / f"ckpt_{i}.pt.metric").write_text(metric_line, encoding="utf-8")
+        os.utime(td / f"ckpt_{i}.pt", (1700_000_000 + i, 1700_000_000 + i))
+        os.utime(td / f"ckpt_{i}.pt.metric",
+                 (1700_000_000 + i, 1700_000_000 + i))
+
+
+def test_watch_warmup_epochs_are_never_judged(tmp_path):
+    """§7.2 warmup: epochs <= ceil(0.1 x E) never judge and never count — a
+    wildly over-budget curve inside warmup leaves the streak at zero."""
+    art = _watch_ws(tmp_path, epochs=20, log_epochs=range(1, 3),
+                    candidate="0.1")        # warmup = ceil(0.1 x 20) = 2
+    sleeper = _attributed_session_sleeper("train.rendered.sh")
+    (art / "variants" / "r1-01" / "train" / "train.pid").write_text(
+        f"{sleeper.pid}\n", encoding="utf-8")
+    proc = _watch_run(art, "--once")
+    assert proc.returncode == 0, proc.stderr
+    status = _train_status(art)
+    assert status["stage"] == "training"
+    assert status["epoch"] == 2                       # seen, never judged
+    assert status["over_budget_streak"] == 0
+    assert status["gap"] is None
+    assert _latest_row(art).get("outcome") == "latency_pass"   # no terminal
+    assert sleeper.poll() is None                     # nobody was killed
+    assert (art / "devices" / "0.lock").is_file()
+
+
+def test_watch_nine_over_budget_epochs_do_not_kill(tmp_path):
+    """Judged epochs 3..11 (nine consecutive over-budget) leave the training
+    alive — the boundary is >= 10, and a poll cycle over an ALREADY-counted
+    epoch must not inflate the streak either."""
+    art = _watch_ws(tmp_path, epochs=20, log_epochs=range(1, 12))
+    sleeper = _attributed_session_sleeper("train.rendered.sh")
+    (art / "variants" / "r1-01" / "train" / "train.pid").write_text(
+        f"{sleeper.pid}\n", encoding="utf-8")
+    first = _watch_run(art, "--once")
+    assert first.returncode == 0, first.stderr
+    status = _train_status(art)
+    assert status["stage"] == "training"
+    assert status["epoch"] == 11 and status["over_budget_streak"] == 9
+    assert status["gap"] == pytest.approx(0.4)        # 0.9 - 0.5, normalized
+
+    # a re-poll over the SAME curve: per-epoch counting, never per-cycle
+    second = _watch_run(art, "--once")
+    assert second.returncode == 0, second.stderr
+    assert _train_status(art)["over_budget_streak"] == 9
+    assert sleeper.poll() is None
+    assert _latest_row(art).get("outcome") == "latency_pass"
+
+
+def test_watch_ten_over_budget_epochs_kill_then_replay_never_rekills(tmp_path):
+    """streak 10 kills the attributed process group, records the terminal
+    accuracy_fail row with the FROZEN re-parsed depth, does the full §7.4
+    terminal tail — and a re-entry replays the terminal without re-killing
+    or appending a second history row."""
+    art = _watch_ws(tmp_path, epochs=20, log_epochs=range(1, 13))
+    # judged epochs 3..12 -> the streak reaches 10 exactly at epoch 12
+    sleeper = _attributed_session_sleeper("train.rendered.sh")
+    (art / "variants" / "r1-01" / "train" / "train.pid").write_text(
+        f"{sleeper.pid}\n", encoding="utf-8")
+    proc = _watch_run(art, "--once")
+    assert proc.returncode == 0, proc.stderr
+    sleeper.wait(timeout=20)                          # the group died
+
+    status = _train_status(art)
+    assert status["stage"] == "killed"
+    assert status["stopped_at_epoch"] == 12           # frozen re-parse
+    assert status["over_budget_streak"] == 10
+    assert status["gap"] == pytest.approx(0.4)
+
+    row = _latest_row(art)
+    assert row["outcome"] == "accuracy_fail"
+    assert row["stopped_at_epoch"] == 12
+    assert row["over_budget_streak"] == 10
+    assert row["gap"] == pytest.approx(0.4)
+
+    # the terminal tail: lock released, rules marker, shard (with the
+    # proposal-seeded change_summary preserved), derived ledger aggregated
+    assert not (art / "devices" / "0.lock").exists()
+    assert (art / "variants" / "r1-01" / ".rules_pending").is_file()
+    shard = _watch_shard(art)
+    assert shard["status"] == "accuracy_fail"
+    assert shard["change_summary"] == "swap erf activation for relu in block m"
+    ledger = json.loads((art / "experiment_ledger.json").read_text(
+        encoding="utf-8"))
+    assert [r for r in ledger["rows"] if r["vid"] == "r1-01"][0]["status"] \
+        == "accuracy_fail"
+
+    # §7.6 replay: same terminal, no second kill, no second history row
+    rows_before = len(history_lib.read_rows(art / "history.jsonl"))
+    replay = _watch_run(art, "--once")
+    assert replay.returncode == 0, replay.stderr
+    assert _train_status(art)["stage"] == "killed"
+    assert len(history_lib.read_rows(art / "history.jsonl")) == rows_before
+
+
+def test_watch_kill_attribution_refusal_is_fatal_no_terminal(tmp_path):
+    """§14: the kill attribution check failing refuses the kill and FATALs —
+    the stranger survives, no terminal is written, the lock stays."""
+    art = _watch_ws(tmp_path, epochs=20, log_epochs=range(1, 13))
+    stranger = subprocess.Popen(["sleep", "300"], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+    _GUARDIANS.append(stranger)
+    (art / "variants" / "r1-01" / "train" / "train.pid").write_text(
+        f"{stranger.pid}\n", encoding="utf-8")
+    proc = _watch_run(art, "--once")
+    assert proc.returncode == 2
+    assert "refusing to kill" in proc.stderr
+    assert stranger.poll() is None                     # never touched
+    # no terminal written: either no train_status.json at all yet or a
+    # non-terminal stage — never killed|done|failed
+    status_path = art / "variants" / "r1-01" / "train_status.json"
+    assert (not status_path.exists()
+            or _train_status(art)["stage"] not in ("killed", "done", "failed"))
+    assert (art / "devices" / "0.lock").is_file()
+    assert _latest_row(art).get("outcome") == "latency_pass"
+
+
+def test_watch_natural_completion_success(tmp_path):
+    """rc == 0 -> the finalizer eval chain -> final_acc.json (null first) ->
+    final-budget backfill -> success with the direction-normalized gap."""
+    art = _watch_ws(tmp_path, epochs=5, log_epochs=range(1, 6),
+                    candidate="0.85", rc=0)
+    _write_final_metric_ckpts(art, 5, "final metric: 0.88\n")
+    proc = _watch_run(art, "--once")
+    assert proc.returncode == 0, proc.stderr
+    status = _train_status(art)
+    assert status["stage"] == "done"
+    assert status["stopped_at_epoch"] == 5             # = E on success
+
+    record = json.loads((art / "variants" / "r1-01" / "eval" / "final_acc.json")
+                        .read_text(encoding="utf-8"))
+    assert record["within_budget"] is True             # backfilled (§7.3)
+    assert record["final_acc"] == 0.88
+    assert record["baseline_full_acc"] == 0.9
+    assert record["metric_direction"] == "higher_better"
+    assert record["full_train_budget"] == {"epochs": 5, "seed": 7}
+
+    row = _latest_row(art)
+    assert row["outcome"] == "success"
+    assert row["final_acc"] == 0.88
+    assert row["gap"] == pytest.approx(0.02)           # 0.9 - 0.88
+    assert row["stopped_at_epoch"] == 5
+    assert _watch_shard(art)["status"] == "success"
+    assert not (art / "devices" / "0.lock").exists()
+    assert (art / "variants" / "r1-01" / ".rules_pending").is_file()
+
+
+def test_watch_natural_completion_accuracy_fail(tmp_path):
+    """A full-budget run whose final eval lands outside the anchor budget
+    terminalizes accuracy_fail (stage done — the run itself completed)."""
+    art = _watch_ws(tmp_path, epochs=5, log_epochs=range(1, 6),
+                    candidate="0.85", rc=0)
+    _write_final_metric_ckpts(art, 5, "final metric: 0.70\n")
+    proc = _watch_run(art, "--once")
+    assert proc.returncode == 0, proc.stderr
+    assert _train_status(art)["stage"] == "done"
+    record = json.loads((art / "variants" / "r1-01" / "eval" / "final_acc.json")
+                        .read_text(encoding="utf-8"))
+    assert record["within_budget"] is False
+    row = _latest_row(art)
+    assert row["outcome"] == "accuracy_fail"
+    assert row["gap"] == pytest.approx(0.2)
+    assert "final_acc" not in row                      # accuracy_fail extra
+    assert not (art / "devices" / "0.lock").exists()
+
+
+def test_watch_natural_completion_waits_for_baseline_anchor(tmp_path):
+    """The baseline's full-acc anchor may still be pending (both trainings
+    are asynchronous): the guardian WAITS, never judges against a guess."""
+    art = _watch_ws(tmp_path, epochs=5, log_epochs=range(1, 6),
+                    candidate="0.85", rc=0)
+    _write_final_metric_ckpts(art, 5, "final metric: 0.88\n")
+    (art / "baseline" / "baseline_full_acc.json").unlink()
+    proc = _watch_run(art, "--once")
+    assert proc.returncode == 0, proc.stderr
+    assert _train_status(art)["stage"] == "waiting"    # not terminal
+    assert _latest_row(art).get("outcome") == "latency_pass"
+    assert (art / "devices" / "0.lock").is_file()      # card still held
+
+
+def test_watch_nonzero_rc_is_probe_insufficient_train(tmp_path):
+    """rc != 0 is an honest failure exit (baseline-finalizer policy): terminal
+    probe_insufficient, no re-launch."""
+    art = _watch_ws(tmp_path, epochs=5, log_epochs=range(1, 4), rc=1)
+    proc = _watch_run(art, "--once")
+    assert proc.returncode == 0, proc.stderr
+    status = _train_status(art)
+    assert status["stage"] == "failed"
+    row = _latest_row(art)
+    assert row["outcome"] == "probe_insufficient"
+    assert row["stage"] == "train" and row["max_retries_hit"] is False
+    assert not (art / "devices" / "0.lock").exists()
+    attempts = art / "variants" / "r1-01" / "train" / ".train_attempts"
+    assert not attempts.exists()
+
+
+def test_watch_crash_without_rc_relaunches_then_finalizes(tmp_path):
+    """A dead group with no rc is a crash scene: the attempt log is archived,
+    partial ckpts wiped, the wrapper re-launched (from scratch), the claim
+    re-adopted — and the fresh run terminalizes through the real chain."""
+    art = _watch_ws(tmp_path, epochs=5)                # no log, no rc yet
+    vd = art / "variants" / "r1-01"
+    dead = _dead_pid()
+    (vd / "train" / "train.pid").write_text(f"{dead}\n", encoding="utf-8")
+    (vd / "train" / "train.log").write_text(
+        _EPOCH_LINE.format(e=1, m="0.85") + "\n", encoding="utf-8")
+    (vd / "metrics" / "metrics.jsonl").write_text(
+        json.dumps({"epoch": 1, "metric": 0.85}) + "\n", encoding="utf-8")
+    # the eval products for the fresh attempt (the wipe glob only matches
+    # *.pt, the .metric sidecars survive)
+    _write_final_metric_ckpts(art, 5, "final metric: 0.88\n")
+
+    relaunched = _watch_run(art, "--once")
+    assert relaunched.returncode == 0, relaunched.stderr
+    status = _train_status(art)
+    assert status["stage"] == "training" and status["epoch"] == 0   # reset
+    assert (vd / "train" / ".train_attempts").read_text(
+        encoding="utf-8").strip() == "1"
+    assert (vd / "train" / "train.crash1.log").is_file()           # archived
+    assert not (vd / "metrics" / "metrics.jsonl").exists()  # stale curve dropped
+    fresh_pid = int((vd / "train" / "train.pid").read_text(
+        encoding="utf-8").strip())
+    assert fresh_pid != dead and fresh_pid > 0
+    lock = json.loads((art / "devices" / "0.lock").read_text(encoding="utf-8"))
+    assert lock["vid"] == "r1-01"                       # claim re-adopted
+
+    # the fresh (stub) training finishes on its own; the next cycle finalizes
+    rc_path = vd / "train" / "rc"
+    for _ in range(100):
+        if rc_path.is_file():
+            break
+        time.sleep(0.2)
+    assert rc_path.read_text(encoding="utf-8").strip() == "0"
+    finalized = _watch_run(art, "--once")
+    assert finalized.returncode == 0, finalized.stderr
+    assert _train_status(art)["stage"] == "done"
+    assert _latest_row(art)["outcome"] == "success"
+
+
+def test_watch_crash_relaunch_budget_exhausted_is_probe_insufficient(tmp_path):
+    art = _watch_ws(tmp_path, epochs=5)
+    vd = art / "variants" / "r1-01"
+    (vd / "train" / "train.pid").write_text(f"{_dead_pid()}\n", encoding="utf-8")
+    (vd / "train" / ".train_attempts").write_text("3\n", encoding="utf-8")
+    proc = _watch_run(art, "--once")
+    assert proc.returncode == 0, proc.stderr
+    assert _train_status(art)["stage"] == "failed"
+    row = _latest_row(art)
+    assert row["outcome"] == "probe_insufficient"
+    assert row["stage"] == "relaunch_exhausted"
+    assert row["max_retries_hit"] is True
+    assert not (art / "devices" / "0.lock").exists()
+    assert _watch_shard(art)["status"] == "probe_insufficient"
+
+
+def test_watch_reentry_terminal_with_no_lock_is_a_clean_replay(tmp_path):
+    """§7.6 third state: the lock is already gone — the replay must not try
+    to release again (and must not error on the absent lock)."""
+    art = _watch_ws(tmp_path, epochs=5, log_epochs=range(1, 6), rc=0,
+                    with_lock=False)
+    (art / "variants" / "r1-01" / "train_status.json").write_text(json.dumps(
+        {"vid": "r1-01", "stage": "done", "epoch": 5, "metric": 0.85,
+         "gap": 0.05, "over_budget_streak": 0, "stopped_at_epoch": 5,
+         "device": 0, "ts": "2026-08-31T00:00:00+00:00"}), encoding="utf-8")
+    proc = _watch_run(art, "--once")
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["stage"] == "done"
+    rows = history_lib.read_rows(art / "history.jsonl")
+    assert all(r.get("outcome") != "success" for r in rows)  # nothing appended
+
+
+def _epoch_log_lines(pairs) -> str:
+    return "".join(_EPOCH_LINE.format(e=e, m=m) + "\n" for e, m in pairs)
+
+
+def test_watch_within_budget_epoch_resets_the_streak(tmp_path):
+    """The counting rule's other half: gap <= budget zeroes the streak —
+    nine over, one within, nine over leaves streak 9 and NO kill (a
+    regression to a monotone counter would pass the 9/10 tests and still
+    break the fairness invariant this guard exists to enforce)."""
+    art = _watch_ws(tmp_path, epochs=30)               # warmup = ceil(3) = 3
+    td = art / "variants" / "r1-01" / "train"
+    over, within = "0.5", "0.89"                       # baseline 0.9 budget 0.05
+    curve = [(e, over) for e in range(4, 13)]          # nine over budget
+    curve.append((13, within))                         # gap 0.01 -> RESET
+    curve += [(e, over) for e in range(14, 23)]        # nine more over
+    (td / "train.log").write_text(
+        _epoch_log_lines([(e, "0.9") for e in (1, 2, 3)])
+        + _epoch_log_lines(curve), encoding="utf-8")
+    sleeper = _attributed_session_sleeper("train.rendered.sh")
+    (td / "train.pid").write_text(f"{sleeper.pid}\n", encoding="utf-8")
+    proc = _watch_run(art, "--once")
+    assert proc.returncode == 0, proc.stderr
+    status = _train_status(art)
+    assert status["stage"] == "training"
+    assert status["epoch"] == 22
+    assert status["over_budget_streak"] == 9           # reset at epoch 13
+    assert status["gap"] == pytest.approx(0.4)
+    assert sleeper.poll() is None
+    assert _latest_row(art).get("outcome") == "latency_pass"
+
+
+def test_watch_lower_better_direction_early_stops(tmp_path):
+    """lower_better is a user-configurable contract: the normalized loss
+    flips (candidate ABOVE the baseline is the bad side) and the same
+    streak/kill machinery applies."""
+    art = _watch_ws(tmp_path, epochs=20, log_epochs=range(1, 13),
+                    candidate="0.9", baseline="0.5",
+                    direction="lower_better")
+    sleeper = _attributed_session_sleeper("train.rendered.sh")
+    (art / "variants" / "r1-01" / "train" / "train.pid").write_text(
+        f"{sleeper.pid}\n", encoding="utf-8")
+    proc = _watch_run(art, "--once")
+    assert proc.returncode == 0, proc.stderr
+    sleeper.wait(timeout=20)
+    status = _train_status(art)
+    assert status["stage"] == "killed"
+    assert status["gap"] == pytest.approx(0.4)         # candidate - baseline
+    row = _latest_row(art)
+    assert row["outcome"] == "accuracy_fail"
+    assert row["gap"] == pytest.approx(0.4)
+
+
+def test_watch_extract_failure_cycle_keeps_recorded_progress(tmp_path):
+    """A transient curve-parse failure must not silently reset the streak
+    (that would postpone the early stop by whole budget segments): the
+    failed cycle rewrites the status with the recorded progress kept."""
+    art = _watch_ws(tmp_path, epochs=20, log_epochs=range(1, 12))  # streak 9
+    td = art / "variants" / "r1-01" / "train"
+    sleeper = _attributed_session_sleeper("train.rendered.sh")
+    (td / "train.pid").write_text(f"{sleeper.pid}\n", encoding="utf-8")
+    first = _watch_run(art, "--once")
+    assert first.returncode == 0, first.stderr
+    assert _train_status(art)["over_budget_streak"] == 9
+
+    # the log turns unparseable mid-run (torn tail, wrong pattern, ...)
+    (td / "train.log").write_text("torn mid-run garbage\n", encoding="utf-8")
+    (art / "variants" / "r1-01" / "metrics" / "metrics.jsonl").unlink()
+    second = _watch_run(art, "--once")
+    assert second.returncode == 0, second.stderr
+    status = _train_status(art)
+    assert status["stage"] == "training"
+    assert status["epoch"] == 11 and status["over_budget_streak"] == 9  # kept
+    assert sleeper.poll() is None
+
+
+def test_watch_waiting_resumes_when_anchor_lands_and_bounds_on_dead_baseline(tmp_path):
+    """The waiting state is bounded twice over: the anchor landing resumes
+    the normal terminal chain, and a baseline that reached ITS terminal
+    state without ever producing the anchor closes the variant instead of
+    holding the card forever."""
+    art = _watch_ws(tmp_path, epochs=5, log_epochs=range(1, 6),
+                    candidate="0.85", rc=0)
+    _write_final_metric_ckpts(art, 5, "final metric: 0.88\n")
+    anchor = art / "baseline" / "baseline_full_acc.json"
+    anchor.unlink()
+    waiting = _watch_run(art, "--once")
+    assert waiting.returncode == 0, waiting.stderr
+    assert _train_status(art)["stage"] == "waiting"
+
+    # the anchor lands -> the next cycle runs the full final chain
+    anchor.write_text(json.dumps(
+        {"baseline_full_acc": 0.9, "ckpt": "baseline/last.pt",
+         "full_train_budget": {"epochs": 5, "seed": 7}}), encoding="utf-8")
+    resumed = _watch_run(art, "--once")
+    assert resumed.returncode == 0, resumed.stderr
+    assert _train_status(art)["stage"] == "done"
+    assert _latest_row(art)["outcome"] == "success"
+
+    # the dead-baseline bound: terminal train_final, anchor never coming
+    art2 = _watch_ws(tmp_path / "b", epochs=5, log_epochs=range(1, 6),
+                     candidate="0.85", rc=0)
+    _write_final_metric_ckpts(art2, 5, "final metric: 0.88\n")
+    (art2 / "baseline" / "baseline_full_acc.json").unlink()
+    (art2 / "baseline" / "train_final.json").write_text(json.dumps(
+        {"status": "failed", "rc": 1, "stage": "train"}), encoding="utf-8")
+    dead = _watch_run(art2, "--once")
+    assert dead.returncode == 0, dead.stderr
+    status = _train_status(art2)
+    assert status["stage"] == "failed"
+    row = _latest_row(art2)
+    assert row["outcome"] == "probe_insufficient"
+    assert row["stage"] == "baseline_anchor_unavailable"
+    assert not (art2 / "devices" / "0.lock").exists()   # the card is freed
+
+
+def test_watch_final_check_epoch_mismatch_is_probe_insufficient(tmp_path):
+    """rc == 0 but the log proves fewer epochs than the rendered budget: the
+    fairness precondition of the final judgment is broken — close as
+    probe_insufficient (final_check), never judge a short curve."""
+    art = _watch_ws(tmp_path, epochs=5, log_epochs=range(1, 4),
+                    candidate="0.85", rc=0)          # 3 epochs vs E=5
+    _write_final_metric_ckpts(art, 5, "final metric: 0.88\n")
+    proc = _watch_run(art, "--once")
+    assert proc.returncode == 0, proc.stderr
+    status = _train_status(art)
+    assert status["stage"] == "failed"
+    assert status["epoch"] == 3                       # the parsed shortfall
+    row = _latest_row(art)
+    assert row["outcome"] == "probe_insufficient"
+    assert row["stage"] == "final_check"
+    # no verdict was ever written over the short curve
+    assert not (art / "variants" / "r1-01" / "eval" / "final_acc.json").exists()
+    assert not (art / "devices" / "0.lock").exists()
+
+
+def test_probe_emit_watchdog_liveness_negative_branches(tmp_path):
+    """The restored watchdog check's two failure modes: a dead guardian with
+    no terminal state (unsupervised training) and a recycled pid whose
+    cmdline is not our guardian (pid reuse)."""
+    dead = _dead_pid()
+    art = _probe_ws(tmp_path, watchdog=False, liveness={})
+    vd = art / "variants" / "r1-01"
+    train_sleeper = _attributed_session_sleeper("train.rendered.sh")
+    (vd / "train" / "train.pid").write_text(f"{train_sleeper.pid}\n",
+                                            encoding="utf-8")
+    (vd / "watchdog.pid").write_text(f"{dead}\n", encoding="utf-8")
+    proc = _check_probe(art)
+    assert proc.returncode == 1
+    assert "unsupervised" in proc.stderr
+
+    # a LIVE pid that is not our guardian (pid reuse) — never counted
+    stranger = subprocess.Popen(["sleep", "300"], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+    _GUARDIANS.append(stranger)
+    (vd / "watchdog.pid").write_text(f"{stranger.pid}\n", encoding="utf-8")
+    reused = _check_probe(art)
+    assert reused.returncode == 1
+    assert "pid reuse" in reused.stderr
+
+    # the terminal state redeems a dead guardian (it finished its job)
+    (vd / "train_status.json").write_text(json.dumps(
+        {"vid": "r1-01", "stage": "done", "epoch": 5, "metric": 0.85,
+         "gap": 0.05, "over_budget_streak": 0, "stopped_at_epoch": 5,
+         "device": 0, "ts": "2026-08-31T00:00:00+00:00"}), encoding="utf-8")
+    redeemed = _check_probe(art)
+    assert redeemed.returncode == 0, redeemed.stderr
