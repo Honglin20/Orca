@@ -234,8 +234,10 @@ def test_gate_node_stamp_mismatch_routes_finish_failed(tmp_path):
     assert payload["decision"] == "finish-failed"
     assert ".VERSION" in payload["reason"] or "stamp" in payload["reason"]
     assert payload["error"].startswith("deploy --verify failed")
-    # the v6 disclosure payload carries the decision fields the catch-all
-    # consumer (po_report) expects, never a bare v5-shaped object
+    # the disclosure payload carries the v6 decision field set (the gate
+    # payload contract — decision/round/target_cycles/success_vids/
+    # in_flight), never a bare v5-shaped object; the decision itself
+    # matches no explicit route and lands in the catch-all
     assert payload["success_vids"] == [] and payload["in_flight"] == []
     assert payload["round"] == 0 and payload["target_cycles"] == 0
 

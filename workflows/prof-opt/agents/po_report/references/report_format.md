@@ -33,10 +33,14 @@ names a live, attribution-checked pid) plus every variant whose LATEST
 `success` / `accuracy_fail` / `probe_insufficient` / `latency_fail` — in
 any version). For each member, ONE bounded poll (≤ 60 s):
 
-- baseline: wait for `baseline/train_final.json`; pid dead → pass;
+- baseline: wait for `baseline/train_final.json`; pid dead (or the pid
+  file absent — the launch was torn before its guardian came alive) →
+  stop waiting, the state table judges;
 - variant: read `variants/<vid>/train_status.json` `stage` — a terminal
-  stage (`killed` / `done` / `failed`) → pass; `waiting` / `training` /
-  `final_eval_waiting` → wait within the poll.
+  stage (`killed` / `done` / `failed`) → stop waiting; `waiting` /
+  `training` → wait within the poll (a final-eval wait also records
+  `waiting` on disk; `final_eval_waiting` appears only in watchdog.log
+  lines, never in train_status.json).
 
 Anything still in flight when the polls top out → **park**: reply with a
 status message containing `do not call orca next` (name the awaited
