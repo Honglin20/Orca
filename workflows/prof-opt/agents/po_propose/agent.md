@@ -370,7 +370,15 @@ Loop while the vid's verdict is a repairable failure:
    when `accuracy_rules.json` exists, copy it byte-for-byte to
    `base/accuracy_rules_snapshot.json` (the rule panel's data source — the
    pool file itself lives outside the artifacts whitelist).
-4. **Emit** (in `mfu` mode drop `base/bottleneck_analysis.json` from the
+4. **Docs manifest push** (latency_pass path only, right before the emit):
+   ```bash
+   python3 "$ORCA_ARTIFACTS_DIR/scripts/push_curves.py" \
+     --artifacts "$ORCA_ARTIFACTS_DIR" --docs
+   ```
+   Pushes the analysis-docs manifest chart (the web docs panel's data
+   source). Best-effort by contract (no socket configured / push failure →
+   exit 0, stderr note) — never a gate, never a retry loop.
+5. **Emit** (in `mfu` mode drop `base/bottleneck_analysis.json` from the
    artifact list; `placeholder` mode keeps it):
    ```bash
    python3 "$ORCA_ARTIFACTS_DIR/scripts/emit_result.py" \

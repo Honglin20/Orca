@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-"""Create a portable Web dashboard snapshot for a prof-opt workspace."""
+"""Create a portable Web dashboard snapshot for a prof-opt workspace (v6 §4.2).
+
+Read path with a side effect (§7.5 trigger ②): every collect FIRST re-runs the
+deterministic ledger aggregator, so the shared experiment_ledger.json the
+snapshot renders always reflects the current per-variant shard set — the
+single entry point keeps the derived ledger convergent without the watchdogs
+coordinating.
+
+Variant rows expose the v6 §4.2 fields — status / latest_epoch /
+latest_metric / gap / device / change_summary — derived from the aggregated
+shard rows (vid/epoch/metric/gap/device/change_summary verbatim, epoch/metric
+surfaced under their dashboard names).
+"""
 from __future__ import annotations
 
 import argparse
@@ -8,6 +20,11 @@ import sys
 from html import escape
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ledger_aggregate  # noqa: E402
+
+SCHEMA_VERSION = 2
 
 
 def _json(path: Path, default: Any) -> Any:
@@ -19,8 +36,21 @@ def _json(path: Path, default: Any) -> Any:
         return default
 
 
+def _variant_view(row: dict[str, Any]) -> dict[str, Any]:
+    """A shard row -> the dashboard row (§4.2 field names)."""
+    return {
+        "vid": row.get("vid"),
+        "status": row.get("status"),
+        "latest_epoch": row.get("epoch"),
+        "latest_metric": row.get("metric"),
+        "gap": row.get("gap"),
+        "device": row.get("device"),
+        "change_summary": row.get("change_summary"),
+    }
+
+
 def snapshot(artifacts: Path) -> dict[str, Any]:
-    ledger = _json(artifacts / "experiment_ledger.json", {"rows": []})
+    ledger = ledger_aggregate.aggregate(artifacts)  # §7.5 trigger ②: refresh first
     best = _json(artifacts / "best.json", None)
     baseline = _json(artifacts / "base" / "bottleneck_report.json", {})
     curves: dict[str, list[dict[str, Any]]] = {}
@@ -34,27 +64,31 @@ def snapshot(artifacts: Path) -> dict[str, Any]:
             except json.JSONDecodeError:
                 continue
     return {
-        "schema_version": 1,
+        "schema_version": SCHEMA_VERSION,
         "baseline_makespan_cycles": baseline.get("makespan_cycles"),
         "best": best,
-        "variants": ledger.get("rows", []),
+        "variants": [_variant_view(r) for r in ledger.get("rows", [])],
         "curves": curves,
     }
 
 
 def _html(data: dict[str, Any]) -> str:
     rows = data.get("variants", [])
+    def _cell(row: dict[str, Any], key: str) -> str:
+        value = row.get(key, "")
+        return escape("" if value is None else str(value))
     body = "".join(
-        f"<tr><td>{escape(str(r.get('vid', '')))}</td><td>{escape(str(r.get('lever', '')))}"
-        f"</td><td>{escape(str(r.get('outcome', '')))}</td><td>{r.get('measured_makespan_cycles', '')}"
-        f"</td><td>{r.get('proxy_acc', '')}</td></tr>"
+        f"<tr><td>{_cell(r, 'vid')}</td><td>{_cell(r, 'status')}"
+        f"</td><td>{_cell(r, 'latest_epoch')}</td><td>{_cell(r, 'latest_metric')}"
+        f"</td><td>{_cell(r, 'gap')}</td><td>{_cell(r, 'device')}"
+        f"</td><td>{_cell(r, 'change_summary')}</td></tr>"
         for r in rows)
     payload = escape(json.dumps(data, ensure_ascii=False), quote=True)
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>prof-opt dashboard</title>
 <style>body{{font-family:system-ui,sans-serif;margin:24px;color:#17202a}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ccd1d1;padding:8px;text-align:left}}th{{background:#f2f4f4}}</style></head>
 <body><h1>Prof-Opt Dashboard</h1><p>Baseline makespan: <b>{data.get('baseline_makespan_cycles')}</b> cycles</p>
-<table><thead><tr><th>VID</th><th>Lever</th><th>Outcome</th><th>Makespan</th><th>Proxy metric</th></tr></thead><tbody>{body}</tbody></table>
+<table><thead><tr><th>VID</th><th>Status</th><th>Latest epoch</th><th>Latest metric</th><th>Gap</th><th>Device</th><th>Change summary</th></tr></thead><tbody>{body}</tbody></table>
 <script type="application/json" id="prof-opt-data">{payload}</script></body></html>
 """
 
@@ -65,7 +99,13 @@ def main() -> int:
     ns = ap.parse_args()
     root = Path(ns.artifacts)
     root.mkdir(parents=True, exist_ok=True)
-    data = snapshot(root)
+    try:
+        data = snapshot(root)
+    except (OSError, ValueError) as exc:
+        # a torn shard is a real anomaly (single-writer files) — fail loud
+        print(f"dashboard_snapshot: FAIL {type(exc).__name__}: {exc}",
+              file=sys.stderr)
+        return 2
     (root / "dashboard.json").write_text(
         json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     (root / "dashboard.html").write_text(_html(data), encoding="utf-8")

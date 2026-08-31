@@ -40,6 +40,7 @@ _SCRIPTS = _REPO / "workflows" / "prof-opt" / "agents" / "_po_scripts"
 sys.path.insert(0, str(_SCRIPTS))
 
 import history_lib  # noqa: E402
+import push_curves  # noqa: E402
 from analyze import ContractError, analyze  # noqa: E402
 from gate_decide import decide  # noqa: E402
 from advance_round import advance  # noqa: E402
@@ -3779,6 +3780,330 @@ def test_push_curves_ack_timeout_never_hangs(tmp_path: Path):
     assert not (art / ".chart_push.log").exists()  # failed push -> no audit
     assert proc.stderr                             # ...but visible on stderr
     thread.join(timeout=10)
+
+
+# ── push_curves v6 (§10): top-10 selection / pareto / docs manifest ───────────
+
+def _po_variant(art: Path, vid: str, *, curve=None, train_status=None,
+                shard=None, verdict=None, docs=()) -> None:
+    """Seed one variant directory's v6 state (P3 shapes: train_status.json /
+    ledger_entry.json shard / verdict.json / metric curve / analysis docs)."""
+    vdir = art / "variants" / vid
+    vdir.mkdir(parents=True, exist_ok=True)
+    if curve is not None:
+        (vdir / "metrics").mkdir(parents=True, exist_ok=True)
+        (vdir / "metrics" / "metrics.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in curve), encoding="utf-8")
+    if train_status is not None:
+        (vdir / "train_status.json").write_text(
+            json.dumps(train_status), encoding="utf-8")
+    if shard is not None:
+        (vdir / "ledger_entry.json").write_text(
+            json.dumps(shard), encoding="utf-8")
+    if verdict is not None:
+        (vdir / "verdict.json").write_text(
+            json.dumps(verdict), encoding="utf-8")
+    for doc in docs:
+        target = vdir / doc
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"[sentinel] {vid} {doc}\n", encoding="utf-8")
+
+
+def _po_ws(tmp_path: Path) -> Path:
+    art = tmp_path / "art"
+    (art / "baseline").mkdir(parents=True)
+    (art / "baseline" / "baseline_metrics.jsonl").write_text(
+        '{"epoch": 1, "metric": 0.4}\n', encoding="utf-8")
+    return art
+
+
+def test_push_curves_top10_selection_strategy(tmp_path: Path):
+    """§10.1 three-branch selection: ① in-flight by most recent update first,
+    ② terminal success next, ③ the rest by ascending gap (null last, vid as
+    the deterministic tiebreak) — baseline always present, cap at 9 variants,
+    the on-disk curve files beyond the cap are simply not pushed."""
+    art = _po_ws(tmp_path)
+    curve = [{"epoch": 1, "metric": 0.5}]
+    # tier 1 — in-flight (curve + no terminal state), newer ts first
+    _po_variant(art, "r1-old", curve=curve,
+                train_status={"vid": "r1-old", "stage": "training",
+                              "ts": "2026-08-31T10:00:00+00:00"},
+                shard={"vid": "r1-old", "status": "training"})
+    _po_variant(art, "r2-new", curve=curve,
+                train_status={"vid": "r2-new", "stage": "training",
+                              "ts": "2026-08-31T11:00:00+00:00"},
+                shard={"vid": "r2-new", "status": "training"})
+    # tier 2 — terminal success
+    _po_variant(art, "r3-succ", curve=curve,
+                train_status={"vid": "r3-succ", "stage": "done"},
+                shard={"vid": "r3-succ", "status": "success", "gap": 0.01})
+    # tier 3 — terminal non-success by ascending gap, then null-gap by vid
+    for vid, gap in (("r4-fail-small", 0.10), ("r5-fail-mid", 0.20),
+                     ("r6-fail-big", 0.30)):
+        _po_variant(art, vid, curve=curve,
+                    train_status={"vid": vid, "stage": "killed"},
+                    shard={"vid": vid, "status": "accuracy_fail", "gap": gap})
+    for vid in ("r7-fail-nul", "r8-fail-nul", "r10-fail-nul", "r11-fail-nul"):
+        _po_variant(art, vid, curve=curve,
+                    train_status={"vid": vid, "stage": "failed"},
+                    shard={"vid": vid, "status": "probe_insufficient",
+                           "gap": None})
+    # latency_pass but no training yet -> NO curve -> never selected
+    _po_variant(art, "r9-wait",
+                shard={"vid": "r9-wait", "status": "latency_pass"},
+                verdict={"vid": "r9-wait", "makespan_cycles": 900,
+                         "outcome": "latency_pass"})
+    # 10 variant curves, cap 9: the LAST tier-3 null-gap entry drops (r8)
+    sock = tmp_path / "chart.sock"
+    thread, messages = _chart_server(sock, replies=1)
+    proc = _push(art, sock)
+    assert proc.returncode == 0, proc.stderr
+    thread.join(timeout=10)
+    payload = messages[0]["payload"]
+    assert payload["chart_type"] == "line"
+    vids = {row["vid"] for row in payload["data"]}
+    assert "baseline" in vids                                  # §10.1 always
+    assert "r9-wait" not in vids                        # no curve -> no line
+    assert "r8-fail-nul" not in vids                    # beyond the 9 cap
+    assert vids == {"baseline", "r1-old", "r2-new", "r3-succ", "r4-fail-small",
+                    "r5-fail-mid", "r6-fail-big", "r7-fail-nul", "r10-fail-nul",
+                    "r11-fail-nul"}
+    # audit reflects exactly the pushed set (full files stay on disk)
+    audit = json.loads((art / ".chart_push.log").read_text(
+        encoding="utf-8").splitlines()[0])
+    assert {c["vid"] for c in audit["curves"]} == vids
+    # the dropped curve file is untouched on disk (盘面全量保留)
+    assert (art / "variants" / "r8-fail-nul" / "metrics" /
+            "metrics.jsonl").is_file()
+
+
+def test_push_curves_pareto_payload(tmp_path: Path):
+    """§10.2 every variant one point: x = reduction vs the origin-anchor
+    baseline makespan (negative = slower), y = final gap (metric fallback,
+    null = the 达线未训 placeholder), status-colored, directions pinned."""
+    art = _po_ws(tmp_path)
+    (art / "base").mkdir()
+    (art / "base" / "origin_anchor.json").write_text(json.dumps(
+        {"baseline_makespan_cycles": 1000, "target_cycles": 500,
+         "accuracy_budget": 0.1}), encoding="utf-8")
+    _po_variant(art, "r1-01", curve=[{"epoch": 1, "metric": 0.38}],
+                train_status={"vid": "r1-01", "stage": "done"},
+                shard={"vid": "r1-01", "status": "success", "gap": 0.02,
+                       "metric": 0.42},
+                verdict={"vid": "r1-01", "makespan_cycles": 800,
+                         "outcome": "latency_pass"})
+    _po_variant(art, "r2-01", curve=[{"epoch": 1, "metric": 0.45}],
+                train_status={"vid": "r2-01", "stage": "training"},
+                shard={"vid": "r2-01", "status": "training", "gap": None,
+                       "metric": 0.45},
+                verdict={"vid": "r2-01", "makespan_cycles": 1200,
+                         "outcome": "latency_pass"})
+    # 达线未训: seeded shard only — y must stay null and be disclosed
+    _po_variant(art, "r3-01",
+                shard={"vid": "r3-01", "status": "latency_pass", "gap": None,
+                       "metric": None},
+                verdict={"vid": "r3-01", "makespan_cycles": 900,
+                         "outcome": "latency_pass"})
+    # no verdict yet (mid-measurement) -> no x -> not plottable, no point
+    _po_variant(art, "r4-01", curve=[{"epoch": 1, "metric": 0.5}],
+                train_status={"vid": "r4-01", "stage": "training"},
+                shard={"vid": "r4-01", "status": "training"})
+    sock = tmp_path / "chart.sock"
+    thread, messages = _chart_server(sock, replies=2)   # line + pareto
+    proc = _push(art, sock)
+    assert proc.returncode == 0, proc.stderr
+    thread.join(timeout=10)
+    by_type = {m["payload"]["chart_type"]: m["payload"] for m in messages}
+    pareto = by_type["pareto"]
+    assert pareto["label"] == "prof-opt/pareto"
+    assert pareto["pareto_x_direction"] == "max"
+    assert pareto["pareto_y_direction"] == "min"
+    assert pareto["color"] == "color"                    # per-row status color
+    points = {row["vid"]: row for row in pareto["data"]}
+    assert set(points) == {"r1-01", "r2-01", "r3-01"}    # 全量变体一个点
+    assert points["r1-01"]["x"] == 20.0                  # 1 - 800/1000
+    assert points["r1-01"]["y"] == 0.02
+    assert points["r1-01"]["status"] == "success"
+    assert points["r2-01"]["x"] == -20.0                 # slower than baseline
+    assert points["r2-01"]["y"] == 0.45            # metric fallback (no gap)
+    assert points["r2-01"]["status"] == "in-flight"
+    assert points["r3-01"]["y"] is None                  # 达线未训占位
+    assert points["r3-01"]["status"] == "latency_pass"
+    assert "null" in pareto["caption"]                   # disclosed, not silent
+    assert all(isinstance(row["color"], str) and row["color"].startswith("#")
+               for row in pareto["data"])
+
+
+def test_push_curves_docs_manifest_whitelist_and_columns(tmp_path: Path):
+    """§10.4 the docs table: canonical columns vid/doc/status/path
+    (+updated_at), paths ONLY from the constructed artifacts-relative
+    whitelist, every listed file exists, eliminated variants stay listed
+    (web §3.3), rounds + rules snapshot ride along (S-9)."""
+    art = _po_ws(tmp_path)
+    for rel in ("baseline/business_logic.md", "base/information_analysis.md",
+                "base/profile/mfu_bottleneck_report.md",
+                "rounds/001/analysis.md", "rounds/002/analysis.md",
+                "rounds/notes/analysis.md",          # non-numeric round dir
+                "base/accuracy_rules_snapshot.json"):
+        target = art / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("doc\n", encoding="utf-8")
+    _po_variant(art, "r1-01",
+                train_status={"vid": "r1-01", "stage": "done"},
+                shard={"vid": "r1-01", "status": "success"},
+                docs=("business_logic.md", "information_analysis.md",
+                      "conformance.md", "profile/mfu_bottleneck_report.md"))
+    _po_variant(art, "r2-01",     # eliminated — its docs STAY listed (web §3.3)
+                verdict={"vid": "r2-01", "makespan_cycles": 900,
+                         "outcome": "latency_fail"},
+                docs=("business_logic.md",))
+    sock = tmp_path / "chart.sock"
+    thread, messages = _chart_server(sock, replies=2)   # line + docs (no pareto anchor)
+    proc = _push(art, sock, "--docs")
+    assert proc.returncode == 0, proc.stderr
+    thread.join(timeout=10)
+    by_type = {m["payload"]["chart_type"]: m["payload"] for m in messages}
+    # no baseline-makespan anchor on this workspace -> the pareto chart is
+    # SKIPPED (only line + docs pushed), never fabricated
+    assert "pareto" not in by_type
+    docs = by_type["table"]
+    assert docs["label"] == "prof-opt/docs"
+    assert docs["columns"][:4] == ["vid", "doc", "status", "path"]
+    rows = {row["path"]: row for row in docs["data"]}
+    assert "variants/r1-01/business_logic.md" in rows
+    assert "variants/r2-01/business_logic.md" in rows      # 淘汰变体保留
+    assert "baseline/business_logic.md" in rows
+    assert "base/information_analysis.md" in rows
+    assert "base/profile/mfu_bottleneck_report.md" in rows
+    assert "rounds/001/analysis.md" in rows and "rounds/002/analysis.md" in rows
+    assert "base/accuracy_rules_snapshot.json" in rows     # S-9 rules source
+    assert rows["variants/r2-01/business_logic.md"]["status"] == "latency_fail"
+    assert rows["variants/r1-01/business_logic.md"]["status"] == "success"
+    assert rows["base/accuracy_rules_snapshot.json"]["vid"] == "rules"
+    # whitelist invariants: every path is artifacts-relative, traverses
+    # nothing, and resolves to a file that exists inside the artifacts root
+    for path, row in rows.items():
+        assert not Path(path).is_absolute() and ".." not in Path(path).parts
+        assert (art / path).is_file()
+        assert set(row) == {"vid", "doc", "status", "path", "updated_at"}
+    assert "rounds/notes/analysis.md" not in rows          # non-numeric round
+    # idempotent replace (web §2.3): a second push carries the identical
+    # label+title+data — the front end REPLACES, never duplicates
+    thread2, messages2 = _chart_server(sock, replies=2)
+    proc2 = _push(art, sock, "--docs")
+    assert proc2.returncode == 0, proc2.stderr
+    thread2.join(timeout=10)
+    docs2 = {m["payload"]["chart_type"]: m["payload"] for m in messages2}["table"]
+    assert docs2["title"] == docs["title"]
+    assert docs2["data"] == docs["data"]
+
+
+def test_push_curves_recency_and_anchor_fallbacks(tmp_path: Path):
+    """Unit pins for the deterministic fallbacks: _recency falls back to the
+    curve file's mtime when the watchdog ts is absent or garbage, and
+    _baseline_makespan walks the frozen-authority chain (origin anchor ->
+    bottleneck report -> profile summary) and refuses to fabricate an anchor
+    when none is on disk."""
+    from datetime import datetime
+    curve = tmp_path / "metrics.jsonl"
+    curve.write_text('{"epoch": 1, "metric": 0.5}\n', encoding="utf-8")
+    os.utime(curve, (1700000000, 1700000000))
+    assert push_curves._recency({"ts": ""}, curve) == 1700000000.0
+    assert push_curves._recency({"ts": "garbage"}, curve) == 1700000000.0
+    assert push_curves._recency(
+        {"ts": "2026-08-31T11:00:00+00:00"}, curve) == \
+        datetime.fromisoformat("2026-08-31T11:00:00+00:00").timestamp()
+
+    art = tmp_path / "art2"
+    (art / "base" / "profile").mkdir(parents=True)
+    assert push_curves._baseline_makespan(art) is None      # no fabrication
+    (art / "base" / "profile" / "profile_summary.json").write_text(
+        json.dumps({"makespan_cycles": 300}), encoding="utf-8")
+    assert push_curves._baseline_makespan(art) == 300.0
+    (art / "base" / "bottleneck_report.json").write_text(
+        json.dumps({"makespan_cycles": 350}), encoding="utf-8")
+    assert push_curves._baseline_makespan(art) == 350.0
+    (art / "base" / "origin_anchor.json").write_text(
+        json.dumps({"baseline_makespan_cycles": 712}), encoding="utf-8")
+    assert push_curves._baseline_makespan(art) == 712.0     # frozen authority
+
+
+def test_push_curves_variant_state_verdict_only(tmp_path: Path):
+    """Without a ledger shard the verdict alone still drives the status —
+    one outcome source for both the terminal and the 达线未训 branch."""
+    vdir = tmp_path / "r1-01"
+    vdir.mkdir()
+    assert push_curves._variant_state(vdir) == {
+        "vid": "r1-01", "terminal": False, "status": "in-flight",
+        "gap": None, "metric": None, "ts": "", "makespan": None}
+    (vdir / "verdict.json").write_text(json.dumps(
+        {"vid": "r1-01", "makespan_cycles": 900,
+         "outcome": "latency_fail"}), encoding="utf-8")
+    state = push_curves._variant_state(vdir)
+    assert state["terminal"] and state["status"] == "latency_fail"
+    assert state["makespan"] == 900
+    (vdir / "verdict.json").write_text(json.dumps(
+        {"vid": "r1-01", "makespan_cycles": 900,
+         "outcome": "latency_pass"}), encoding="utf-8")
+    state = push_curves._variant_state(vdir)
+    assert not state["terminal"] and state["status"] == "latency_pass"
+
+
+# ── dashboard_snapshot v6 (§4.2/§7.5-②): aggregate-then-read + new fields ────
+
+def test_dashboard_snapshot_aggregates_and_exposes_v6_fields(tmp_path: Path):
+    """The snapshot FIRST re-runs the ledger aggregator (§7.5 trigger ② — the
+    read path keeps the derived ledger convergent) and surfaces the §4.2
+    fields: status / latest_epoch / latest_metric / gap / device /
+    change_summary."""
+    art = tmp_path / "art"
+    (art / "baseline").mkdir(parents=True)
+    (art / "variants" / "r1-01").mkdir(parents=True)
+    (art / "baseline" / "ledger_entry.json").write_text(json.dumps(
+        {"vid": "baseline", "status": "done", "epoch": 30, "metric": 0.9,
+         "gap": None, "device": 0, "change_summary": None,
+         "ts": "2026-08-31T00:00:00+00:00"}), encoding="utf-8")
+    (art / "variants" / "r1-01" / "ledger_entry.json").write_text(json.dumps(
+        {"vid": "r1-01", "status": "success", "epoch": 30, "metric": 0.88,
+         "gap": 0.02, "device": 1, "change_summary": "gelu->relu blocks.0",
+         "ts": "2026-08-31T01:00:00+00:00"}), encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "dashboard_snapshot.py"),
+         "--artifacts", str(art)],
+        capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    # §7.5 trigger ②: the derived ledger was rebuilt from the shards
+    ledger = json.loads((art / "experiment_ledger.json").read_text(
+        encoding="utf-8"))
+    assert [r["vid"] for r in ledger["rows"]] == ["baseline", "r1-01"]
+    data = json.loads((art / "dashboard.json").read_text(encoding="utf-8"))
+    assert data["schema_version"] == 2
+    rows = {r["vid"]: r for r in data["variants"]}
+    v = rows["r1-01"]
+    assert v["status"] == "success"
+    assert v["latest_epoch"] == 30
+    assert v["latest_metric"] == 0.88
+    assert v["gap"] == 0.02
+    assert v["device"] == 1
+    assert v["change_summary"] == "gelu->relu blocks.0"
+    html = (art / "dashboard.html").read_text(encoding="utf-8")
+    assert "Latest epoch" in html and "Change summary" in html
+
+
+def test_dashboard_snapshot_fails_loud_on_torn_shard(tmp_path: Path):
+    """A torn shard is a real anomaly (single-writer files) — the snapshot
+    fails loud (exit 2) instead of rendering a silently stale ledger."""
+    art = tmp_path / "art"
+    (art / "variants" / "r1-01").mkdir(parents=True)
+    (art / "variants" / "r1-01" / "ledger_entry.json").write_text(
+        '{"torn', encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "dashboard_snapshot.py"),
+         "--artifacts", str(art)],
+        capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 2
+    assert "FAIL" in proc.stderr
+    assert not (art / "dashboard.json").exists()
 
 
 # ── run_latency_recheck (v5): mode-conditioned gate, thresholds retired ──────
