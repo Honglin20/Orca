@@ -24,5 +24,5 @@
 ## 工作区遗留（非任务，不动）
 
 - `.e2e_po/`、`.e2e_spe2e/`、`.e2e_perfver/`、`.e2e_scratch/` scratch（untracked，不提交）
-- `orca/compile/catalog.py` + `tests/compile/test_catalog.py`（会话前遗留）
 - `tests/e2e_phase14/` tape 产物（测试运行产物，不提交）
+- （2026-09-01 catalog.py + test_catalog.py 遗留改动已验证并提交：261dafe）
