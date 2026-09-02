@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-09-02] feat(prof-opt): v7 重设计——mfu 唯一链路 + 判断力归还 + 校验全覆盖（commit `1034401..dc6ab97`，16 commits）
+
+v6 真机首跑四病根根治：删 placeholder 估算与模式嗅探（用户拍板零降级，mfu-analyzer 调内网工具唯一链路）；设备分配改 agent 看原文选卡 + `claim --idx`；双 analyst 合并 variant-assessor + information-analyst 产出方恢复；§12 删除清单 22 项 + §13 产物三元组对照表 19 门逐行三查（476 passed，tars validate 0 warning，三层审查闭环）。真机 E2E 归用户。详见 [release note](../releases/2026-09-02-prof-opt-v7.md)。
+
 ## [2026-09-01] feat(prof-opt): v6 重设计——单变体收敛 + 异步训练流水线 + 流式早停 + Web 分析视图（commit `0653a47..b39c123`，14 commits）
 
 prof-opt 从 v5 双相门控重写为 v6：每轮 1 变体收敛到 target（修复内环 ≤5）+ npu/cuda 设备账本（probe 认卡启动即放行、watchdog detached 流式早停连续 10 超预算杀）+ ledger 分片聚合 + top-10/pareto/docs 清单推送 + web 只读分析文档面板（点开才渲染）；8→7 节点（po_full_train 退役）。SDD loop 全流程：SPEC 终审（3 拍板合入）+ 计划 3 轮对抗 + 8 实现批次内环全闭环 + 逻辑验证环 PASS（0 代码缺陷，po 250 passed / 0 skipped，vitest 614，tars validate 0/0）；真机 E2E 归用户。详见 [release note](../releases/2026-09-01-prof-opt-v6.md)。

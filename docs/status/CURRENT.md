@@ -4,25 +4,24 @@
 
 ---
 
-## 当前任务：无（prof-opt v6 已完成，2026-09-01 收尾归档）
+## 当前任务：无（prof-opt v7 已完成，2026-09-02 收尾归档）
 
-上一任务：prof-opt v6 重设计（A 线机制 + B 线 web）——SPEC 终审、14 commits、逻辑验证 PASS。
-见 CHANGELOG 索引 + `docs/releases/2026-09-01-prof-opt-v6.md`。
+上一任务：prof-opt v7 重设计——mfu 唯一链路 + 判断力归还 + 校验全覆盖。
+见 CHANGELOG 索引 + `docs/releases/2026-09-02-prof-opt-v7.md`（SPEC：`docs/specs/prof-opt-v7-spec.md`）。
 
-## 真机清单（归用户，v6 §16 / release note）
+## 真机清单（归用户）
 
-- npu/cuda 多卡真实分配、真实 mfu 评测链路、长训练流式早停实测
-- web 文档面板 + live chart 推送真机联调
-- playwright UI 套件（本机 chromium 缺 libnspr4）
+- v7 真机 E2E（in-session + claude 后端 + tars skill）：内网评测工具真实行为、
+  watchdog SIGTERM/早停/等锚、agent 选卡真机分配
+- 旧 v6 工作区复跑需 `fresh_start=true`（BASELINE.lock v2）
 
 ## 遗留 backlog（非阻塞）
 
-- playwright 9d 补用例（`tests/iface/web/test_playwright_9d.py`，环境修复后）
-- file:// 图片破图降级（web 面板，已声明取舍）
-- v5 用例面 44 个仍绿，若 v5 脚本后续彻底退役需同步清理
+- 仓库预存 422 测试失败（旧扁平 workflows/*.yaml 布局引用 + playwright 环境），
+  与 prof-opt 无关，需另立任务收敛
+- playwright 9d 补用例（环境修复后）
 
 ## 工作区遗留（非任务，不动）
 
 - `.e2e_po/`、`.e2e_spe2e/`、`.e2e_perfver/`、`.e2e_scratch/` scratch（untracked，不提交）
 - `tests/e2e_phase14/` tape 产物（测试运行产物，不提交）
-- （2026-09-01 catalog.py + test_catalog.py 遗留改动已验证并提交：261dafe）
