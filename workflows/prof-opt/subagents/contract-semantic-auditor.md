@@ -38,8 +38,9 @@ The caller will provide:
    - `full_train_budget` / `proxy_budget` match
      `proxy_budget_selection.json`;
    - `exemptions` matches `exemptions.json`;
-   - top-level `reason` contains the admission clause recorded in the caller's
-     prompt.
+   - top-level `reason` is non-empty, and `admission_clause_ack` is exactly
+     the boolean `true` (the clause text itself lives only in the caller's
+     agent definition — verify the acknowledgment key, never a sentence).
 3. Do NOT judge whether the values are business-optimal. Only report
    traceability mismatches, missing evidence, and inconsistent facts.
 4. Write `<report_path>`. First line must be the sentinel above. Then a short

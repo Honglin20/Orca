@@ -209,9 +209,13 @@ python3 "$ORCA_AGENT_RESOURCES/scripts/snapshot_diff.py" \
 
 ### Step 9: paradigm-verifier (tier B only)
 
-For every tier-B adapted entry, dispatch `paradigm-verifier`; the report must
-be on disk with the exact sentinel. `fail` → fix once, re-measure, verify
-again. Second `fail` → tier C / `viable=false`.
+For every tier-B adapted entry, dispatch `paradigm-verifier` with inputs:
+`<project_root>` (readiness/readiness.json), `<adapted_entry>` (the adapted
+entry path under `adapted/`), and `<report_path>` =
+`verify/paradigm_verifier_report_<entry>.md` (one report per adapted entry).
+Allowed adaptations stay at the md's fixed defaults — you never extend them.
+The report must be on disk with the exact sentinel. `fail` → fix once,
+re-measure, verify again. Second `fail` → tier C / `viable=false`.
 
 ### Validation (gate)
 

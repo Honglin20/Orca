@@ -24,7 +24,7 @@ if ! bash "$ART/scripts/deploy_scripts.sh" --verify; then
   python3 "$ART/scripts/emit_result.py" \
     --field decision=finish-failed --field round=0 --field target_cycles=0 \
     --field 'success_vids=[]' --field 'in_flight=[]' \
-    --field "reason=deployed script set failed its .VERSION stamp check (tampered or half-deployed) — rebuild the workspace with fresh_start" \
+    --field "reason=deployed script set failed its .VERSION stamp check (tampered or half-deployed) — do NOT fresh_start mid-run; redeploy the shared scripts or escalate for manual intervention" \
     --field "error=deploy --verify failed (see stderr in the run log)"
   exit 0
 fi

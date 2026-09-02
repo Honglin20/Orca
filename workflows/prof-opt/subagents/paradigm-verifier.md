@@ -25,7 +25,7 @@ The caller will provide:
    instead of judging beyond it.
 2. **Adapted entry**: the path under the workspace `adapted/` directory
    (`train_proxy_entry.py` and/or `eval_entry.py`).
-3. **Allowed adaptations** (defaults; the caller may extend): (a) new CLI
+3. **Allowed adaptations** (fixed defaults; the caller never extends them): (a) new CLI
    switches for epochs / out-dir / seed; (b) path parameterization
    (out-dir, checkpoint path) replacing hardcoded values; (c)
    intra-workspace import adjustments needed to run from the workspace.

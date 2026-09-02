@@ -325,7 +325,9 @@ release --artifacts <ws> --idx <N>                 （不变，幂等）
 - F9 check_flatten.sh 解释器优先级注释与代码对齐。
 - F10 metric direction 校验按 manifest 清单逐指标核对（不再全文 grep 一次）；manifest 与
   contracts 的 higher-better/higher_better 拼写统一为一套。
-- F11 emit 示例数组删除字面 `...`，给出完整可照抄清单（含 profile 三参数落盘产物）。
+- F11 emit 示例数组删除字面 `...`，给出完整可照抄清单（勘误 2026-09-02：原括注
+  「含 profile 三参数落盘产物」与 §2/§3.1 矛盾——三参数不经 flatten 落盘，唯一落点是
+  po_contract 的 contracts.json，实现正确）。
 
 **po_contract**
 - C1 REUSE 分支「read readiness_path」→「read contracts_path」（本节点 schema 字段）。
