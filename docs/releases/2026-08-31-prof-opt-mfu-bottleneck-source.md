@@ -1,3 +1,4 @@
+> SUPERSEDED by docs/specs/prof-opt-v7-spec.md
 # prof-opt: mfu 模式瓶颈分析直接采用 mfu-analyzer 报告
 
 ## 背景

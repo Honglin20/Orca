@@ -1,3 +1,4 @@
+> SUPERSEDED by docs/specs/prof-opt-v7-spec.md
 # prof-opt：信息成分拆解 → 创新结构提案
 
 ## 动机
