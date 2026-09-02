@@ -24,7 +24,19 @@ class MetricCurveError(RuntimeError):
     """Raised when the log cannot prove the requested metric curve."""
 
 
-def _extract(log_path: Path, pattern: str) -> list[dict[str, int | float]]:
+def _extract(log_path: Path, pattern: str) -> tuple[list[dict[str, int | float]],
+                                                    list[int]]:
+    """Parse the log into (points, duplicate_epochs).
+
+    v7 §7.2 curve contract: when an epoch has MULTIPLE metric lines the
+    LAST one wins (re-printed/refreshed progress lines are legitimate);
+    the affected epochs are returned once each for the caller to disclose —
+    never silently swallowed, never a hard error.
+
+    "no lines yet" (empty/whitespace log) is a TRANSIENT error distinct
+    from a pattern mismatch: a non-empty log with zero matches raises
+    naming the pattern (pattern/format drift — fail loud at the right
+    cause)."""
     try:
         regex = re.compile(pattern, re.MULTILINE)
     except re.error as exc:
@@ -36,8 +48,10 @@ def _extract(log_path: Path, pattern: str) -> list[dict[str, int | float]]:
     if not log_path.is_file():
         raise MetricCurveError(f"training log not found: {log_path}")
     text = log_path.read_text(encoding="utf-8", errors="replace")
-    points: list[dict[str, int | float]] = []
-    seen: set[int] = set()
+    if not text.strip():
+        raise MetricCurveError(f"training log has no lines yet: {log_path}")
+    points: dict[int, float] = {}
+    duplicates: list[int] = []
     for match in regex.finditer(text):
         try:
             epoch = int(match.group("epoch"))
@@ -46,22 +60,25 @@ def _extract(log_path: Path, pattern: str) -> list[dict[str, int | float]]:
             raw = match.group(0)
             raise MetricCurveError(
                 f"epoch/metric in log line is not numeric: {raw!r}") from exc
-        if epoch in seen:
-            raise MetricCurveError(f"duplicate metric for epoch {epoch}")
-        seen.add(epoch)
-        points.append({"epoch": epoch, "metric": metric})
+        if epoch in points and epoch not in duplicates:
+            duplicates.append(epoch)
+        points[epoch] = metric
 
-    points.sort(key=lambda item: int(item["epoch"]))
     if not points:
-        raise MetricCurveError(f"no epoch metric matched in {log_path}")
+        raise MetricCurveError(
+            f"no epoch metric matched in {log_path} — the contract pattern "
+            f"{pattern!r} matched nothing in a "
+            f"{len(text.splitlines())}-line log (pattern/format drift, not "
+            f"an early-state log)")
     expected = list(range(1, len(points) + 1))
-    actual = [int(item["epoch"]) for item in points]
+    actual = sorted(points)
     if actual != expected:
         missing = sorted(set(expected) - set(actual))
         raise MetricCurveError(
             f"epoch sequence is not contiguous from 1: got {actual}; "
             f"missing examples={missing[:10]}")
-    return points
+    return ([{"epoch": e, "metric": points[e]} for e in sorted(points)],
+            sorted(duplicates))
 
 
 def load_curve(path: Path) -> list[dict[str, int | float]]:
@@ -182,7 +199,7 @@ def main() -> int:
             if bool(ns.pattern) == bool(ns.contract):
                 raise MetricCurveError("use exactly one of --pattern or --contract")
             pattern = ns.pattern or _contract_pattern(Path(ns.contract))
-            points = _extract(Path(ns.log), pattern)
+            points, duplicates = _extract(Path(ns.log), pattern)
             if ns.expected_epochs is not None:
                 if len(points) != ns.expected_epochs:
                     raise MetricCurveError(
@@ -193,7 +210,13 @@ def main() -> int:
             out.write_text("".join(
                 json.dumps(row, sort_keys=True) + "\n" for row in points),
                 encoding="utf-8")
-            print(json.dumps({"path": str(out), "epochs": len(points)}))
+            summary: dict = {"path": str(out), "epochs": len(points)}
+            if duplicates:
+                # one disclosure, surfaced not swallowed (v7 §7.2)
+                summary["duplicate_epochs_last_wins"] = duplicates
+                print(f"metric_curve: note: duplicate epoch metric lines — "
+                      f"last line wins for epochs {duplicates}", file=sys.stderr)
+            print(json.dumps(summary))
         else:
             result = compare(load_curve(Path(ns.baseline)),
                              load_curve(Path(ns.candidate)),
