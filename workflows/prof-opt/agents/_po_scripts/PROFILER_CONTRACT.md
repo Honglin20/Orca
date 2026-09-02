@@ -1,39 +1,39 @@
 # Profiler Contract (v1)
 
-External contract for the profile function. `placeholder_profiler.py` is the
-reference implementation; in mfu real-evaluation mode the deterministic
-`mfu_adapter.py` converter produces these artifacts from the raw
-`mfu_benchmark.py` products and MUST satisfy this document exactly. Field
-sets are closed: consumers validate and fail loud on unknown keys, so do not
-add keys without versioning `schema_version`.
+External contract for the profile four-piece. v7: the ONE profiling path is
+the mfu chain — the `mfu-analyzer` subagent drives the user's in-network
+`mfu_benchmark.py` (the deployed `mfu_benchmark.py` is the CLI-shape stand-in
+for local runs; the real machine swaps in the real script, same CLI), and
+the deterministic `mfu_adapter.py` converter produces these artifacts from
+the raw products and MUST satisfy this document exactly. There is no
+estimator path and no fallback. Field sets are closed: consumers validate
+and fail loud on unknown keys, so do not add keys without versioning
+`schema_version`.
 
 ## CLI
 
 ```
-<profile_script> --onnx <path> --out-dir <dir> [--seed 0]
+mfu_benchmark.py <onnx> --chip <6613|1951> --precision <INT8|INT16|AMP> \
+  --core-num <1|2|4> -o <profile_dir> [--timeout 600]
 ```
 
-- Writes the four artifacts below into `<dir>` (created if missing).
-- `rc=0` on success. Any unsupported op → `rc!=0` and stderr lists the
-  offending `op_type` names (one `unsupported: <op_type>` line each).
-  Silently skipping an op is FORBIDDEN — a dropped op corrupts every
-  downstream delta comparison.
-- `--seed` exists for run-to-run reproducibility hooks; placeholder output is
-  fully deterministic without it.
+- The raw products land under `<profile_dir>/<onnx_stem>/`; the adapter
+  writes the four artifacts below into `<profile_dir>` (created if missing).
+- `rc=0` on success; failures fail loud (the analyzer's report discloses
+  what happened — there is never a silent fallback to an estimator).
+- Full parameter semantics: `mfu_benchmark.py --help` (single source).
 
 ## Cost unit: cycles
 
 All latency fields are **integer machine cycles** (latency, makespan_cycles,
 start/end cycle, cost_table cycles). The workflow's latency goal is expressed
 RELATIVE to the baseline (user input `latency_reduction_min`, unit-free):
-the derived absolute threshold is `baseline.makespan * (1 - ratio)`, computed
-in the same unit. The per-variant latency gate uses fixed tuning constants
-(`min_improvement_cycles`=100, `min_pred_actual_ratio`=0.5), not user inputs.
-
-Gate convention tied to this unit: a variant passes L0 iff
-`base.makespan - variant.makespan >= max(min_improvement_cycles, 1% * base.makespan)`
-— so a real profiler must NOT rescale cycles between runs of the same
-workflow (a rescaled model silently changes what min_improvement_cycles buys).
+the frozen absolute threshold is
+`int(baseline.makespan * (1 - ratio)) + 1` (the origin anchor's
+`target_cycles`), computed in the same unit. The latency gate is exactly
+`variant.makespan <= target_cycles` (inclusive), implemented once in
+`check_verdict.py` — so the profiler must NOT rescale cycles between runs
+of the same workflow.
 
 ## taskgraph.json
 
@@ -106,12 +106,11 @@ name,op_type,task_id,pipeline,latency,depends_on,output_memory,output_dimensions
 - `makespan_cycles` must equal the value in schedule.json.
 - `op_count` must equal `len(taskgraph.operators)`.
 
-## Fidelity expectations for a replacement profiler
+## Fidelity expectations
 
 The workflow only requires **delta-direction correctness**: for the same
 model with one localized structural change (e.g. GELU chain → ReLU), the
-profiler must report a makespan drop when the real hardware gets faster and a
-rise when it gets slower. Absolute numbers, pipeline labels and the internal
-scheduling model are the profiler's own. Under the placeholder profiler the
-`min_pred_actual_ratio` gate is near-tautological (prediction and measurement
-share the same heuristic) — that gate is meaningful only with a real profiler.
+measured makespan must drop when the real hardware gets faster and rise when
+it gets slower. Absolute numbers, pipeline labels and the internal
+scheduling model are the evaluation tool's own. The predicted-vs-actual
+ratio is a calibration DISCLOSURE (round analysis), never a gate.

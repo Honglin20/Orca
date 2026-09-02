@@ -1,5 +1,5 @@
 name: prof-opt
-description: "硬件 profiling 证据驱动的模型结构优化闭环：在用户项目旁的影子工作区内，围绕实测瓶颈算子经瓶颈分析与业务逻辑推理自动提出结构修改，每轮恰一个变体在同一轮内提案→软对齐双分析→实现→实测→原地修复直至达到冻结时延线（单变体收敛环）；基线完整训练在后台非阻塞运行并推送精度曲线，变体达线即经设备账本占卡启动同预算完整训练、确认存活后立即放行（异步训练流水线），detached watchdog 逐 epoch 与基线同深度对比、连续超预算自动早停（流式早停）；任一变体 success 或轮数硬帽即出环，report 无 kill 等全部在飞训练终态后按 gap 最优判 winner（并列取 makespan）；实测精度教训按规则沉淀进项目镜像与跨 run 规则池，供后续轮与后续 run 提案复用。用户原文件全程只读，胜出结构最终以新文件名写回项目。训练须按给定轮数精确执行——自带 early-stopping 的项目不在本 workflow 范围。"
+description: "硬件 profiling 证据驱动的模型结构优化闭环。唯一 profiling 方式 = mfu-analyzer 调用用户内网 mfu_benchmark 评测工具（芯片/精度/核数为显式 inputs；无环境嗅探、无本地估算、无静默降级；本地 E2E 走同一链路——仓库内 mfu_benchmark.py 是 CLI 形状替身，真机换真脚本，CLI 契约不变）。在用户项目旁的影子工作区内，每轮独立提出恰一个结构变体（历史/规则/前序报告仅作证据非血缘，可大步修改），经 variant-assessor 软对齐评估 → 实现 → mfu 实测 → 原地修复直至达到冻结时延线（单变体收敛环）；基线完整训练后台非阻塞运行并推送精度曲线；变体达线即经设备账本（agent 读占用原文选卡 + O_EXCL 锁 claim --idx）占卡启动同预算完整训练、两条件存活确认后立即放行（异步训练流水线），detached watchdog 逐 epoch 与基线同深度对比、连续超预算自动早停（流式早停）；任一变体 success、轮数硬帽、或连续多轮零提案（idle 出环）即出环，report 无 kill 等全部在飞训练终态后按 gap 最优判 winner（并列取 makespan），首段固定披露 profiling 来源 / 训练设备后端 / chart daemon 状态，并对遗留死锁做卡释放兜底。实测精度教训按规则沉淀进项目镜像，供后续轮与后续 run 提案复用。准入条款：模型须可 opset17 静态 shape 导出（禁 dynamic_axes，动态 shape 模型不在范围）；训练须按给定轮数精确执行——自带 early-stopping 的项目不在本 workflow 范围。用户原文件全程只读，胜出结构最终以新文件名写回项目。"
 
 entry: po_flatten
 
@@ -15,8 +15,9 @@ entry: po_flatten
 # `<project_root>/artifacts/prof-opt/`（project-scoped，跨 run 复用 + 多 wf 隔离）。
 #
 # 时延量纲：全链统一整数 cycles（profiling 四件套原生量纲）。
-# profiling 模式（placeholder 本地估算 / mfu 真评测）由入口节点经环境变量
-# ORCA_PO_NPU_* 与 npu-smi 自动解析，落盘 profile_mode.json，下游一律读盘。
+# profiling 配置（profile_chip / profile_precision / profile_core_num）是显式
+# inputs，由 po_contract 记入 contracts.json（值级指纹的一部分）——变更需
+# fresh_start=true（与达标线/精度预算同轨，origin 锚不可变）。
 #
 # 跨节点共享确定性脚本：入口节点每次进入都幂等部署到
 # `$ORCA_ARTIFACTS_DIR/scripts/` 并维护版本戳 .VERSION，其余节点一律经该
@@ -39,19 +40,40 @@ inputs:
     type: number
     description: "[ask] 精度预算：相对基线评估指标的最大可接受损失（无量纲，按指标方向归一；具体量纲由项目指标自带）。同样冻结进 origin 锚；watchdog 逐 epoch 流式判定与终局 final-budget 判定共用。必须用户给"
     required: true
+  profile_chip:
+    type: string
+    description: "[ask] 用户内网评测工具的芯片参数（mfu_benchmark --chip）。显式给定，不做环境嗅探；与基线 profiling 一同冻结（记入 contracts.json，变更需 fresh_start）"
+    required: true
+    enum: ["6613", "1951"]
+  max_rounds:
+    type: integer
+    description: "[ask] 变体轮数硬帽（轮 = 变体）。全 workflow 唯一成本闸门——「愿意烧多少」的业务决策，必须用户给。达到后永不回边：无 success 变体时等在飞训练终态后收尾；无任何时间帽 / 平台早退（平台期的答案是换路径探索，不是停机）"
+    required: true
   seed:
     type: integer
     description: "[default] 复现性种子（默认 0）。导出 / 从头训练随机初始化 / 预算渲染等 seed 消费环节全链固定此值，并记入 full_train_budget 值级指纹"
     required: false
     default: 0
-  max_rounds:
-    type: integer
-    description: "[advanced] 变体轮数硬帽（默认 100；轮 = 变体）。达到后永不回边：无 success 变体时等在飞训练终态后收尾；无任何时间帽 / 平台早退（平台期的答案是换路径探索，不是停机）"
+  profile_precision:
+    type: string
+    description: "[advanced] 用户内网评测工具的精度参数（mfu_benchmark --precision，默认 INT8）。记入 contracts.json 值级指纹，变更需 fresh_start"
     required: false
-    default: 100
+    default: "INT8"
+    enum: ["INT8", "INT16", "AMP"]
+  profile_core_num:
+    type: integer
+    description: "[advanced] 用户内网评测工具的并行核数（mfu_benchmark --core-num，默认 1）。记入 contracts.json 值级指纹，变更需 fresh_start"
+    required: false
+    default: 1
+    enum: [1, 2, 4]
+  idle_round_cap:
+    type: integer
+    description: "[advanced] 连续 N 轮零提案 → gate idle 出环收尾（默认 5）。防搜索空间真耗尽时空转；零提案轮本身合法（exhausted_rationale 留档），连续达帽即出环"
+    required: false
+    default: 5
   fresh_start:
     type: boolean
-    description: "[advanced] 丢弃工作区既有可复用状态、从零重建（默认 false）。结构锚（模型文件）或 profiling 模式变化导致锁校验失败时的重置开关，修改达标线 / 精度预算同样需要它（origin 锚不可变）；true 会清空工作区内全部既有内容（仅保留 .run_lock）后重跑入口节点。注意：项目镜像与全局规则池不受影响（fresh_start 后 flatten 会重新回种）"
+    description: "[advanced] 丢弃工作区既有可复用状态、从零重建（默认 false）。结构锚（模型文件）、profiling 配置（chip/precision/core_num）或复用版本不匹配导致锁校验失败时的重置开关，修改达标线 / 精度预算同样需要它（origin 锚不可变）。true 会清空工作区内全部既有内容（仅保留 .run_lock）后重跑入口节点——会清空在飞训练工作区，先确认无在飞 run。注意：项目镜像不受影响（fresh_start 后 flatten 会重新回种）"
     required: false
     default: false
   full_train_epoch_cap:
@@ -64,20 +86,21 @@ inputs:
 # 节点形态：7 节点 = 6 个 agent + 1 个 script（po_gate）。agent 内确定性逻辑
 # 执行工作区 scripts/ 并 emit 单行 JSON；纯决策 gate 直接走 script 节点。
 #
-# 单变体收敛环：po_propose 节点内一轮 = 一个变体（提案 → 双 analyst 软对齐
-# → 实现 → 实测 → 原地修复 ≤5），达线即交 po_probe；不达线淘汰并留
-# failed_sigs 换路指令。
+# 单变体收敛环：po_propose 节点内一轮 = 一个变体（提案 → variant-assessor
+# 软对齐评估 → 实现 → 实测 → 原地修复 ≤5），达线即交 po_probe；不达线淘汰
+# 并留 failed_sigs 换路指令。
 #
-# 异步训练流水线：po_probe 经设备账本（devices/<idx>.lock，O_EXCL）占卡
-# 启动同预算完整训练 + detached watchdog，确认 epoch-1 存活后立即 emit；
-# 逐 epoch 判定 / 流式早停 / 终局 eval / 释放卡全归 watchdog。卡满 = probe
-# 保持节点等待（同 run watchdog 终态释放是收敛保证）。
+# 异步训练流水线：po_probe 先 device_alloc probe 看占用原文、agent 选卡、
+# claim --idx 占卡（O_EXCL），渲染 + detach 训练 wrapper 与 watchdog.py，
+# 两条件存活确认（pid 归属 + train.log 出现）后立即 emit；逐 epoch 判定 /
+# 流式早停 / 终局 eval / 释放卡全归 watchdog。满卡 = probe 保持节点等待
+# （同 run watchdog 终态释放是收敛保证）。
 #
 # 循环载体：DAG 回边 po_gate --loop--> po_propose（route 顺序敏感
 # first-match-wins；每节点 catch-all → po_report 兜底业务失败与 gate 的
-# finish-failed 披露）。回边下的防死循环 = gate 脚本内轮数硬帽，双保险。
-# 出环不打断存量：success 行只截断后续提案轮，在飞训练不杀不撤，由
-# po_report 终态收割后统一判 winner。
+# finish-failed 披露）。回边下的防死循环 = gate 脚本内轮数硬帽 + idle 出环，
+# 双保险。出环不打断存量：success 行只截断后续提案轮，在飞训练不杀不撤，
+# 由 po_report 终态收割后统一判 winner。
 #
 # 基线非阻塞：po_baseline 在完整训练启动并确认存活后即完成（finalizer
 # detached 守护负责曲线 / 双锚 / 终检 / 终态标记）。
@@ -90,10 +113,10 @@ nodes:
   # ── Agent 1: po_flatten（entry）────────────────────────────────────────────
   #   影子工作区建立：勘察用户项目 → 写 project_manifest + .user_pkg → 把模型
   #   定义闭包复制为可编辑影子副本（用户原文件只读）→ 部署跨节点共享脚本 →
-  #   结构锚锁（BASELINE.lock）+ 单写者运行锁 → 四项就绪检查（可构造 / 可
-  #   opset17 静态导出 / 预训练权重可载入[提供时，信息性，无 strict 比对] /
-  #   定义可定位）+ stdlib 撞名预检 + 影子解析运行时断言。memory-verifier
-  #   子代理复核 manifest 事实。flatten_passed=false → 路由 po_report（fail loud）。
+  #   解析训练设备后端（train_device.json）→ 结构锚锁（BASELINE.lock）+
+  #   单写者运行锁 → 三项就绪检查（可构造 / 可 opset17 静态导出 / 定义可
+  #   定位）+ stdlib 撞名预检 + 影子解析运行时断言。memory-verifier 子代理
+  #   复核 manifest 事实。flatten_passed=false → 路由 po_report（fail loud）。
   # ───────────────────────────────────────────────────────────────────────────
   - name: po_flatten
     kind: agent
@@ -102,7 +125,7 @@ nodes:
       type: object
       required: [flatten_passed, readiness_path, error, generated_artifacts]
       properties:
-        flatten_passed: {type: boolean, description: "true=影子副本建立 + 四项就绪检查全过 + 校验门通过；false=失败 → 路由 po_report"}
+        flatten_passed: {type: boolean, description: "true=影子副本建立 + 三项就绪检查全过 + 校验门通过；false=失败 → 路由 po_report"}
         readiness_path: {type: string, description: "readiness/readiness.json 路径；失败时空串"}
         error: {type: string, description: "fail loud 时根因；成功→空串"}
         generated_artifacts:
@@ -123,12 +146,12 @@ nodes:
   #   best-effort 早停早拒（检出 early-stopping 机制 → viable=false 归因披露）
   #   + metric pattern 锚定（数字组后须紧跟行尾/非数字界）；评估双 ckpt 联动
   #   实测；导出脚本确定性钉死（无则按模型构造事实生成）+ onnx.load/shape 推证
-  #   实测；含解释器旗标检测与用户自有 sitecustomize 合并披露、原地副作用快照
-  #   披露。预算落盘 contracts.json：probe 停止深度 k 进 proxy_budget、完整
-  #   训练预算进 full_train_budget（值级指纹：epochs/seed/data）、ckpt 三态
-  #   （ckpt_output_rule + ckpt_per_epoch）、probe_cap_mechanism=stop-at-k、
-  #   顶层 reason 含准入条款句。产出 contracts.json + 四个 run 模板（注入头/
-  #   断言由渲染器组装）。viable=false → 路由 po_report（归因训练前置缺失）。
+  #   实测；sitecustomize 合并披露与合并后 eval dry-run 重跑。预算落盘
+  #   contracts.json：profiling 三参数（chip/precision/core_num，值级指纹）、
+  #   proxy_budget（epoch-only：epochs=1）、full_train_budget（epochs/seed）、
+  #   ckpt 三态、early_stop 阈值分数、admission_clause_ack。产出
+  #   contracts.json + 三个 run 模板（训练单模板 + eval + export）。
+  #   viable=false → 路由 po_report（归因训练前置缺失）。
   # ───────────────────────────────────────────────────────────────────────────
   - name: po_contract
     kind: agent
@@ -151,15 +174,17 @@ nodes:
       - to: po_report
 
   # ── Agent 3: po_baseline（基线链 + 完整训练非阻塞 + finalizer 守护）─────────
-  #   节点内完成：①早期链（pristine 快照 + 影子导出 + profile 四件套 + 瓶颈
-  #   机械分析）②完整训练 launch（同 train 契约模板、epochs=full 生效值、
-  #   detach 组长自写 pid）③finalizer 守护 launch（setsid detached、
-  #   finalizer.pid/log；负责逐 epoch 增量曲线 + live 图推送 + 末 ckpt 评估
-  #   → baseline_full_acc + 可寻址时第 k ckpt → baseline_k_acc + 实跑==渲染
-  #   终检 + train_final 终态标记；无 rc 死亡重派 ≤3）④存活确认（训练 pid +
-  #   finalizer.pid + train.log 出现，/proc cmdline 归属校验）⑤business-
-  #   logic-analyst 并行产出 business_logic.md（五段）。executed = 早期链全过
-  #   + 双存活确认 + business_logic.md 落盘（不含训练完成——非阻塞）。
+  #   节点内完成：①早期链（pristine 快照 + 影子导出 + mfu 唯一 profiling 链：
+  #   派发 mfu-analyzer 调用户内网评测工具 → mfu_adapter 四件套 → analyze
+  #   机械底册；无 placeholder 分支，rc 3 = 等待 analyzer 原始产物）②完整训练
+  #   launch（--device <idx>：节点先 device_alloc probe 读占用原文选卡，
+  #   chain 内 claim --idx；满卡 = stdout running 节点 park，下一轮重 probe）
+  #   ③finalizer 守护 launch（逐 epoch 增量曲线 + live 推送 + 双锚终检 +
+  #   终态标记 + 每轮 touch .run_lock 心跳）④存活确认（训练 pid + finalizer
+  #   pid + train.log 出现，/proc cmdline 归属校验）⑤三份分析文档并行产出
+  #   （business_logic / information_analysis / mfu 瓶颈报告，check_baseline_docs
+  #   门）+ 首推 docs manifest。executed = 早期链全过 + 双存活确认 + 三文档
+  #   落盘（不含训练完成——非阻塞）。
   #   status=executed → po_propose；catch-all → po_report（stage=baseline）。
   # ───────────────────────────────────────────────────────────────────────────
   - name: po_baseline
@@ -169,7 +194,7 @@ nodes:
       type: object
       required: [status, error, generated_artifacts]
       properties:
-        status: {type: string, enum: [executed, failed], description: "executed=早期链全过 + 完整训练与 finalizer 双存活确认 + business_logic.md 落盘（不含训练完成——基线非阻塞，训练由 finalizer 守护收尾）；failed=任一步最终失败 → 路由 po_report"}
+        status: {type: string, enum: [executed, failed], description: "executed=早期链全过 + 完整训练与 finalizer 双存活确认 + 三份分析文档落盘（不含训练完成——基线非阻塞，训练由 finalizer 守护收尾）；failed=任一步最终失败 → 路由 po_report"}
         error: {type: string, description: "失败时根因（含失败步编号）；成功→空串"}
         generated_artifacts:
           type: array
@@ -183,17 +208,17 @@ nodes:
 
   # ── Agent 4: po_propose（单变体收敛环；回边重入目标）──────────────────────
   #   Step0 对戳+轮号（deploy --verify + round_state working；reuse guard 语义
-  #   不变）→ Step1 瓶颈证据刷新（mfu：base/profile/mfu_bottleneck_report.md；
-  #   placeholder：stamp 守卫的 bottleneck-analyst）+ structure-proposer 每轮
-  #   恰 1 提案（准入 = 预测 makespan ≤ 冻结 target_cycles；输入含 rules /
-  #   history / 前序变体报告 / 上轮 analysis.md / failed_sigs 换路指令）→
-  #   Step2 双 analyst 变体模式（business_logic / information_analysis）软对齐
-  #   核验 + conformance.md（主要语义冲突才打回）→ Step3 实现 + 实测 →
-  #   Step4 修复内环 ≤5（repair_trace 脚本计数，超限 fail loud；latency_fail
-  #   终态淘汰 + failed_sigs）→ Step5 rules 增量刷新（消费 .rules_pending 终态
-  #   变体，accuracy-analyst 增量更新）→ Step6 轮分析落盘（rounds/<NNN>/
-  #   analysis.md 时延节，两条结束路径都写）+ 达线 ledger 分片播种 + 文档清单
-  #   推送 + emit（含 repair_count）。
+  #   不变）→ Step1 瓶颈证据（analyze.py 刷新机械底册 + 校验
+  #   base/profile/mfu_bottleneck_report.md 哨兵 v2，四份基线文档必须在场）+
+  #   structure-proposer 每轮恰 1 提案（准入硬门仅 predicted_delta_cycles
+  #   负整数；预测达线降为参考披露；predictor 关键路径加权 + shape class
+  #   自推导）→ Step2 variant-assessor 单 subagent 软对齐（assessment.md 六节
+  #   门；stamp 键 = vid|sig|sha256(declaration)；conformance.md 已删）→
+  #   Step3 实现 + 每变体无条件 mfu-analyzer 实测 → Step4 修复内环 ≤5
+  #   （structural/variant_broken 联合 ≤2）→ Step5 rules 增量刷新
+  #   （accuracy-analyst 出三判断值，rules_pool apply 机械推导置信度）→
+  #   Step6 轮分析落盘（软对齐结论并入 analysis.md）+ 达线 ledger 分片播种 +
+  #   文档清单推送 + emit。派发契约全内联于 agent.md，禁读 subagents_root。
   #   executed → po_probe；catch-all → po_report。
   # ───────────────────────────────────────────────────────────────────────────
   - name: po_propose
@@ -218,15 +243,17 @@ nodes:
 
   # ── Agent 5: po_probe（资源分配 + 启动即放行）──────────────────────────────
   #   节点入口先跑 deploy --verify → Step0 训练集推导（最新行 latency_pass 且
-  #   未终态的 vid）+ verdict 达线硬前提（不符 = 盘面撕裂 fail loud，不重测）
-  #   → Step1 设备账本占卡（device_alloc claim，O_EXCL；卡满 = 保持节点等
-  #   待，status 消息含 do not call orca next，每 turn 重查一次）→ Step2 渲
-  #   染 full_train_budget 模板（--set device=<idx>）+ setsid 训练 wrapper（自
-  #   写 pid/rc）+ detached watchdog（watch_variant.sh --vid --device，自写
-  #   watchdog.pid/log）→ Step3 liveness 四条件（pid 归属 / train.log / epoch-1
-  #   指标行可解析，≤15 轮询 ×30s；失败重试 ≤2 → probe_insufficient 终态 +
-  #   释放卡）→ Step4 emit executed（不等训练；含 device / epoch1_ok）。
-  #   executed → po_gate；catch-all → po_report。
+  #   未终态的 vid）+ check_verdict.py 唯一达线谓词（不符 = 盘面撕裂 fail
+  #   loud，不重测）→ Step1 选卡（device_alloc probe 读后端 CLI 占用原文 →
+  #   agent 判断空闲卡 → claim --idx；已锁/满卡 = 保持节点等待，status 消息含
+  #   do not call orca next，每 turn 重 probe 一次）→ Step2 渲染 full_train_
+  #   budget 模板（--set device=<idx>；shadow_pkgs 经 shadow_pkgs_csv.py）+
+  #   setsid 训练 wrapper（自写 pid/rc）+ detached watchdog（watchdog.py
+  #   --vid --device，自写 watchdog.pid/log）→ Step3 liveness 两条件（pid
+  #   归属 + train.log 出现，≤15 轮 ×30s；epoch-1 解析归 watchdog；失败重试
+  #   ≤2 → probe_insufficient 终态 + 释放卡）→ Step4 emit executed（不等
+  #   训练；含 device / epoch1_ok）。executed → po_gate；catch-all →
+  #   po_report。
   # ───────────────────────────────────────────────────────────────────────────
   - name: po_probe
     kind: agent
@@ -238,7 +265,7 @@ nodes:
         status: {type: string, enum: [executed, failed], description: "executed=（直通或启动路径）全部完成；failed → 路由 po_report"}
         error: {type: string, description: "fail loud 时根因；成功→空串"}
         device: {type: ["integer", "null"], description: "本次入口占到的训练设备 idx（devices/<idx>.lock；未启动任何训练时 null，多个 vid 时取最后占到的）"}
-        epoch1_ok: {type: boolean, description: "每个启动 vid 的 epoch-1 liveness 证明均通过（未启动任何训练时 true）"}
+        epoch1_ok: {type: boolean, description: "每个启动 vid 的存活证明均通过（两条件；未启动任何训练时 true）"}
         generated_artifacts:
           type: array
           items: {type: string}
@@ -252,17 +279,20 @@ nodes:
   # ── Script 6: po_gate（纯读现算决策，零写盘）──────────────────────────────
   #   决策前先验部署件版本戳（不符输出 finish-failed 披露 payload，经
   #   catch-all 进 po_report）→ 读盘面（history 终态行 + round_state current
-  #   + origin 锚——不读任何上游节点 output）→ 确定性脚本出 decision（顺序
-  #   first-match-wins）：report（任一 vid 有 success 行——出环不打断存量，
-  #   在飞训练不杀不撤，由 report 终态收割；或 round ≥ max_rounds 轮数硬帽，
-  #   永不回边）/ loop（其余一切——唯一回边出口）。loop → 回边 po_propose
-  #   （DAG 显式容环）。
+  #   + 各轮 proposals.json + origin 锚——不读任何上游节点 output）→ 确定性
+  #   脚本出 decision（顺序 first-match-wins）：report（任一 vid 有 success
+  #   行——出环不打断存量，在飞训练不杀不撤，由 report 终态收割；或
+  #   round ≥ max_rounds 轮数硬帽，永不回边；或从最新轮往回连续
+  #   idle_round_cap 轮零提案——idle_exhausted，防搜索空间耗尽后空转）/
+  #   loop（其余一切——唯一回边出口）。loop → 回边 po_propose（DAG 显式
+  #   容环）。
   # ───────────────────────────────────────────────────────────────────────────
   - name: po_gate
     kind: script
     command: >-
       bash "$ORCA_ARTIFACTS_DIR/scripts/gate_node.sh"
       --max-rounds "{{ inputs.max_rounds }}"
+      --idle-round-cap "{{ inputs.idle_round_cap }}"
     parse_json: true
     timeout: 120
     routes:
@@ -279,23 +309,26 @@ nodes:
   #   output 引用：读工作区盘面（history/rounds/contracts/baseline/variants/
   #   train_device/origin 锚/accuracy_rules）判终态与失败归因 → winner =
   #   success 变体中 gap 最优（并列 makespan 最优），无 success 则
-  #   no-promotion 披露 → prof_opt_report.md + 静态图 + finalize chart
-  #   （live 终稿 "(final)" 推送 + 分析文档清单 --docs）→ 终态调 rules_pool
-  #   merge（成功失败皆合并）+ 规则人类可读镜像 → success 时以 winner 的
-  #   变体影子 diff 写回（新文件名 <原名>_prof_optimized、冲突不覆盖、写回
-  #   前复验结构锚锁）。报告首段披露 profiling 模式 + 训练设备后端 + 部署件
-  #   版本戳。
+  #   no-promotion 披露 → 卡释放兜底（每把 devices/*.lock 查 owner pid，已死
+  #   → release；无法判定 → 披露 liveness unverifiable）→ prof_opt_report.md
+  #   + 静态图 + finalize chart（live 终稿 "(final)" 推送 + 分析文档清单
+  #   --docs）→ 报告首段固定披露三行（profiling 来源 = mfu 实测 via 用户内网
+  #   评测工具 / 训练设备后端 / chart daemon 状态读 .chart_push.log 末行 +
+  #   本次推送 pushed 字典，离线/失败写明）→ 终态调 rules_pool merge（源
+  #   unparseable 拒绝覆盖；失败写进 reason）→ success 时以 winner 的变体
+  #   影子 diff 写回（新文件名 <原名>_prof_optimized、冲突不覆盖、写回前
+  #   复验结构锚锁）。
   # ───────────────────────────────────────────────────────────────────────────
   - name: po_report
     kind: agent
     agent: po_report
     output_schema:
       type: object
-      required: [status, stage, reason, winner, baseline, final, pretrained_ref_acc, rounds_completed, proposals_total, history_path, write_back, charts_summary, artifacts, error]
+      required: [status, stage, reason, winner, baseline, final, rounds_completed, proposals_total, history_path, write_back, charts_summary, artifacts, error]
       properties:
         status: {type: string, enum: [success, failed], description: "终态：success=存在 success 变体（完整训练 + 最终 eval 预算内，gap 最优者胜出）；failed=任一阶段失败/无 success 变体"}
         stage: {type: string, enum: [flatten, contract, baseline, propose, probe, gate, report], description: "终态来源阶段"}
-        reason: {type: string, description: "终态判定理由（含终态收割与 winner 判定披露）"}
+        reason: {type: string, description: "终态判定理由（含终态收割、winner 判定与 rules merge 结局披露）"}
         winner:
           description: "胜出变体（success 变体中 gap 最优，并列取 makespan 最优）；无 success 则 null"
           type: ["object", "null"]
@@ -303,7 +336,7 @@ nodes:
           properties:
             vid: {type: string}
             change_sig: {type: string}
-            lineage: {type: array, items: {type: string}, description: "血缘 vid 链（v6 底座不前进：parent_vid 恒 null，链通常只含 winner 自身）"}
+            lineage: {type: array, items: {type: string}, description: "vid 链（基座不前进：parent_vid 恒 null，链通常只含 winner 自身）"}
         baseline:
           type: object
           required: [makespan, ref_acc]
@@ -318,7 +351,6 @@ nodes:
             acc: {type: number, description: "winner 最终评估指标（variants/<vid>/eval/final_acc.json；无 winner 时 0）"}
             gap: {type: number, description: "相对基线锚精度的差距（按方向归一；无 winner 时 0）"}
             within_budget: {type: boolean, description: "winner 最终指标是否在预算内（无 winner 时 false）"}
-        pretrained_ref_acc: {type: ["number", "null"], description: "预训练权重参考精度（仅对照展示，不进任何 gate；盘面无记录时 null）"}
         rounds_completed: {type: integer, description: "已完成轮数", minimum: 0}
         proposals_total: {type: integer, description: "全程提案总数", minimum: 0}
         history_path: {type: string, description: "history.jsonl 路径"}
