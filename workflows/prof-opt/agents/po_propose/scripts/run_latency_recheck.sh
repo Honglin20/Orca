@@ -165,7 +165,7 @@ attempt = {"round": v["round"],
            "measured_makespan_cycles": v["makespan_cycles"],
            "target_cycles": v["target_cycles"],
            "gap_cycles": v["makespan_cycles"] - v["target_cycles"],
-           "reason": "makespan > target_cycles (unified v6 gate)"}
+           "reason": "makespan > target_cycles (unified latency gate)"}
 attempts = doc.setdefault("attempts", [])
 attempts.append(attempt)   # never value-deduplicated: see header comment
 doc["vid"] = vid

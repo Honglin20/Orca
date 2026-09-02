@@ -29,7 +29,7 @@ The caller will provide:
    direction.
 2. Decide tier A/B/C. For tier B write `adapted/eval_entry.py` with only
    plumbing changes.
-3. Run the dual-checkpoint probe exactly as the main contract used to:
+3. Run the dual-checkpoint probe:
    create two random-initialization checkpoints at seeds 0 and 1 in the
    recorded `ckpt_container` form, render `templates/run_eval.template.sh`
    twice, extract both metrics, and write `contract_work/eval_dual_ckpt.json`

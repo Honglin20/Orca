@@ -144,8 +144,7 @@ Non-zero → fix the relevant sub-agent proposal once before proceeding.
 The sub-agents already wrote:
 
 - `templates/run_full_finetune.template.sh` (the ONE training template —
-  the probe and full renders both render it, naming their own outputs;
-  the byte-identical twin is deleted)
+  the probe and full renders both render it, naming their own outputs)
 - `templates/run_eval.template.sh`
 - `templates/export_onnx.template.sh`
 
@@ -179,7 +178,7 @@ Read `train_epochs_full` from
 - `full_train_budget.epochs` = min(cap, train_epochs_full) when cap non-empty;
   else train_epochs_full.
 - `full_train_budget.seed` = `{{ inputs.seed }}` (the fingerprint is
-  epoch-only: the data-knob pair is deleted).
+  epoch-only).
 - `proxy_budget.epochs` = min(1, full_train_budget.epochs) — i.e. 1.
 - `proxy_budget.seed` = `{{ inputs.seed }}`.
 - `probe_cap_mechanism` = `"stop-at-k"`.

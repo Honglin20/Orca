@@ -87,7 +87,7 @@ The caller will provide:
    LATEST statement, and update `metric_gap` to the latest measured value.
    Never append a duplicate pattern.
 4. New patterns → append with the next free `rule-<NNNN>` id (continue the
-   existing numbering; never reuse a retired id).
+   existing numbering; never reuse an existing id).
 5. Write the FULL rule file back (same schema, all rules — old ones
    untouched except merges). Rules are append/merge-only: never rewrite
    another rule's statement or delete a rule you did not just merge.

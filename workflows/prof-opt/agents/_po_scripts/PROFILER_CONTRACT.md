@@ -1,6 +1,6 @@
 # Profiler Contract (v1)
 
-External contract for the profile four-piece. v7: the ONE profiling path is
+External contract for the profile four-piece. The ONE profiling path is
 the mfu chain — the `mfu-analyzer` subagent drives the user's in-network
 `mfu_benchmark.py` (the deployed `mfu_benchmark.py` is the CLI-shape stand-in
 for local runs; the real machine swaps in the real script, same CLI), and

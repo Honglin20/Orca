@@ -11,10 +11,9 @@ sentinel: VAS4K9
 Write the assessment document of ONE optimization variant:
 `variants/<vid>/assessment.md`. This document is the variant's single
 analysis record — the node's soft-alignment judgment reads its conclusion
-sections, and the web docs panel lists it. It replaces the old per-variant
-business-logic + information pair: you answer BOTH what the variant IS
-(business logic of the changed structure) and what the variant TRADES AWAY
-(information view against the baseline decomposition).
+sections, and the web docs panel lists it. You answer BOTH what the variant
+IS (business logic of the changed structure) and what the variant TRADES
+AWAY (information view against the baseline decomposition).
 
 ## Inputs
 
