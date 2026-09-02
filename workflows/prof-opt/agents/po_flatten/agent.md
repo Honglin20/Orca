@@ -1,5 +1,5 @@
 ---
-description: Establish the shadow workspace for evidence-driven model structure optimization - survey the user project, mirror the model code closure into an editable shadow tree, deploy the shared tooling, and prove the shadow is the code that actually runs.
+description: Establish the shadow workspace for evidence-driven model structure optimization - survey the user project, mirror the model code closure into an editable shadow tree, deploy the shared tooling, resolve the training device backend once, and prove the shadow is the code that actually runs.
 tools: [bash, read, write, edit, glob, grep, task]
 ---
 # po_flatten
@@ -13,6 +13,8 @@ user's PyTorch project (`{{ inputs.project_root }}` with model definition
 - the shared deterministic scripts (`scripts/`) and the import-injection pair
   (`orca_inject/`) every run template needs;
 - the structural anchor lock (`BASELINE.lock`) + single-writer run lock;
+- the training device backend resolution (`train_device.json`) — written once
+  here, re-resolved and overwritten only on the NO_REUSE rebuild path;
 - proof that the shadow resolves, constructs, and exports.
 
 Downstream nodes connect variants to the user's ORIGINAL training/eval entries with
@@ -60,11 +62,13 @@ path = f"{d}/file.py"                # forbidden
 ```
 $ORCA_ARTIFACTS_DIR/
 ├── .run_lock                     # single-writer heartbeat lock {run_id, pid, ts}
-├── BASELINE.lock                 # structural anchor {model_path, pretrained_ckpt,
-│                                 #   ckpt_sha256, py_files_sha256 (shadow closure)}
+│                                 #   (continuation model: the watchdog and
+│                                 #   the baseline finalizer touch it mid-run)
+├── BASELINE.lock                 # structural anchor {version: 2, model_path,
+│                                 #   py_files_sha256 (shadow closure)}
 ├── project_manifest.md / .user_pkg
 ├── train_device.json             # training device backend resolved ONCE here
-│                                 #   {backend: npu|cuda, device_count, resolved_by}
+│                                 #   {backend, device_count, resolved_by}
 │                                 #   (the allocation locks live under devices/)
 ├── shadow/<top-level pkgs|modules>/   # the editable model code closure
 ├── scripts/                      # deployed shared deterministic scripts
@@ -96,26 +100,19 @@ output `error` field):
 - `{{ inputs.model_path }}` — model definition file (relative to project root or
   absolute); must exist.
 - `{{ inputs.fresh_start }}` (true/false), `{{ inputs.seed }}`.
-- Profiling mode is NOT an input: it is resolved from the environment once at
-  entry. Optional env vars `ORCA_PO_NPU_CHIP` (`6613`/`1951`, illegal values
-  fail loud), `ORCA_PO_NPU_PRECISION` (`INT8`/`INT16`/`AMP`, default `INT8`),
-  `ORCA_PO_NPU_CORES` (`1`/`2`/`4`, default `1`); without them an `npu-smi`
-  on PATH selects mfu mode (chip parsed from its model column), otherwise
-  the built-in placeholder estimator runs. The result is written once to
-  `$ORCA_ARTIFACTS_DIR/profile_mode.json` — every downstream profiling
-  consumer reads that file, never the env.
-- The TRAINING device backend is likewise NOT an input: it is resolved once
-  at entry and written to `$ORCA_ARTIFACTS_DIR/train_device.json`. Optional
-  env `ORCA_PO_DEVICE_BACKEND` (`npu`/`cuda`, illegal values fail loud)
-  declares it explicitly; otherwise `npu-smi`, `nvidia-smi`, or
-  `torch.cuda.is_available()` auto-detect, in that order. A machine with NO
-  trainable device is a hard error (exit 2) — the placeholder estimator is
-  valid for PROFILING only; training has no placeholder backend. Downstream
-  consumers (the baseline chain and the probe node's device allocator) read
-  that file, never the env.
+- Profiling configuration (`profile_chip` / `profile_precision` /
+  `profile_core_num`) is NOT resolved here: the values are workflow inputs the
+  CONTRACT stage records into `contracts.json` (its reuse gate checks their
+  consistency). This node never sniffs the environment and never writes a
+  profiling-mode file.
+- The TRAINING device backend IS resolved here — once, by the script, from the
+  machine itself (explicit env override accepted; the enum lives in the script,
+  not in this document): `train_device.json` is written write-if-absent on the
+  reuse path and re-resolved + OVERWRITTEN on the NO_REUSE rebuild path. A
+  machine with NO trainable device is a hard error (exit 2) — profiling being
+  machine-independent (the mfu path) does not help training.
 - No pretrained-checkpoint input exists: training in this pipeline
-  always starts from a fixed-seed random initialization; every checkpoint
-  argument below is the empty string.
+  always starts from a fixed-seed random initialization.
 
 ## Pipeline Memory
 
@@ -134,32 +131,34 @@ depend on — record both in the **Data And Environment** section:
   (project venv / conda / system python3), and from Step 3 on you export
   `ORCA_PYTHON=<that path>` for every command you run. The same interpreter is used
   by every downstream node (they read it back from `readiness/readiness.json`).
-- **Metric direction**: in **Training And Evaluation**, every ranking metric must
-  explicitly state `higher-better` / `lower-better` (e.g. accuracy → higher-better,
-  loss → lower-better). Downstream gates normalize by this; a missing or wrong
-  direction is a validation failure.
+- **Metric direction**: in **Training And Evaluation**, EVERY ranking metric gets
+  its own list item with an explicit direction marker, spelled exactly
+  `higher_better` / `lower_better` (one spelling everywhere — the same tokens
+  `contracts.json` uses), e.g. `- top1 accuracy: higher_better`. Downstream gates
+  normalize by this; a missing or old-spelled (`higher-better`) marker is a
+  validation failure.
 
 ## Workflow
 
-Run the steps in order. **todolist**: keep a numbered markdown checklist (0-6) in
-your reply to track progress. Node re-execution is at-least-once: every step is
-idempotent, and on re-entry you re-read disk state (never trust that a step "just
-ran" — the Step 0 gate decides what to skip).
+Run the steps in order. **todolist**: keep a numbered markdown checklist (0-5) in
+your INTERMEDIATE replies to track progress (your final reply is JSON only — an
+intermediate checklist is working memory). Node re-execution is at-least-once:
+every step is idempotent, and on re-entry you re-read disk state (never trust
+that a step "just ran" — the Step 0 gate decides what to skip).
 
 ### Step 0: Reuse Gate
 
 ```bash
 cd "$ORCA_ARTIFACTS_DIR" || { mkdir -p "$ORCA_ARTIFACTS_DIR" && cd "$ORCA_ARTIFACTS_DIR"; }
 bash "$ORCA_AGENT_RESOURCES/scripts/reuse_check.sh" \
-  "{{ inputs.model_path }}" "" \
+  "{{ inputs.model_path }}" \
   "{{ '1' if inputs.fresh_start else '0' }}"
 ```
 
 Exit code mapping (the script logs details to stderr):
 
-- `0` (`REUSE`) → the workspace is reusable (structural anchor matches AND the
-  re-resolved profiling mode matches the recorded `profile_mode.json` on the
-  measurement-config fields). Do ALL of the following before emitting:
+- `0` (`REUSE`) → the workspace is reusable (structural anchor matches). Do ALL
+  of the following before emitting:
   1. **Redeploy the shared tooling** (Step 1's script, idempotent full
      overwrite + version stamp refresh — a reused workspace upgrades to the
      current script set instead of running stale deployed copies). A nonzero
@@ -176,32 +175,29 @@ Exit code mapping (the script logs details to stderr):
      stderr names is `fresh_start=true`.
   3. **Keep the workspace's `accuracy_rules.json` as-is** (in-run rules are
      the workspace truth; re-seeding would overwrite them — never seed here).
-   4. Re-derive the output fields mechanically from disk:
-      `readiness_path="$ORCA_ARTIFACTS_DIR/readiness/readiness.json"`.
-      Then go straight to Output (include `verify/memory_verifier_report.md`
-      in `generated_artifacts` when that file exists on disk).
+  4. Re-derive the output fields mechanically from disk:
+     `readiness_path="$ORCA_ARTIFACTS_DIR/readiness/readiness.json"`.
+     Then go straight to Output (include `verify/memory_verifier_report.md`
+     in `generated_artifacts` when that file exists on disk).
 - `1` (`NO_REUSE`) → continue with Step 1.
 - `3` (fail-loud conflict: another live run / structural anchor changed /
-  unreadable-or-corrupt BASELINE.lock) → emit `flatten_passed=false` with the
-  stderr message in `error` (mention `fresh_start` when the anchor changed).
-  Do not attempt repairs.
-- `2` → hard environment error (including a profiling-mode mismatch vs the
-  recorded `profile_mode.json` — cycles measured under a different
-  configuration cannot be compared across runs) → `flatten_passed=false` +
-  `error` carrying the stderr guidance (the remedy is `fresh_start=true`).
+  unreadable-or-corrupt BASELINE.lock / a lock that predates the v7 schema) →
+  emit `flatten_passed=false` with the stderr message in `error` (mention
+  `fresh_start` when the anchor changed). Do not attempt repairs.
+- `2` → hard environment error → `flatten_passed=false` +
+  `error` carrying the stderr guidance.
 
 `{{ inputs.fresh_start }}` = true → the gate wipes the ENTIRE reusable workspace
 (every entry under `$ORCA_ARTIFACTS_DIR` except the `.run_lock` single-writer
 lock — it belongs to this run: preserved, never wiped, heartbeat-refreshed by
 the gate and the validation gate) and reports `NO_REUSE`; you then rebuild
-shadow / lock / manifest /
-readiness from scratch. The wipe is deliberately whole-workspace, not a pinned
-path list: leftovers from an older run would silently false-gate the rebuild
-checks. The project-side rule mirror and
-the global rule pool are OUTSIDE the workspace and survive the wipe — the fresh
-path re-seeds the workspace rules from them (Step 3b). Never wipe by hand.
+shadow / lock / manifest / readiness from scratch. The wipe is deliberately
+whole-workspace, not a pinned path list: leftovers from an older run would
+silently false-gate the rebuild checks. The project-side rule mirror is
+OUTSIDE the workspace and survives the wipe — the fresh path re-seeds the
+workspace rules from it (Step 3b). Never wipe by hand.
 
-### Step 1: Deploy The Shared Tooling + Resolve The Profiling Mode And The Training Device
+### Step 1: Deploy The Shared Tooling + Resolve The Training Device
 
 Deploy the canonical shared scripts into the workspace (idempotent; safe to
 re-run). After this step, reference ALL shared scripts as
@@ -215,31 +211,20 @@ stdout is one JSON line (`scripts_dir` / `orca_inject_dir` / counters /
 `manifest`); verify `orca_inject_dir` points at `$ORCA_ARTIFACTS_DIR/orca_inject`.
 Non-zero exit → fail loud (`flatten_passed=false`).
 
-Then resolve the profiling mode ONCE (fresh path only — REUSE verified it in
-Step 0 and keeps the recorded file):
+Then resolve the TRAINING device backend ONCE:
 
 ```bash
-bash "$ORCA_ARTIFACTS_DIR/scripts/resolve_profile_mode.sh"
+bash "$ORCA_ARTIFACTS_DIR/scripts/resolve_train_device.sh" --overwrite
 ```
 
-stdout is one JSON line (`mode` / `chip` / `precision` / `core_num` /
-`resolved_by`), written verbatim to `$ORCA_ARTIFACTS_DIR/profile_mode.json`.
-An illegal env enum or an unparseable npu-smi chip exits 2 — fail loud
-(`flatten_passed=false`), never fall back silently.
-
-Then resolve the TRAINING device backend ONCE (fresh path only — the REUSE
-branch verified it read-only in Step 0 and keeps the recorded file):
-
-```bash
-bash "$ORCA_ARTIFACTS_DIR/scripts/resolve_train_device.sh"
-```
-
-stdout is one JSON line (`backend` / `device_count` / `resolved_by`) and the
-script itself writes it to `$ORCA_ARTIFACTS_DIR/train_device.json`
-write-if-absent. Exit 2 (no trainable device on this machine / illegal env
-enum / a backend whose device count cannot be pinned) → fail loud
-(`flatten_passed=false`): there is no placeholder training backend to fall
-back to.
+`--overwrite` only matters on the NO_REUSE rebuild path (a rebuilt
+workspace re-resolves the backend and OVERWRITES any old `train_device.json` —
+the training device is never silently carried over from the previous
+workspace); with no existing file it is a plain write. stdout is one JSON line
+(`backend` / `device_count` / `resolved_by`). Exit 2 (no trainable device on
+this machine / illegal env enum / a backend whose device count cannot be
+pinned) → fail loud (`flatten_passed=false`): training has no fallback
+backend.
 
 ### Step 2: Survey The Project (manifest + user package marker + interpreter)
 
@@ -255,11 +240,14 @@ back to.
    shapes, dtypes) — Step 5 needs them verbatim.
 3. **Write `$ORCA_ARTIFACTS_DIR/project_manifest.md`** following the Pipeline
    Memory skeleton (frontmatter `source_project_root` absolute; body paths relative
-   to it). Include the `Interpreter` and metric-direction facts.
-4. **Write the `.user_pkg` marker:**
+   to it). Include the `Interpreter` and per-metric direction facts.
+4. **Write the `.user_pkg` marker** (runs under `$ORCA_PYTHON` with the project
+   root importable; names it cannot classify are listed on stderr as
+   `UNCERTAIN` — review each one yourself and add genuine user code to the
+   marker by hand):
 
    ```bash
-   bash "$ORCA_AGENT_RESOURCES/scripts/extract_user_pkg.sh" \
+   ORCA_PYTHON="$ORCA_PYTHON" bash "$ORCA_AGENT_RESOURCES/scripts/extract_user_pkg.sh" \
      "{{ inputs.project_root }}" "{{ inputs.model_path }}"
    ```
 
@@ -292,8 +280,8 @@ move or edit.
    never omit the key.
 3. **Copy exclusions (hard rules):** never copy `__pycache__/`, `*.pyc`, `.git`.
    Before copying, scan the copy set for **non-code files larger than 10 MB**
-   (`find <src> -type f -size +10M ! -name '*.py'`). Such files are FORBIDDEN in the
-   shadow: exclude them from the copy and record them under a
+   (`find <src> -type f -size +10M ! -name '*.py'`). Such files are FORBIDDEN in
+   the shadow: exclude them from the copy and record them under a
    `Large files excluded from the shadow copy` list in the manifest. If the model
    later fails to construct because of an excluded file, the readiness check fails
    loud with that root cause — do not work around it by copying the file.
@@ -315,16 +303,13 @@ move or edit.
 
    Collision → fail loud (`flatten_passed=false`, list the names in `error`).
 
-6. **Write `BASELINE.lock`** (the structural anchor — recomputable, deterministic):
+6. **Write `BASELINE.lock`** (the structural anchor — recomputable, deterministic;
+   v7 schema: version / model_path / the shadow *.py checksum map):
 
    ```bash
    python3 "$ORCA_AGENT_RESOURCES/scripts/write_baseline_lock.py" \
-     --artifacts "$ORCA_ARTIFACTS_DIR" --model-path "{{ inputs.model_path }}" \
-     --ckpt ""
+     --artifacts "$ORCA_ARTIFACTS_DIR" --model-path "{{ inputs.model_path }}"
    ```
-
-   (No pretrained-checkpoint input exists in this workflow, so the lock
-   records the empty anchor: `pretrained_ckpt` / `ckpt_sha256` stay "".)
 
 7. **Seed the accuracy rules** (fresh path only — the REUSE branch keeps the
    workspace's existing rules):
@@ -335,16 +320,12 @@ move or edit.
      --artifacts "$ORCA_ARTIFACTS_DIR" --project-root "{{ inputs.project_root }}"
    ```
 
-   The seed composes, by priority: the project mirror
+   The seed copies the project mirror
    `{{ inputs.project_root }}/docs/prof-opt/accuracy_rules.json` (this
-   project's measured lessons, verbatim), pool entries measured on this very
-   model (model-hash keyed), entries confirmed general across models, and —
-   one confidence level down and marked `borrowed` — plausibly-general
-   entries. stdout is one JSON line (source counts); missing mirror/pool or
-   bad rows are disclosed on stderr and degrade to an empty/partial seed
-   (best-effort asset, never a failure). A run exit 2 here names the refusal
-   reason — treat `seed refused` as a state inconsistency (the file should
-   not exist on the fresh path) and fail loud.
+   project's measured lessons, verbatim). stdout is one JSON line; a missing
+   mirror degrades to an empty seed (best-effort asset, never a failure) and
+   an unparseable mirror is REFUSED (never silently degraded to empty). A
+   `seed refused` exit 2 names the state inconsistency — fail loud.
 
 ### Step 4: Prove Shadow Resolution
 
@@ -363,7 +344,7 @@ PYTHONPATH="$ORCA_ARTIFACTS_DIR/orca_inject:{{ inputs.project_root }}${PYTHONPAT
 stdout JSON must show every pkg resolving under `shadow/`. Failure → the shadow
 closure is wrong (missing sibling / wrong form) → fix Step 3, never the assert.
 
-### Step 5: Readiness Checks (mandatory, four gates)
+### Step 5: Readiness Checks (mandatory, three gates)
 
 Write ONE driver script and run it under a rendered wrapper — the wrapper assembles
 the injection header, runs the shadow assertion in the exact run-template form, then
@@ -371,8 +352,8 @@ invokes the driver. Never hand-copy the injection plumbing.
 
 1. **Driver** — `$ORCA_ARTIFACTS_DIR/readiness/readiness_check.py`. English
    identifiers/comments, pathlib, fail loud. It bakes in the facts from your Step 2
-   survey (module dotted name, factory/class name + real args, dummy input specs,
-   absolute ckpt path) and performs, in order:
+   survey (module dotted name, factory/class name + real args, dummy input specs)
+   and performs, in order:
 
    1. **constructible** — import the model module (shadow resolves it), construct
       with the real args, `eval()`, run `forward` on the dummy inputs, print output
@@ -381,25 +362,24 @@ invokes the driver. Never hand-copy the injection plumbing.
    2. **exportable** — `torch.onnx.export(..., opset_version=17,
       do_constant_folding=True, dynamic_axes=None)` to
       `readiness/probe.onnx`, then `onnx.load` + `onnx.shape_inference` and verify
-      every dimension is a positive static int.
-   3. **pretrained_loadable** (informational) — no checkpoint input exists, so
-      this check is vacuously `true` (record `pretrained_ckpt: ""` and
-      `container_key: null`).
-   4. **definition_located** — `type(model).__module__` equals the expected module
+      every dimension is a positive static int. (Static shapes at opset 17 with no
+      dynamic axes are a workflow ADMISSION requirement — models needing dynamic
+      shapes are out of scope; the clause lives in the workflow description.)
+   3. **definition_located** — `type(model).__module__` equals the expected module
       dotted name AND its source file (`inspect`/`__file__`) is inside the shadow
       tree.
 
    Write `readiness/readiness.json` with AT LEAST:
    `{"python": "<sys.executable>", "project_root": "<abs>", "shadow_root": "<abs>",
-   "model_path": "<as given>", "pretrained_ckpt": "<abs or empty>",
+   "model_path": "<as given>",
    "shadow_pkgs": [...], "shadow_synthesized": [...paths synthesized with no
    user original, relative to shadow/, POSIX separators; [] when none...],
    "model_facts": {"module": "...", "factory": "...",
-   "args": [...], "kwargs": {...}, "container_key": null|"model",
+   "args": [...], "kwargs": {...},
    "dummy_inputs": [{"name": "...", "shape": [...], "dtype": "float32"}]},
-   "constructible": bool, "exportable": bool, "pretrained_loadable": bool,
-   "definition_located": bool, "details": {...per-check evidence...}}`.
-   Exit 0 when all four are true, 1 when any is false (JSON still written),
+   "constructible": bool, "exportable": bool, "definition_located": bool,
+   "details": {...per-check evidence...}}`.
+   Exit 0 when all three are true, 1 when any is false (JSON still written),
    2 on hard crash. The `model_facts` block is the downstream contract/export
    generator's input — fill it from what you baked in, not from guesses.
 
@@ -428,16 +408,6 @@ invokes the driver. Never hand-copy the injection plumbing.
 Any readiness check `false` → fix the shadow/survey and re-run (fix-loop ≤ 3
 iterations per check); still false → fail loud with the report's evidence.
 
-### Step 6: Flatten Analysis View (optional)
-
-If the model definition spans **more than 2 files**, also write
-`$ORCA_ARTIFACTS_DIR/<base_name>_flat.py`: the model definition closure inlined
-into ONE standalone file (keep stdlib/third-party imports; order definitions to
-avoid NameError). This is an **analysis view only** — execution ALWAYS goes through
-the shadow; nothing may import or run the flat file. `<base_name>` from the model
-architecture semantics or the main class name in snake_case. Skip silently when the
-closure is 1-2 files.
-
 ### Validation (gate)
 
 Run the pinning gate (re-verifies lock/checksums/deploy/manifest/readiness AND the
@@ -445,7 +415,7 @@ run-time shadow assertion; it also refreshes the `.run_lock` heartbeat):
 
 ```bash
 bash "$ORCA_AGENT_RESOURCES/scripts/check_flatten.sh" \
-  "{{ inputs.model_path }}" "" \
+  "{{ inputs.model_path }}" \
   || { echo "FAIL" >&2; exit 1; }
 ```
 
@@ -472,7 +442,7 @@ REPORT="$ORCA_ARTIFACTS_DIR/verify/memory_verifier_report.md"
 Missing file or sentinel mismatch → the manifest is treated as **not
 reviewed** → fail loud (`flatten_passed=false`, `error` names the report
 path). Read the report body; if any correction exposes an inconsistency in
-the facts you recorded (constructor args, container key, metric direction,
+the facts you recorded (constructor args, metric direction,
 interpreter), fix `readiness/readiness.json` / manifest and re-run the
 Validation gate.
 
@@ -504,7 +474,7 @@ OUT="$("$EMIT_PY" "$ORCA_ARTIFACTS_DIR/scripts/emit_result.py" \
   --field flatten_passed=true \
   --field readiness_path="$ORCA_ARTIFACTS_DIR/readiness/readiness.json" \
   --field error="" \
-  --field generated_artifacts='["project_manifest.md", ".user_pkg", "train_device.json", "shadow/", "readiness/readiness.json", "verify/memory_verifier_report.md", ...]' \
+  --field generated_artifacts='["project_manifest.md", ".user_pkg", "train_device.json", "BASELINE.lock", "shadow/", "scripts/", "orca_inject/", "readiness/readiness.json", "readiness/probe.onnx", "verify/memory_verifier_report.md"]' \
 )"
 printf '%s' "$OUT" | "$EMIT_PY" -c 'import json,sys; json.loads(sys.stdin.read())'
 ```
@@ -519,4 +489,5 @@ re-typing, no hand-assembly). If it fails, re-run the emitter and capture again
 On fail loud, the same emitter with `flatten_passed=false`,
 `readiness_path=""`, and `error` carrying the root cause — same capture →
 validate → reply procedure. `generated_artifacts` lists paths relative to
-`$ORCA_ARTIFACTS_DIR` (the actual subset produced).
+`$ORCA_ARTIFACTS_DIR` (the actual subset produced — drop `readiness/probe.onnx`
+and `verify/memory_verifier_report.md` when those steps have not run yet).

@@ -1,5 +1,5 @@
 ---
-description: Discover and empirically verify the three entry contracts (training / evaluation / export) by dispatching three focused sub-agents, assemble contracts.json and the four run templates from their proposal files, reject early-stopping projects, and validate the final contract with deterministic and semantic gates.
+description: Discover and empirically verify the three entry contracts (training / evaluation / export) by dispatching focused sub-agents, record the profiling configuration from the workflow inputs, assemble contracts.json (value-level fingerprints, admission ack, early-stop thresholds) and the three run templates from their proposal files, reject early-stopping projects, and validate the final contract with deterministic and semantic gates.
 tools: [bash, read, write, edit, glob, grep, task]
 ---
 # po_contract
@@ -9,7 +9,7 @@ node built a shadow copy of the model code; your job is to connect that shadow
 to the user's ORIGINAL training / evaluation / export entries WITHOUT touching
 a single user file.
 
-Admission clause (single source in this document): 训练须按给定轮数精确执行，自带 early-stopping 的项目不在本 workflow 范围。
+Admission clause (single source in this document): 训练须按给定轮数精确执行，自带 early-stopping 的项目不在本 workflow 范围。（连同「模型须可 opset17 静态 shape 导出、禁 dynamic_axes」——两条款都已在 workflow 描述中向用户声明；contracts.json 只记录稳定布尔 `admission_clause_ack: true`，不复抄条款文本。）
 
 Everything runs through the deployed shared scripts at
 `$ORCA_ARTIFACTS_DIR/scripts/` (assert_shadow / render_run / gen_export_onnx /
@@ -24,6 +24,11 @@ emit_result). Do not reference workflow source paths.
   `shadow/`, `shadow_pkgs`.
 - `{{ inputs.project_root }}` (read-only), `{{ inputs.full_train_epoch_cap }}`,
   `{{ inputs.seed }}`.
+- Profiling configuration to record: `{{ inputs.profile_chip }}` /
+  `{{ inputs.profile_precision }}` / `{{ inputs.profile_core_num }}` (the mfu
+  dispatch parameters — written verbatim into contracts.json's `profile`
+  block; they are part of the measurement fingerprint, so changing them needs
+  `fresh_start=true`).
 
 ## Path Handling Iron Rules
 
@@ -32,7 +37,7 @@ f-strings, or `+` for paths.
 
 ## Subagent Call Protocol (point-to-file)
 
-Dispatch these four subagents by name:
+Dispatch these FIVE subagents by name:
 
 - `train-contract-analyst`
 - `eval-contract-analyst`
@@ -59,14 +64,21 @@ docs.
 
 ```bash
 export ORCA_PYTHON="$(python3 -c 'import json; from pathlib import Path; print(json.loads(Path("readiness/readiness.json").read_text(encoding="utf-8"))["python"])')"
-bash "$ORCA_AGENT_RESOURCES/scripts/check_contracts.sh" --reuse-check
+bash "$ORCA_AGENT_RESOURCES/scripts/check_contracts.sh" --reuse-check \
+  --profile-chip "{{ inputs.profile_chip }}" \
+  --profile-precision "{{ inputs.profile_precision }}" \
+  --profile-core-num "{{ inputs.profile_core_num }}"
 ```
 
 - `0 REUSE` → redeploy shared scripts, keep `accuracy_rules.json`, read
-  `readiness_path` from disk, and go to Output.
-- `1 missing version fields` → fail loud with `viable=false` and `fresh_start`
-  guidance.
-- `1 sha drift` → rebuild from Step 1.
+  `contracts_path` (= `$ORCA_ARTIFACTS_DIR/contracts.json`) from disk, and go
+  to Output.
+- `1 sha drift` → rebuild from Step 1 (the recorded entries changed under
+  the contracts).
+- `3 version/config drift` (pre-v7 fields / viable=false / profile mismatch
+  vs the current inputs) → fail loud with `viable=false` and `fresh_start`
+  guidance — cycles measured under a different configuration cannot be
+  compared.
 - `2` → fail loud with `viable=false` + `error`.
 
 ### Step 1: Snapshot The Project (pre-measurement)
@@ -131,13 +143,14 @@ Non-zero → fix the relevant sub-agent proposal once before proceeding.
 
 The sub-agents already wrote:
 
-- `templates/run_full_finetune.template.sh`
-- `templates/run_probe_finetune.template.sh` (byte-identical)
+- `templates/run_full_finetune.template.sh` (the ONE training template —
+  the probe and full renders both render it, naming their own outputs;
+  the byte-identical twin is deleted, C9)
 - `templates/run_eval.template.sh`
 - `templates/export_onnx.template.sh`
 
 Verify each exists and carries the required `<<token>>` set (the gate
-checks it mechanically). Both training templates must additionally carry
+checks it mechanically). The training template must additionally carry
 `<<device>>`: every training render (the baseline chain, the probe node's
 variant launch) binds the training to a device index claimed through the
 allocation ledger via `--set device=<idx>` — the template renders it as the
@@ -146,12 +159,17 @@ NPU device index on npu). A training template missing the device token
 fails the gate: a render that silently ignores the allocated card breaks
 the device ledger's mutual exclusion. Do not rewrite the templates inline.
 
-### Step 6: Injection Environment Disclosure
+### Step 6: Injection Environment Disclosure (sitecustomize merge + re-run)
 
 Discover and merge any user-owned `sitecustomize.py` into
 `$ORCA_ARTIFACTS_DIR/orca_inject/sitecustomize.py`; record
-`sitecustomize_merge` in `contracts.json`. Re-run the eval dry-run after a
-merge so the evidence reflects the merged injection.
+`sitecustomize_merge` in `contracts.json` (the empty-merge object when the
+user has none). After a merge, RE-RUN the eval dry-run with the existing
+template so `contract_work/eval_dual_ckpt.json` reflects the MERGED
+injection (the evidence must be measured under the exact environment every
+downstream eval runs in — an unmerged-evidence file would vouch for an
+environment that no longer exists, C7); overwrite the evidence file with
+the re-run's result.
 
 ### Step 7: Budget Selection
 
@@ -160,13 +178,25 @@ Read `train_epochs_full` from
 
 - `full_train_budget.epochs` = min(cap, train_epochs_full) when cap non-empty;
   else train_epochs_full.
-- `full_train_budget.seed` = `{{ inputs.seed }}`.
-- `full_train_budget.data` = `{"dataset_knob": null, "data_value": null}`.
-- `proxy_budget.epochs` = min(1, full_train_budget.epochs).
-- `proxy_budget.dataset_knob/data_value/max_steps` = null.
+- `full_train_budget.seed` = `{{ inputs.seed }}` (the fingerprint is
+  epoch-only: the data-knob pair is deleted, C6).
+- `proxy_budget.epochs` = min(1, full_train_budget.epochs) — i.e. 1.
+- `proxy_budget.seed` = `{{ inputs.seed }}`.
 - `probe_cap_mechanism` = `"stop-at-k"`.
 
-Write `contract_work/proxy_budget_selection.json`.
+Write `contract_work/proxy_budget_selection.json` with the COMPLETE field
+set `{"epochs": 1, "seed": <int>, "rationale": "<one line>"}`.
+
+Also record:
+
+- `profile` = `{"chip": "{{ inputs.profile_chip }}", "precision":
+  "{{ inputs.profile_precision }}", "core_num": {{ inputs.profile_core_num }}}`
+  (the mfu dispatch parameters, verbatim from the workflow inputs).
+- `early_stop` = `{"warmup_frac": 0.1, "streak_frac": 0.3}` (the watchdog's
+  streaming-early-stop thresholds: warmup = ceil(warmup_frac x E) epochs
+  never judged; the kill fires at a streak of max(2, ceil(streak_frac x E))).
+- `admission_clause_ack` = `true` (the stable boolean — the clause TEXT
+  lives only in this document, C8).
 
 ### Step 8: Post-Snapshot + Exemptions
 
@@ -196,7 +226,10 @@ Fix-loop ≤ 3; exceeded → `viable=false`.
 ### Final contracts.json assembly
 
 Assemble `contracts.json` from the three proposal files and the evidence
-files. The top-level `reason` must contain the admission clause verbatim.
+files. It must carry (the gate checks each): the `profile` block, the
+`early_stop` block, `admission_clause_ack: true`, the epoch-only
+`full_train_budget` / `proxy_budget`, `sitecustomize_merge`, and the
+top-level `reason` naming the contract verdict.
 
 ### Contract semantic audit
 

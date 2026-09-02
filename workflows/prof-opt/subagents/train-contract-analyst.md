@@ -57,9 +57,11 @@ The caller will provide:
    If tier A has a 0-based log and no 1-based epoch line to anchor, write a
    logging-only adapted entry (record tier B); if no adaptation is possible
    at all, declare tier C with the reason.
-4. Write `templates/run_full_finetune.template.sh` and byte-identical
-   `templates/run_probe_finetune.template.sh` with tokens
-   `<<python>> <<epochs>> <<out_dir>> <<seed>>` and optional `<<vid>>`.
+4. Write `templates/run_full_finetune.template.sh` (the ONE training
+   template — the baseline chain and the variant launch both render it,
+   naming their own outputs) with tokens
+   `<<python>> <<epochs>> <<out_dir>> <<seed>> <<device>>` and optional
+   `<<vid>>`.
 5. Write `<proposal_path>` with this shape:
 
 ```json

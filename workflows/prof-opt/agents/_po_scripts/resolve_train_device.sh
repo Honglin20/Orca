@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# resolve_train_device.sh — resolve the TRAINING device backend, once, at entry
-# (v6 §3.1). profile_mode.json is a SEPARATE contract: profiling is
-# machine-independent (static/remote) and never feeds training-device
-# allocation — the two resolvers do not couple.
+# resolve_train_device.sh — resolve the TRAINING device backend, once, at
+# entry (v7). Profiling (the mfu path, configured by workflow inputs) is
+# machine-independent and never feeds training-device allocation — the two
+# decisions do not couple.
 #
 # Priority (first match wins, fail loud):
 #   1. env ORCA_PO_DEVICE_BACKEND non-empty -> explicit declaration. Must be
@@ -14,8 +14,8 @@
 #   3. nvidia-smi on PATH OR torch.cuda.is_available() -> cuda.
 #      resolved_by=nvidia-smi | torch.cuda.
 #   4. none of the above -> exit 2 (a missing trainable device is a hard
-#      error — placeholder is valid for PROFILING only; training has no
-#      placeholder backend).
+#      error; profiling being machine-independent does not give training a
+#      fallback backend).
 #
 # device_count: npu -> `npu-smi -l` (the "Total Count" line, falling back to
 # counting NPU<n> rows); cuda -> `nvidia-smi -L` (GPU lines) or, when only
@@ -41,8 +41,14 @@ set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STDOUT_ONLY=0
-if [ "${1:-}" = "--stdout-only" ]; then STDOUT_ONLY=1; shift; fi
-[ $# -eq 0 ] || { echo "FATAL: unknown argument(s): $* (only --stdout-only is accepted)" >&2; exit 2; }
+OVERWRITE=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --stdout-only) STDOUT_ONLY=1; shift ;;
+    --overwrite)   OVERWRITE=1; shift ;;
+    *) echo "FATAL: unknown argument(s): $* (only --stdout-only / --overwrite are accepted)" >&2; exit 2 ;;
+  esac
+done
 if [ "$STDOUT_ONLY" -eq 0 ]; then
   ART="${ORCA_ARTIFACTS_DIR:?FATAL: ORCA_ARTIFACTS_DIR not set (resolve_train_device.sh)}"
 fi
@@ -96,7 +102,7 @@ elif command -v nvidia-smi >/dev/null 2>&1; then
 elif torch_cuda_available; then
   BACKEND="cuda"; RESOLVED_BY="torch.cuda"
 else
-  echo "FATAL: no trainable device backend found (ORCA_PO_DEVICE_BACKEND unset, no npu-smi, no nvidia-smi, torch.cuda unavailable) — a missing trainable device is a hard error; placeholder is valid for profiling only" >&2
+  echo "FATAL: no trainable device backend found (ORCA_PO_DEVICE_BACKEND unset, no npu-smi, no nvidia-smi, torch.cuda unavailable) — a missing trainable device is a hard error; profiling being machine-independent (the mfu path) does not help training" >&2
   exit 2
 fi
 
@@ -143,11 +149,12 @@ PY
   fi
   printf '%s\n' "$PAYLOAD"
 else
-  if [ -f "$ART/train_device.json" ]; then
-    echo "train_device.json already resolved — keeping the frozen file (single source)" >&2
+  if [ -f "$ART/train_device.json" ] && [ "$OVERWRITE" -eq 0 ]; then
+    echo "train_device.json already resolved — keeping the frozen file (single source; pass --overwrite on the NO_REUSE rebuild path, v7 F6)" >&2
   else
     mkdir -p "$ART"
     printf '%s\n' "$PAYLOAD" > "$ART/train_device.json"
+    [ "$OVERWRITE" -eq 1 ] && echo "train_device.json re-resolved and OVERWRITTEN (NO_REUSE rebuild path, v7 F6: the training device backend is never silently carried over from the old workspace)" >&2
   fi
   printf '%s\n' "$PAYLOAD"
 fi

@@ -1,32 +1,36 @@
 #!/usr/bin/env bash
-# check_flatten.sh — deterministic gate for po_flatten artifacts.
+# check_flatten.sh — deterministic gate for po_flatten artifacts (v7).
 #
 # Re-verifies everything downstream nodes depend on (fail loud, exit 1):
-#   1. heartbeat refresh (validation-time touch of .run_lock)
+#   1. heartbeat refresh (validation-time mtime touch of .run_lock — v7 F5:
+#      the heartbeat model is CONTINUATION (the watchdog and the baseline
+#      finalizer refresh it mid-run), so this gate only touches the mtime,
+#      never rewrites the lock's identity content)
 #   2. shadow tree: exists, >=1 top-level name, >=1 .py, no __pycache__/*.pyc
-#   3. BASELINE.lock: valid JSON, pinned key set, checksums still match
-#      (recomputed over shadow *.py; the pretrained ckpt only when one is
-#      anchored — it is reference-only and optional)
+#   3. BASELINE.lock: valid JSON, v7 schema (version / model_path /
+#      py_files_sha256), checksums still match (recomputed over shadow *.py;
+#      the pretrained-ckpt anchor is deleted in v7 — F2)
 #   4. stdlib collision: no shadow top-level name in sys.stdlib_module_names
 #   5. deployed tooling: orca_inject pair + scripts/{assert_shadow,render_run,
-#      emit_result,deploy_scripts} present
-#   6. project_manifest.md: pinned sections + metric direction marked
-#   7. readiness/readiness.json: all four checks true
+#      emit_result,deploy_scripts,analyze,mfu_adapter} present
+#   6. project_manifest.md: pinned sections + EVERY listed ranking metric's
+#      direction marked (v7 F10: per-metric check, one spelling —
+#      higher_better / lower_better)
+#   7. readiness/readiness.json: all THREE v7 checks true (constructible /
+#      exportable / definition_located — the vacuous pretrained_loadable is
+#      deleted, F2)
 #   8. runtime proof: assert_shadow.py passes under the injection header —
 #      every shadow pkg resolves inside the shadow tree, executed in the exact
 #      invocation form the run templates use
 #
-# Usage: check_flatten.sh <model_path> <pretrained_ckpt>
-#   (<pretrained_ckpt> may be empty: reference-only, recorded in the lock only
-#    when provided)
+# Usage: check_flatten.sh <model_path>
 # Environment: ORCA_ARTIFACTS_DIR (required), ORCA_RUN_ID (heartbeat owner),
-#              ORCA_PYTHON (optional; readiness.json "python" wins, python3 last)
+#              ORCA_PYTHON (optional; env wins over readiness.json "python",
+#              python3 last — v7 F9: code and comment agree on the priority)
 set -uo pipefail
 
-MODEL_PATH="${1:?usage: check_flatten.sh <model_path> <pretrained_ckpt>}"
-CKPT="${2-}"
+MODEL_PATH="${1:?usage: check_flatten.sh <model_path>}"
 ART="${ORCA_ARTIFACTS_DIR:?FATAL: ORCA_ARTIFACTS_DIR not set (check_flatten.sh)}"
-RUN_ID="${ORCA_RUN_ID:-unknown-run}"
 
 FAIL=0
 bad() { echo "FAIL: $*" >&2; FAIL=1; }
@@ -34,16 +38,15 @@ note() { echo "[check_flatten] $*" >&2; }
 
 cd "$ART" || { echo "FATAL: artifacts dir unreachable: $ART" >&2; exit 2; }
 
-# 1. heartbeat (validation-step head touch, keeps the single-writer lock fresh)
-printf '{"run_id": "%s", "pid": %s, "ts": %s}\n' \
-  "$RUN_ID" "$$" "$(date +%s)" > "$ART/.run_lock.tmp.$$" 2>/dev/null \
-  && mv -f "$ART/.run_lock.tmp.$$" "$ART/.run_lock" \
+# 1. heartbeat (mtime touch only — v7 F5: the lock's identity content belongs
+# to the entry gate that wrote it; this gate just keeps the heartbeat fresh)
+touch "$ART/.run_lock" 2>/dev/null \
   || note "WARN: cannot refresh .run_lock heartbeat"
 
-# resolve the working interpreter: env > readiness.json > python3
-PY="${ORCA_PYTHON:-python3}"
-if [ -f "$ART/readiness/readiness.json" ] \
-   && grep -q '"python"' "$ART/readiness/readiness.json" 2>/dev/null; then
+# resolve the working interpreter (v7 F9): ORCA_PYTHON env wins — the caller
+# pinned it deliberately — then readiness.json "python", python3 last
+PY="python3"
+if [ -z "${ORCA_PYTHON:-}" ] && [ -f "$ART/readiness/readiness.json" ]; then
   CAND="$(python3 -c '
 import json, sys
 from pathlib import Path
@@ -54,6 +57,7 @@ except Exception:
 ' "$ART/readiness/readiness.json" 2>/dev/null || true)"
   [ -n "$CAND" ] && PY="$CAND"
 fi
+[ -n "${ORCA_PYTHON:-}" ] && PY="$ORCA_PYTHON"
 command -v "$PY" >/dev/null 2>&1 || [ -x "$PY" ] \
   || { echo "FAIL: interpreter not found: $PY" >&2; exit 1; }
 note "interpreter=$PY"
@@ -72,13 +76,11 @@ else
 fi
 
 # 3. BASELINE.lock integrity (mechanical re-verification, fail loud)
-LOCK_OK="$(python3 - "$ART/BASELINE.lock" "$MODEL_PATH" "$CKPT" "$ART/shadow" <<'PY'
+LOCK_OK="$(python3 - "$ART/BASELINE.lock" "$MODEL_PATH" "$ART/shadow" <<'PY'
 import hashlib, json, sys
 from pathlib import Path
 
-lock_path, ckpt_raw, shadow = Path(sys.argv[1]), sys.argv[3], Path(sys.argv[4])
-ckpt = Path(ckpt_raw) if ckpt_raw else None  # Path("") would normalize to "."
-model_path = sys.argv[2]  # lock stores it as a JSON string — compare like-for-like
+lock_path, model_path, shadow = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
 
 def sha(p: Path) -> str:
     h = hashlib.sha256()
@@ -97,27 +99,20 @@ except Exception as exc:
     print(json.dumps({"ok": False, "problems": [f"BASELINE.lock not valid JSON: {exc}"]}))
     sys.exit(0)
 
-for key in ("model_path", "pretrained_ckpt", "ckpt_sha256", "py_files_sha256"):
+for key in ("version", "model_path", "py_files_sha256"):
     if key not in lock:
         problems.append(f"BASELINE.lock missing key {key!r}")
 if problems:
-    print(json.dumps({"ok": False, "problems": problems}))
+    extra = (["lock predates the v7 schema (no version field) — rebuild "
+              "with fresh_start"] if "version" not in lock else [])
+    print(json.dumps({"ok": False, "problems": problems + extra}))
     sys.exit(0)
-
+if lock.get("version") != 2:
+    problems.append(f"BASELINE.lock schema version {lock.get('version')!r} != 2 "
+                    "(v7 lock: version/model_path/py_files_sha256) — rebuild "
+                    "with fresh_start, never silently migrated")
 if lock["model_path"] != model_path:
     problems.append(f"model_path drift: lock={lock['model_path']!r} now={model_path!r}")
-if ckpt is None:
-    # no reference checkpoint provided: the lock must carry the empty anchor
-    if lock.get("pretrained_ckpt") or lock.get("ckpt_sha256"):
-        problems.append("pretrained_ckpt drift: lock anchors a ckpt but none is provided now")
-else:
-    if not ckpt.is_file():
-        problems.append(f"pretrained_ckpt missing: {ckpt}")
-    else:
-        if lock["pretrained_ckpt"] != str(ckpt.resolve()):
-            problems.append("pretrained_ckpt path drift (same content, different anchor)")
-        if lock["ckpt_sha256"] != sha(ckpt):
-            problems.append("pretrained_ckpt content drift (sha256 mismatch)")
 actual_py = {str(p.relative_to(shadow)).replace("\\", "/"): sha(p)
              for p in sorted(shadow.rglob("*.py"))} if shadow.is_dir() else {}
 if lock["py_files_sha256"] != actual_py:
@@ -143,11 +138,11 @@ fi
 # 5. deployed shared tooling
 for f in orca_inject/sitecustomize.py orca_inject/header.env \
          scripts/assert_shadow.py scripts/render_run.sh scripts/emit_result.py \
-         scripts/deploy_scripts.sh scripts/placeholder_profiler.py scripts/analyze.py; do
+         scripts/deploy_scripts.sh scripts/analyze.py scripts/mfu_adapter.py; do
   [ -s "$ART/$f" ] || bad "deployed tooling missing: $ART/$f (run the deploy step)"
 done
 
-# 6. project manifest: pinned sections + direction marker
+# 6. project manifest: pinned sections + per-metric direction markers (F10)
 MANIFEST="$ART/project_manifest.md"
 if [ ! -s "$MANIFEST" ]; then
   bad "project_manifest.md missing or empty"
@@ -155,11 +150,38 @@ else
   for section in "Project Overview" "Model" "Training And Evaluation" "Data And Environment" "Relevant Source Files"; do
     grep -q "## $section" "$MANIFEST" || bad "project_manifest.md missing section '## $section'"
   done
-  grep -qE 'higher-better|lower-better' "$MANIFEST" \
-    || bad "project_manifest.md does not mark the metric direction (higher-better / lower-better)"
+  python3 - "$MANIFEST" <<'PY' || bad "project_manifest.md metric-direction check failed (see stderr above)"
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+m = re.search(r"^##[ \t]*Training And Evaluation[ \t]*$(.*)",
+              text, re.MULTILINE | re.DOTALL)
+section = m.group(1) if m else ""
+# v7 F10: every metric LIST ITEM must carry a direction marker, one spelling
+# everywhere (higher_better / lower_better — the same tokens contracts.json
+# uses). A list item that names a metric without a marker is a validation
+# failure; at least one metric must be listed at all.
+items = [l for l in section.splitlines() if l.strip().startswith(("- ", "* "))]
+problems = []
+metric_items = [l for l in items if "metric" in l.lower() or "better" in l.lower()]
+for l in items:
+    if "better" in l.lower() and "better_" not in l:
+        problems.append(f"direction marker uses the old hyphen spelling: {l.strip()!r}")
+    if "metric" in l.lower() and "better" not in l.lower():
+        problems.append(f"metric listed without a direction marker: {l.strip()!r}")
+if not metric_items:
+    problems.append("no ranking-metric list item found in '## Training And "
+                    "Evaluation' (expected e.g. '- <metric>: higher_better')")
+if problems:
+    for p in problems:
+        print(f"manifest: FAIL {p}", file=sys.stderr)
+    raise SystemExit(1)
+PY
 fi
 
-# 7. readiness report: all four checks true
+# 7. readiness report: all three v7 checks true (F2)
 if ! python3 - "$ART/readiness/readiness.json" <<'PY'
 import json, sys
 from pathlib import Path
@@ -168,7 +190,7 @@ if not p.is_file():
     print("readiness/readiness.json missing", file=sys.stderr)
     sys.exit(1)
 d = json.loads(p.read_text(encoding="utf-8"))
-missing = [k for k in ("constructible", "exportable", "pretrained_loadable", "definition_located")
+missing = [k for k in ("constructible", "exportable", "definition_located")
            if d.get(k) is not True]
 if missing:
     print(f"readiness checks not all-pass: {missing} in {d}", file=sys.stderr)

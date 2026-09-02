@@ -1,49 +1,45 @@
 #!/usr/bin/env bash
-# reuse_check.sh — po_flatten reuse gate (idempotent entry).
+# reuse_check.sh — po_flatten reuse gate (idempotent entry, v7).
 #
 # Verifies, in order:
 #   1. single-writer lock: no OTHER live run owns this workspace
 #      (.run_lock = {run_id, pid, ts} heartbeat; "live" = pid alive OR
-#      heartbeat younger than LOCK_STALE_S). Our own run_id always refreshes.
+#      heartbeat younger than LOCK_STALE_S — the heartbeat itself is now a
+#      CONTINUATION model: the watchdog and the baseline finalizer touch it
+#      mid-run, v7 F5, so a long training keeps the workspace live). Our own
+#      run_id always refreshes.
 #   2. fresh_start=1 -> wipe the ENTIRE reusable workspace (everything under
 #      $ORCA_ARTIFACTS_DIR except .run_lock) and report NO_REUSE so the node
 #      rebuilds from scratch.
-#   3. BASELINE.lock matches the current key inputs (structural anchor:
-#      model_path + pretrained_ckpt[optional] + shadow *.py checksums + ckpt
-#      checksum when a ckpt is anchored). Failure -> exit 3, two distinguishable
-#      states: unreadable/corrupt lock = REAL error; readable-but-mismatched =
-#      usually design behavior on a workspace with a promotion history (the
-#      shadow moved forward, the lock still anchors the original baseline —
-#      cross-run reuse holds only for zero-promotion workspaces) -> fresh_start.
+#   3. BASELINE.lock (v7 schema: version / model_path / py_files_sha256 —
+#      the ckpt anchor is deleted) matches the current key inputs. Failure
+#      -> exit 3, two distinguishable states: unreadable/corrupt lock = REAL
+#      error; readable-but-mismatched (or a lock that predates the v7
+#      schema) = rebuild via fresh_start.
 #   4. shadow tree + project_manifest.md + readiness/readiness.json exist and
 #      readiness is all-pass -> REUSE (skip the workflow steps).
 #
-# Also re-validates the PROFILING MODE on the reuse path (only): the mode is
-# re-resolved once (read-only) and compared with the recorded
-# profile_mode.json over the measurement-config fields {mode, chip,
-# precision, core_num}. Any difference — or a missing profile_mode.json —
-# exits 2: cycles measured under a different configuration cannot be
-# compared across runs (fresh_start=true rebuilds the workspace).
+# v7 deletes the profiling-mode comparison (resolve_profile_mode.sh and
+# profile_mode.json are gone): the profiling configuration is a workflow
+# INPUT recorded in contracts.json, and the contract stage's own reuse gate
+# checks its consistency.
 #
 # Exit codes: 0 = REUSE (skip steps)
 #             1 = NO_REUSE (run the steps; also returned after fresh-start wipe)
-#             2 = hard environment error (incl. profiling-mode drift on reuse)
+#             2 = hard environment error
 #             3 = fail-loud conflict (live other run / baseline-lock
 #                 mismatch) -> flatten_passed=false
 #
-# Usage: reuse_check.sh <model_path> <pretrained_ckpt> <fresh_start:0|1>
-#   (<pretrained_ckpt> may be empty: reference-only, recorded in the lock only
-#    when provided)
+# Usage: reuse_check.sh <model_path> <fresh_start:0|1>
 set -euo pipefail
 
-MODEL_PATH="${1:?usage: reuse_check.sh <model_path> <pretrained_ckpt> <fresh_start:0|1>}"
-CKPT="${2-}"
-FRESH_START="${3:-0}"
-[ $# -le 3 ] || { echo "FATAL: unexpected extra argument(s): $* (usage: reuse_check.sh <model_path> <pretrained_ckpt> <fresh_start:0|1>)" >&2; exit 2; }
+MODEL_PATH="${1:?usage: reuse_check.sh <model_path> <fresh_start:0|1>}"
+FRESH_START="${2:-0}"
+[ $# -le 2 ] || { echo "FATAL: unexpected extra argument(s): $* (usage: reuse_check.sh <model_path> <fresh_start:0|1>)" >&2; exit 2; }
 
 ART="${ORCA_ARTIFACTS_DIR:?FATAL: ORCA_ARTIFACTS_DIR not set (reuse_check.sh)}"
 RUN_ID="${ORCA_RUN_ID:-unknown-run}"
-LOCK_STALE_S=1800   # 30 min heartbeat grace
+LOCK_STALE_S=1800   # 30 min heartbeat grace (watchdog/finalizer refresh it mid-run)
 
 cd "$ART" || { echo "FATAL: artifacts dir unreachable: $ART" >&2; exit 2; }
 
@@ -103,7 +99,7 @@ if [ "$FRESH_START" = "1" ]; then
   # behind by an older run — including files from a paradigm this version no
   # longer knows — would silently false-gate the rebuild checks below. The
   # only survivor is .run_lock: the single-writer lock belongs to THIS run
-  # (heartbeat refreshed at the top; the validation gate refreshes it again),
+  # (heartbeat refreshed at the top; the validation gate touches it again),
   # so it is never wiped and never needs rebuilding by anyone else.
   # A failed wipe MUST exit 2 (hard error): under set -e a bare failure would
   # exit 1, which the caller maps to NO_REUSE — a HALF-wiped workspace must
@@ -122,12 +118,11 @@ if [ ! -f "$ART/BASELINE.lock" ]; then
   exit 1
 fi
 
-LOCK_VERDICT="$(python3 - "$ART/BASELINE.lock" "$MODEL_PATH" "$CKPT" <<'PY'
+LOCK_VERDICT="$(python3 - "$ART/BASELINE.lock" "$MODEL_PATH" <<'PY'
 import hashlib, json, sys
 from pathlib import Path
 
-lock_path, model_path, ckpt_raw = sys.argv[1], sys.argv[2], sys.argv[3]
-ckpt = Path(ckpt_raw) if ckpt_raw else None  # Path("") would normalize to "."
+lock_path, model_path = sys.argv[1], sys.argv[2]
 
 def sha(p: Path) -> str:
     h = hashlib.sha256()
@@ -155,21 +150,11 @@ except Exception as exc:
     sys.exit(0)
 
 why = []
+if lock.get("version") != 2:
+    why.append(f"lock schema version {lock.get('version')!r} != 2 — the "
+               f"workspace predates the v7 lock; rebuild with fresh_start")
 if lock.get("model_path") != model_path:
     why.append(f"model_path changed: lock={lock.get('model_path')!r} now={model_path!r}")
-if ckpt is None:
-    # no reference checkpoint provided now: the lock must carry the empty anchor
-    if lock.get("pretrained_ckpt") or lock.get("ckpt_sha256"):
-        why.append("pretrained_ckpt changed: lock anchors a ckpt but none is provided now")
-else:
-    if not ckpt.is_file():
-        print(json.dumps({"match": False, "why": [f"pretrained_ckpt missing: {ckpt}"]}))
-        sys.exit(0)
-    ckpt_resolved = str(ckpt.resolve())
-    if lock.get("pretrained_ckpt") != ckpt_resolved:
-        why.append(f"pretrained_ckpt changed: lock={lock.get('pretrained_ckpt')!r} now={ckpt_resolved!r}")
-    elif lock.get("ckpt_sha256") != sha(ckpt):
-        why.append("pretrained_ckpt file content changed (sha256 mismatch)")
 
 shadow = Path(lock_path).parent / "shadow"
 actual_py = {}
@@ -195,49 +180,8 @@ if [[ "$LOCK_VERDICT" == *'"unreadable": true'* ]]; then
 fi
 if [[ "$LOCK_VERDICT" != *'"match": true'* ]]; then
   echo "FATAL: BASELINE.lock does not match current key inputs. $LOCK_VERDICT" >&2
-  echo "HINT: most often the model/ckpt/shadow anchor truly changed (v6: the base shadow never moves forward — there is no promotion history). Re-run with fresh_start=true to rebuild the workspace from scratch." >&2
+  echo "HINT: most often the model/shadow anchor truly changed or the workspace predates the current lock schema (the base shadow never moves forward — there is no promotion history). Re-run with fresh_start=true to rebuild the workspace from scratch." >&2
   exit 3
-fi
-
-# ── 3b. profiling-mode consistency (reuse path only) ─────────────────────────
-# Reached only with a matching lock (first-run NO_REUSE and fresh_start wipe
-# both exited above). Re-resolve the mode READ-ONLY and compare the
-# measurement-config four-field set with the recorded profile_mode.json —
-# the existing file is never touched here. `resolved_by` is provenance only
-# and deliberately NOT compared (an env->npu-smi source flip on the same
-# hardware is a measurement-equivalent configuration, not drift).
-PO_SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/_po_scripts"
-[ -f "$PO_SCRIPTS/resolve_profile_mode.sh" ] || {
-  echo "FATAL: shared tooling not found at $PO_SCRIPTS/resolve_profile_mode.sh (expected <agents root>/_po_scripts)" >&2
-  exit 2; }
-MODE_FILE="$ART/profile_mode.json"
-if [ ! -s "$MODE_FILE" ]; then
-  echo "FATAL: profile_mode.json missing under $ART — the workspace predates mode resolution or was half-built; cycles comparisons across runs are invalid without it. Re-run with fresh_start=true to rebuild the workspace." >&2
-  exit 2
-fi
-RESOLVED_NOW="$(bash "$PO_SCRIPTS/resolve_profile_mode.sh" --stdout-only)" || {
-  echo "FATAL: profiling-mode re-resolution failed while checking reuse consistency (see stderr above)" >&2
-  exit 2; }
-MODE_OK="$(python3 - "$MODE_FILE" "$RESOLVED_NOW" <<'PY'
-import json, sys
-
-COMPARE = ("mode", "chip", "precision", "core_num")
-try:
-    recorded = json.loads(open(sys.argv[1], encoding="utf-8").read())
-    now = json.loads(sys.argv[2])
-    if not isinstance(recorded, dict) or not isinstance(now, dict):
-        raise ValueError("not a JSON object")
-except Exception as exc:
-    print(f"BAD:{exc}")
-    raise SystemExit(0)
-diff = {k: (recorded.get(k, "<absent>"), now.get(k, "<absent>"))
-        for k in COMPARE if recorded.get(k, "<absent>") != now.get(k, "<absent>")}
-print("OK" if not diff else f"DRIFT:{json.dumps(diff, ensure_ascii=False)}")
-PY
-)"
-if [[ "$MODE_OK" == BAD:* || "$MODE_OK" == DRIFT:* ]]; then
-  echo "FATAL: profiling-mode mismatch on workspace reuse ($MODE_OK) — cycles measured under a different configuration cannot be compared across runs; re-run with fresh_start=true to rebuild the workspace." >&2
-  exit 2
 fi
 
 # ── 4. reuse products ────────────────────────────────────────────────────────
@@ -262,7 +206,7 @@ if not p.is_file():
     sys.exit(1)
 d = json.loads(p.read_text(encoding="utf-8"))
 ok = all(d.get(k) is True for k in
-         ("constructible", "exportable", "pretrained_loadable", "definition_located"))
+         ("constructible", "exportable", "definition_located"))
 if not ok:
     print(f"NO_REUSE: readiness not all-pass: {d}", file=sys.stderr)
     sys.exit(1)
