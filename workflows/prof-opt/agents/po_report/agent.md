@@ -120,7 +120,7 @@ builder:
   writes);
 - is safe to re-run (write-back is idempotent: identical content at the
   target counts as written, different content is never overwritten);
-- opens the report's first section with the three v7 disclosure lines:
+- opens the report's first section with the three disclosure lines:
   the profiling source ("mfu 实测 via 用户内网评测工具", with the
   `contracts.json` `profile` block verbatim — the configuration every
   number in the report was measured under), `train_device.json` verbatim

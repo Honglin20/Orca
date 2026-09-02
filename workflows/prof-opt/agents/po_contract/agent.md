@@ -75,7 +75,7 @@ bash "$ORCA_AGENT_RESOURCES/scripts/check_contracts.sh" --reuse-check \
   to Output.
 - `1 sha drift` → rebuild from Step 1 (the recorded entries changed under
   the contracts).
-- `3 version/config drift` (pre-v7 fields / viable=false / profile mismatch
+- `3 version/config drift` (legacy lock-schema fields / viable=false / profile mismatch
   vs the current inputs) → fail loud with `viable=false` and `fresh_start`
   guidance — cycles measured under a different configuration cannot be
   compared.
@@ -145,7 +145,7 @@ The sub-agents already wrote:
 
 - `templates/run_full_finetune.template.sh` (the ONE training template —
   the probe and full renders both render it, naming their own outputs;
-  the byte-identical twin is deleted, C9)
+  the byte-identical twin is deleted)
 - `templates/run_eval.template.sh`
 - `templates/export_onnx.template.sh`
 
@@ -168,7 +168,7 @@ user has none). After a merge, RE-RUN the eval dry-run with the existing
 template so `contract_work/eval_dual_ckpt.json` reflects the MERGED
 injection (the evidence must be measured under the exact environment every
 downstream eval runs in — an unmerged-evidence file would vouch for an
-environment that no longer exists, C7); overwrite the evidence file with
+environment that no longer exists); overwrite the evidence file with
 the re-run's result.
 
 ### Step 7: Budget Selection
@@ -179,7 +179,7 @@ Read `train_epochs_full` from
 - `full_train_budget.epochs` = min(cap, train_epochs_full) when cap non-empty;
   else train_epochs_full.
 - `full_train_budget.seed` = `{{ inputs.seed }}` (the fingerprint is
-  epoch-only: the data-knob pair is deleted, C6).
+  epoch-only: the data-knob pair is deleted).
 - `proxy_budget.epochs` = min(1, full_train_budget.epochs) — i.e. 1.
 - `proxy_budget.seed` = `{{ inputs.seed }}`.
 - `probe_cap_mechanism` = `"stop-at-k"`.
@@ -196,7 +196,7 @@ Also record:
   streaming-early-stop thresholds: warmup = ceil(warmup_frac x E) epochs
   never judged; the kill fires at a streak of max(2, ceil(streak_frac x E))).
 - `admission_clause_ack` = `true` (the stable boolean — the clause TEXT
-  lives only in this document, C8).
+  lives only in this document).
 
 ### Step 8: Post-Snapshot + Exemptions
 

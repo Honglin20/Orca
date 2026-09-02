@@ -181,7 +181,7 @@ Exit code mapping (the script logs details to stderr):
      in `generated_artifacts` when that file exists on disk).
 - `1` (`NO_REUSE`) → continue with Step 1.
 - `3` (fail-loud conflict: another live run / structural anchor changed /
-  unreadable-or-corrupt BASELINE.lock / a lock that predates the v7 schema) →
+  unreadable-or-corrupt BASELINE.lock / a lock recorded in a legacy schema version) →
   emit `flatten_passed=false` with the stderr message in `error` (mention
   `fresh_start` when the anchor changed). Do not attempt repairs.
 - `2` → hard environment error → `flatten_passed=false` +
@@ -304,7 +304,7 @@ move or edit.
    Collision → fail loud (`flatten_passed=false`, list the names in `error`).
 
 6. **Write `BASELINE.lock`** (the structural anchor — recomputable, deterministic;
-   v7 schema: version / model_path / the shadow *.py checksum map):
+   lock schema: version / model_path / the shadow *.py checksum map):
 
    ```bash
    python3 "$ORCA_AGENT_RESOURCES/scripts/write_baseline_lock.py" \

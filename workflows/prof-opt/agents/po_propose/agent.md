@@ -360,7 +360,7 @@ Loop while the vid's verdict is a repairable failure:
      gate is delta < 0 only — whether the prediction reached the line is
      disclosed here, never a rejection);
    - the soft-alignment conclusion (aligned / conflict + reason — the
-     record the v6 conformance.md used to carry);
+     record lives here — there is no standalone conformance file);
    - zero-proposal rounds: the `exhausted_rationale` directions distilled
      to one line each;
    - next-round direction: one or two lines of what this round's

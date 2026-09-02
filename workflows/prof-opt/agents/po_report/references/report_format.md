@@ -131,7 +131,7 @@ terminal record — torn launch").
   "change_sig", "lineage"}`: `change_sig` from the winner's latest
   history row; `lineage` = the parent chain walked backwards through
   history (`parent_vid` links, oldest first, ending with the winner vid) —
-  in v6 the base never advances so `parent_vid` is null and the chain is
+  the base never advances so `parent_vid` is null and the chain is
   the winner vid alone. **No success row anywhere → `null` and a
   no-promotion disclosure in `reason`** (the report references the
   dashboard for what was tried).
@@ -174,7 +174,7 @@ terminal record — torn launch").
 
 The write-back source is the **WINNER's variant shadow**
 (`variants/<winner-vid>/shadow/` — the tree the implementer actually
-optimized; in v6 the global `shadow/` stays the untouched baseline copy)
+optimized; the global `shadow/` stays the untouched baseline copy)
 diffed against the user's original files at the same relative paths. User
 files are never modified; new files are written beside the originals.
 
@@ -292,7 +292,7 @@ written: the JSON mirror is the merge's single product.)
 
 ## 5. prof_opt_report.md (human-readable, workspace root)
 
-Sections: Disclosure (the three v7 lines: profiling source with the
+Sections: Disclosure (the three lines: profiling source with the
 contracts profile block, training device backend verbatim, chart daemon
 state from .chart_push.log + the pushed dictionary; + scripts .VERSION
 stamp) · Terminal State
