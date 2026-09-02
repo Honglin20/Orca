@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run_baseline_chain.sh — po_baseline non-blocking chain driver.
+# run_baseline_chain.sh — po_baseline non-blocking chain driver (v7).
 #
 # Steps (each idempotent: the step's product file existing = done, re-entry
 # skips it; the product is the authority, baseline_status.md is the view):
@@ -8,33 +8,40 @@
 #                                 structure anchor for the write-back diff),
 #                                 then render + run the export template ->
 #                                 base/model.onnx
-#   2 profile (dual-mode)        : four profiling artifacts -> base/profile/
-#                                 (mode from profile_mode.json — resolved once
-#                                 at entry)
-#                                 - placeholder mode: the built-in estimator
-#                                   runs inline (unchanged)
-#                                 - mfu mode: the raw evaluation products under
-#                                   base/profile/<onnx_stem>/ are produced by
-#                                   the mfu-analyzer SUBAGENT (the chain never
-#                                   runs the evaluation itself), then converted
-#                                   by scripts/mfu_adapter.py. States when the
-#                                   four-piece is absent:
+#   2 profile (mfu ONLY)         : four profiling artifacts -> base/profile/.
+#                                 The mfu-analyzer SUBAGENT (v7: the ONE
+#                                 profiling path — it drives the user's
+#                                 in-network mfu_benchmark; no estimator, no
+#                                 environment sniffing, no fallback) produces
+#                                 the raw evaluation products under
+#                                 base/profile/<onnx_stem>/ (the chain never
+#                                 runs the evaluation itself), then
+#                                 scripts/mfu_adapter.py converts them. When
+#                                 the four-piece is absent:
 #                                     raw products present -> adapt (this step)
 #                                     report w/o raw       -> FATAL no-fallback
 #                                     neither              -> waiting (rc 3):
-#                                       the chain emits "running" telling the
-#                                       agent to dispatch mfu-analyzer, then
-#                                       re-invoke; the placeholder estimator is
-#                                       NEVER run in mfu mode
+#                                       the chain emits "running" carrying the
+#                                       dispatch parameters (onnx / profile_dir
+#                                       / report / chip / precision / core_num
+#                                       — the profile trio verbatim from
+#                                       contracts.json), the agent dispatches
+#                                       mfu-analyzer, then re-invokes
 #   3 analyze                    : scripts/analyze.py -> base/bottleneck_report.json
-#   4 full-train launch          : claim the first free training device via
-#                                 the allocation ledger (vid=baseline lock
-#                                 under devices/, backend/count from
-#                                 train_device.json), render the train
-#                                 contract template at the FULL effective
-#                                 epochs (--out baseline/train.rendered.sh,
-#                                 --set device=<idx>), wipe any partial
-#                                 out-dir (training always starts from
+#   4 full-train launch          : claim the AGENT-CHOSEN training device
+#                                 (required --device <idx>: the node ran
+#                                 device_alloc probe, read the raw occupancy
+#                                 itself and picked a free card; the chain
+#                                 claims exactly that idx — vid=baseline lock
+#                                 under devices/). The idx already locked ->
+#                                 stdout "running" (re-probe and pick another
+#                                 card; the node PARKS, the next turn
+#                                 re-probes — v7: a full house no longer fails
+#                                 loud here, the wait is convergent), render
+#                                 the train contract template at the FULL
+#                                 effective epochs (--out baseline/train.
+#                                 rendered.sh, --set device=<idx>), wipe any
+#                                 partial out-dir (training always starts from
 #                                 scratch), detach a wrapper whose group leader
 #                                 writes its own pid/rc and does NOT exec:
 #                                   setsid bash -c 'echo $$ > train.pid;
@@ -52,16 +59,23 @@
 #                                 done -> confirmed; failed -> emit failed
 #                                 (stage attribution); finalizer dead without
 #                                 a terminal state -> fail loud.
-#   7 emit gate                  : baseline/business_logic.md exists and is
-#                                 non-empty (the business-logic-analyst
-#                                 subagent's product) — absent -> the chain
-#                                 emits the agent-internal "running" line and
-#                                 the node re-invokes later.
+#   7 emit gate (three docs)     : ALL THREE baseline analysis documents on
+#                                 disk and non-empty — baseline/business_
+#                                 logic.md (business-logic-analyst), base/
+#                                 information_analysis.md (information-
+#                                 analyst), base/profile/mfu_bottleneck_
+#                                 report.md (mfu-analyzer) — any missing ->
+#                                 the chain emits the agent-internal "running"
+#                                 line naming what is missing and the node
+#                                 re-invokes later (the full sentinel/section
+#                                 gate is check_baseline_docs.sh).
 #
 # The chain NEVER waits for the training to finish (non-blocking baseline):
-# `executed` = early chain passed + double liveness confirmed +
-# business_logic.md on disk — training completion is the detached finalizer's
-# job, not this node's.
+# `executed` = early chain passed + double liveness confirmed + the three
+# analysis documents on disk — training completion is the detached finalizer's
+# job, not this node's. Right before emitting executed the chain also pushes
+# the docs manifest (push_curves --docs, best-effort) so the web panel is
+# visible from the baseline stage on.
 #
 # ── finalizer (this script re-invoked with --finalizer) ──────────────────────
 # Self-contained detached guardian (the node has emitted by now; nobody drives
@@ -69,9 +83,11 @@
 # starts with an ISO8601 UTC timestamp (`date -u +%FT%TZ`):
 #   poll loop (every cycle): incremental curve extract (FULL re-derive from
 #     the CURRENT attempt's train log, atomically replace
-#     baseline/baseline_metrics.jsonl only when content changed) +
+#     baseline/baseline_metrics.jsonl only when content changed; an extract
+#     failure's REASON is logged, never silently dropped) +
 #     push_curves.py sidecar (best-effort) + alive heartbeat line (with the
-#     curve point count)
+#     curve point count) + touch .run_lock (the v7 mtime heartbeat — a long
+#     training must never look stale to the reuse gate)
 #   train rc written, rc != 0      -> train_final{failed, rc, stage: train}
 #   train group dead WITHOUT rc    -> crash: re-launch <= 3 attempts (per-
 #                                     attempt log naming; partial out-dir
@@ -80,9 +96,11 @@
 #   train rc == 0 -> finalize chain (a stage line per step):
 #     final check   : extract --expected-epochs <full effective value>;
 #                     actual != rendered -> train_final{failed, stage:
-#                     final_check} — the message points at the admission
-#                     clause (trainings must execute the rendered epoch count
-#                     exactly; early-stopping projects are out of scope)
+#                     final_check} — the extract failure's stderr lands in
+#                     finalizer.log VERBATIM (v7: no silent tmp cleanup); the
+#                     message points at the admission clause (trainings must
+#                     execute the rendered epoch count exactly; early-stopping
+#                     projects are out of scope)
 #     full eval     : last ckpt eval -> baseline/baseline_full_acc.json
 #                     {acc, ckpt, full_train_budget fingerprint}
 #     k eval        : (train.ckpt_per_epoch) k-th ckpt eval ->
@@ -97,8 +115,8 @@
 # training wrapper when it comes alive, then by the finalizer (the canonical
 # owner — it outlives the training and performs the terminal release); a
 # crash relaunch re-adopts the fresh wrapper and hands ownership back to the
-# relaunching finalizer. The claim also confirms real occupancy (free ->
-# acquire -> idx-in-free-set guard inside device_alloc claim).
+# relaunching finalizer. The claim is device_alloc claim --idx (v7: the
+# agent-chosen card, no auto-selection).
 #
 # rc aggregation: first failing step -> stdout JSON status "failed" with
 # "baseline step N: <reason>" folded into `error`; all done -> "executed".
@@ -109,26 +127,27 @@
 # is never a final node output. All logs to stderr/files.
 #
 # Usage:
-#   run_baseline_chain.sh --latency-reduction-min F --seed N [--finalizer]
-# Environment: ORCA_ARTIFACTS_DIR (required). The profiling mode (placeholder
-# estimator vs mfu real evaluation) is read from $ORCA_ARTIFACTS_DIR/
-# profile_mode.json — resolved once at entry by the flatten node; a missing
-# file or an unknown mode is a hard error. The chip/precision/core_num the
-# mfu path consumes come from the same file. The user project root comes
-# ONLY from readiness/readiness.json — the engine already exports a
-# same-purpose project-root env var (it resolves to the Orca repository
-# root, NOT the user project), so reading any project-root env here would
-# silently anchor to the wrong project.
+#   run_baseline_chain.sh --latency-reduction-min F --seed N \
+#                          --device <idx> [--finalizer]
+# Environment: ORCA_ARTIFACTS_DIR (required). The profiling configuration
+# (chip / precision / core_num) is read from contracts.json's `profile`
+# block — recorded by the contract stage from the workflow inputs; a missing
+# block is a hard error (the mfu dispatch parameters are never guessed). The
+# user project root comes ONLY from readiness/readiness.json — the engine
+# already exports a same-purpose project-root env var (it resolves to the Orca
+# repository root, NOT the user project), so reading any project-root env here
+# would silently anchor to the wrong project.
 set -uo pipefail
 
 ART="${ORCA_ARTIFACTS_DIR:?FATAL: ORCA_ARTIFACTS_DIR not set (run_baseline_chain.sh)}"
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
-TARGET=""; SEED="0"; FINALIZER=""
+TARGET=""; SEED="0"; DEVICE_IDX=""; FINALIZER=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --latency-reduction-min) TARGET="${2:?}"; shift 2 ;;
     --seed)              SEED="${2:?}"; shift 2 ;;
+    --device)            DEVICE_IDX="${2:?}"; shift 2 ;;
     --finalizer)         FINALIZER="1"; shift ;;
     *) echo "FATAL: unknown arg $1" >&2; exit 2 ;;
   esac
@@ -136,31 +155,14 @@ done
 [ -n "$TARGET" ] || { echo "FATAL: --latency-reduction-min is required" >&2; exit 2; }
 python3 -c "import sys; r=float('$TARGET'); sys.exit(0 if 0.0 < r < 1.0 else 1)" \
   || { echo "FATAL: --latency-reduction-min must be a number in (0, 1), got '$TARGET'" >&2; exit 2; }
-# profiling mode (single source: profile_mode.json, resolved at entry)
-NPU_CHIP=""; NPU_PRECISION="INT8"; NPU_CORE_NUM="1"
 if [ -z "$FINALIZER" ]; then
-  MODE_DOC="$(python3 - "$ART/profile_mode.json" <<'PY'
-import json, sys
-try:
-    doc = json.loads(open(sys.argv[1], encoding="utf-8").read())
-except FileNotFoundError as exc:
-    raise SystemExit(f"FATAL: {sys.argv[1]} missing — the profiling mode is "
-                     f"resolved once at the entry node; re-run it (or "
-                     f"rebuild with fresh_start)") from exc
-mode = doc.get("mode")
-if mode not in ("placeholder", "mfu"):
-    raise SystemExit(f"FATAL: profile_mode.json mode must be "
-                     f"placeholder|mfu, got {mode!r} — re-run the entry node "
-                     f"to re-resolve the profiling mode")
-if mode == "mfu":
-    print(f"{doc.get('chip', '')} {doc.get('precision', 'INT8')} {doc.get('core_num', 1)}")
-PY
-)" || exit 2
-  if [ -n "$MODE_DOC" ]; then
-    NPU_CHIP="$(printf '%s' "$MODE_DOC" | awk '{print $1}')"
-    NPU_PRECISION="$(printf '%s' "$MODE_DOC" | awk '{print $2}')"
-    NPU_CORE_NUM="$(printf '%s' "$MODE_DOC" | awk '{print $3}')"
-  fi
+  [ -n "$DEVICE_IDX" ] || {
+    echo "FATAL: --device <idx> is required — run device_alloc.py probe first, read the raw occupancy output yourself, and pass the free card you chose (v7: card choice is the node agent's judgement; the chain only claims that idx atomically)" >&2
+    exit 2; }
+  case "$DEVICE_IDX" in
+    ''|*[!0-9]*)
+      echo "FATAL: --device must be a non-negative integer, got '$DEVICE_IDX'" >&2; exit 2 ;;
+  esac
 fi
 cd "$ART" || { echo "FATAL: artifacts dir unreachable: $ART" >&2; exit 2; }
 
@@ -194,14 +196,37 @@ import json
 from pathlib import Path
 print(json.loads(Path("readiness/readiness.json").read_text(encoding="utf-8"))["project_root"])')"
 SHADOW_DIR="$ART/shadow"
+# v7 fail-loud discipline: read_contract prints FATAL but cannot stop this
+# script (set -uo pipefail has no -e), so every field consumed downstream
+# gets an explicit guard — an empty value would render a broken training
+# script, crash, and burn the relaunch budget misattributing the root cause
+require_value() { # require_value <field-name> <value>
+  [ -n "$2" ] || { echo "FATAL: contracts.json field $1 is missing/empty (see the FATAL line above) — refusing to continue with a guessed value" >&2; exit 2; }
+}
 SHADOW_PKGS="$(read_contract '",".join(c["shadow"]["shadow_pkgs"])')"
+require_value shadow.shadow_pkgs "$SHADOW_PKGS"
 # full training budget: the single value-level fingerprint the baseline and
 # every later full-budget render must share (fairness invariant)
 FULL_EPOCHS="$(read_contract 'c["full_train_budget"]["epochs"]')"
 FULL_SEED="$(read_contract 'c["full_train_budget"]["seed"]')"
+require_value full_train_budget.seed "$FULL_SEED"
 # probe stop depth k (from the contract's proxy_budget — one source on disk)
 PROBE_K="$(read_contract 'c["proxy_budget"]["epochs"]')"
+require_value proxy_budget.epochs "$PROBE_K"
 CKPT_PER_EPOCH="$(read_contract 'c["train"]["ckpt_per_epoch"]')"
+require_value train.ckpt_per_epoch "$CKPT_PER_EPOCH"
+[ -n "$PROJ_ROOT" ] || { echo "FATAL: readiness.json project_root is empty" >&2; exit 2; }
+# profiling configuration (v7: the mfu dispatch parameters — workflow inputs
+# recorded by the contract stage, never env-sniffed here)
+NPU_CHIP="$(read_contract 'str(c["profile"]["chip"])')"
+NPU_PRECISION="$(read_contract 'str(c["profile"]["precision"])')"
+NPU_CORE_NUM="$(read_contract 'str(c["profile"]["core_num"])')"
+# v7: the mfu dispatch parameters are never guessed — a missing/empty profile
+# block is a hard startup error (the contract stage records it from the
+# workflow inputs; there is nothing to sniff or default to)
+[ -n "$NPU_CHIP" ] && [ -n "$NPU_PRECISION" ] && [ -n "$NPU_CORE_NUM" ] || {
+  echo "FATAL: contracts.json carries no usable profile block (chip/precision/core_num) — the mfu dispatch parameters are missing; re-run the contract stage (v7: never guessed)" >&2
+  exit 2; }
 command -v "$PY" >/dev/null 2>&1 || [ -x "$PY" ] || { echo "FATAL: interpreter not found: $PY" >&2; exit 2; }
 python3 -c "import sys; sys.exit(0 if int('$FULL_EPOCHS') >= 1 else 1)" \
   || { echo "FATAL: contracts.json full_train_budget.epochs must be an int >= 1" >&2; exit 2; }
@@ -290,33 +315,27 @@ step_export() {
   [ -s "$ART/base/model.onnx" ] || { echo "FATAL: export produced no base/model.onnx" >&2; return 1; }
 }
 
-step_profile() { # rc 0 = four-piece on disk; rc 3 = mfu waiting state (agent
-  # must dispatch the mfu-analyzer subagent, then re-invoke); rc 1 = failed
-  # (PROFILE_FAIL_DETAIL then carries the specific cause into the emit line)
+step_profile() { # rc 0 = four-piece on disk; rc 3 = awaiting the analyzer's
+  # raw products (the agent dispatches mfu-analyzer, then re-invokes);
+  # rc 1 = failed (PROFILE_FAIL_DETAIL carries the specific cause)
   [ -s "$ART/base/profile/profile_summary.json" ] && { echo "[chain] step2 profile: product exists, skip" >&2; return 0; }
-  if [ -z "$NPU_CHIP" ]; then
-    local prof="$ART/scripts/placeholder_profiler.py"
-    [ -f "$prof" ] || { echo "FATAL: profiling script not found: $prof" >&2; return 1; }
-    "$PY" "$prof" --onnx "$ART/base/model.onnx" --out-dir "$ART/base/profile" --seed "$SEED" >&2 || return 1
-  else
-    local adapter="$ART/scripts/mfu_adapter.py"
-    [ -f "$adapter" ] || { echo "FATAL: $adapter not deployed (entry stage incomplete) — mfu mode cannot adapt the raw evaluation products" >&2; PROFILE_FAIL_DETAIL="mfu_adapter not deployed"; return 1; }
-    if ls "$ART"/base/profile/*/schedule_result.json >/dev/null 2>&1; then
-      local errout
-      errout="$("$PY" "$adapter" --profile-dir "$ART/base/profile" 2>&1)" || {
-        echo "$errout" >&2
-        PROFILE_FAIL_DETAIL="mfu_adapter failed: $(printf '%s' "$errout" | tail -n 1)"
-        return 1
-      }
+  local adapter="$ART/scripts/mfu_adapter.py"
+  [ -f "$adapter" ] || { echo "FATAL: $adapter not deployed (entry stage incomplete) — the mfu raw products cannot be adapted" >&2; PROFILE_FAIL_DETAIL="mfu_adapter not deployed"; return 1; }
+  if ls "$ART"/base/profile/*/schedule_result.json >/dev/null 2>&1; then
+    local errout
+    errout="$("$PY" "$adapter" --profile-dir "$ART/base/profile" 2>&1)" || {
       echo "$errout" >&2
-    elif [ -s "$ART/base/profile/mfu_bottleneck_report.md" ]; then
-      echo "FATAL: mfu-analyzer reported but left no usable raw products under base/profile/ (see base/profile/mfu_bottleneck_report.md) — no placeholder fallback in mfu mode" >&2
-      PROFILE_FAIL_DETAIL="mfu-analyzer reported but left no usable raw products under base/profile/ (see base/profile/mfu_bottleneck_report.md) — no placeholder fallback in mfu mode"
+      PROFILE_FAIL_DETAIL="mfu_adapter failed: $(printf '%s' "$errout" | tail -n 1)"
       return 1
-    else
-      echo "[chain] step2 profile: awaiting mfu-analyzer raw products (dispatch mfu-analyzer: onnx=base/model.onnx profile_dir=base/profile report=base/profile/mfu_bottleneck_report.md chip=$NPU_CHIP precision=$NPU_PRECISION core_num=$NPU_CORE_NUM)" >&2
-      return 3
-    fi
+    }
+    echo "$errout" >&2
+  elif [ -s "$ART/base/profile/mfu_bottleneck_report.md" ]; then
+    echo "FATAL: mfu-analyzer reported but left no usable raw products under base/profile/ (see base/profile/mfu_bottleneck_report.md) — there is no fallback profiling path (v7: mfu is the only way)" >&2
+    PROFILE_FAIL_DETAIL="mfu-analyzer reported but left no usable raw products under base/profile/ (see base/profile/mfu_bottleneck_report.md) — no fallback profiling path exists"
+    return 1
+  else
+    echo "[chain] step2 profile: awaiting mfu-analyzer raw products (onnx=base/model.onnx profile_dir=base/profile report=base/profile/mfu_bottleneck_report.md chip=$NPU_CHIP precision=$NPU_PRECISION core_num=$NPU_CORE_NUM)" >&2
+    return 3
   fi
   for f in taskgraph.json ops.csv schedule.json profile_summary.json; do
     [ -s "$ART/base/profile/$f" ] || { echo "FATAL: profiler did not produce $f" >&2; return 1; }
@@ -355,16 +374,18 @@ pid_alive_owned() { # pid_alive_owned <pidfile> <expect-substr>
 
 train_attempt_log() { echo "$TRAIN_DIR/train.attempt$(cat "$TRAIN_ATTEMPTS" 2>/dev/null || echo 1).log"; }
 
-# ── training-device ledger wiring ────────────────────────────────────────────
-# The baseline claims the FIRST FREE device via the run-scoped allocation
-# ledger (O_EXCL lock under devices/, vid=baseline) before its full training
-# renders; the claim binds the render (--set device=<idx>) and is released by
-# the finalizer's terminal write_train_final (idempotent). The backend/count
-# come from train_device.json — resolved once at the entry node; a missing
-# file fails loud above with the upstream-artifact check.
+# ── training-device ledger wiring (v7: claim the agent-chosen idx) ───────────
+# The node ran device_alloc probe, read the raw occupancy and chose --device;
+# the chain claims EXACTLY that idx (O_EXCL, vid=baseline) before the full
+# training renders; the claim binds the render (--set device=<idx>) and is
+# released by the finalizer's terminal write_train_final (idempotent). A
+# locked idx (ok:false) PARKS the node — stdout running with the reason and a
+# re-probe instruction; the next turn probes again and picks another card.
+# exit codes from alloc_print_idx's caller: rc 4 = parked (idx locked).
 DEV_IDX_FILE="$TRAIN_DIR/.train_device_idx"
 
-alloc_print_idx() { # prints the claimed device idx (stdout) or fails loud
+alloc_print_idx() { # prints the claimed device idx (stdout); rc 4 = the
+  # chosen idx is locked (park); rc 1 = hard failure
   # idempotent: a recorded idx whose lock still names vid=baseline is reused
   # (the finalizer's crash relaunch must not claim a SECOND card)
   if [ -s "$DEV_IDX_FILE" ]; then
@@ -388,13 +409,13 @@ print(vid)' "$ART/devices/$idx.lock" 2>/dev/null || echo "")"
   fi
   local out ok idx
   out="$(python3 "$ART/scripts/device_alloc.py" claim \
-      --artifacts "$ART" --vid baseline)" || {
-    echo "FATAL: device_alloc claim (vid=baseline) failed — see its stderr above" >&2
+      --artifacts "$ART" --vid baseline --idx "$DEVICE_IDX")" || {
+    echo "FATAL: device_alloc claim (vid=baseline idx=$DEVICE_IDX) failed — see its stderr above" >&2
     return 1; }
   ok="$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read()).get("ok"))')"
   if [ "$ok" != "True" ]; then
-    echo "FATAL: no free training device for the baseline (busy_real/locked per the claim output above; a stale dead-pid lock is reclaimed by the claim itself) — the baseline fails loud instead of parking, deliberately unlike the probe's wait state: at entry no same-run training exists whose terminal state would release the card, so a full house means cross-run occupancy, and the ledger never preempts across runs (v6 §3.2)" >&2
-    return 1
+    echo "[chain] step4: $out" >&2
+    return 4
   fi
   idx="$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["idx"])')"
   printf '%s\n' "$idx" > "$DEV_IDX_FILE"
@@ -404,9 +425,9 @@ print(vid)' "$ART/devices/$idx.lock" 2>/dev/null || echo "")"
 
 adopt_train_device() { # adopt_train_device <owner-pid> — rebind the claim to a
   # long-lived owner (the wrapper/guardian that just came alive); a claim
-  # whose owner is the short-lived chain process is reclaimable by free the
-  # moment this invocation exits — an adopt that fails quietly would
-  # silently revive exactly that failure mode, so it fails LOUD (rc 1)
+  # whose owner is the short-lived chain process is unattributed the moment
+  # this invocation exits — an adopt that fails quietly would silently revive
+  # exactly that failure mode, so it fails LOUD (rc 1)
   local owner_pid="${1:?adopt_train_device needs an owner pid}"
   [ -s "$DEV_IDX_FILE" ] || return 0
   python3 "$ART/scripts/device_alloc.py" adopt \
@@ -431,8 +452,13 @@ release_train_device() { # idempotent terminal sweep (the finalizer's terminal
 
 launch_full_train() { # claim device + render (idempotent) + wipe partial out-dir + detach wrapper
   mkdir -p "$TRAIN_DIR"
-  local dev_idx
-  dev_idx="$(alloc_print_idx)" || return 1
+  local dev_idx rc4=0
+  dev_idx="$(alloc_print_idx)" || rc4=$?
+  if [ "$rc4" -eq 4 ]; then
+    CLAIM_PARK_DETAIL="the chosen device idx=$DEVICE_IDX is already locked — re-run device_alloc probe, pick another free card, re-invoke the chain with the new --device"
+    return 4
+  fi
+  [ "$rc4" -eq 0 ] || return 1
   if ! render "$ART/templates/run_full_finetune.template.sh" "$TRAIN_RENDERED" \
       --set vid=baseline --set epochs="$FULL_EPOCHS" \
       --set out_dir="$TRAIN_OUT" --set seed="$FULL_SEED" \
@@ -567,20 +593,22 @@ PY
 }
 
 incremental_curve() { # full re-derive from the CURRENT attempt log; atomic
-  # replace only on content change (idempotent pushes see a stable file)
-  local log tmp
+  # replace only on content change (idempotent pushes see a stable file).
+  # v7: the failure REASON lands in finalizer.log — never a silent rm.
+  local log tmp errout
   log="$(train_attempt_log)"
   [ -s "$log" ] || return 0
   tmp="$TRAIN_DIR/.baseline_metrics.tmp"
-  if "$PY" "$ART/scripts/metric_curve.py" extract \
-      --contract "$ART/contracts.json" --log "$log" --out "$tmp" >/dev/null 2>&1; then
+  if errout="$("$PY" "$ART/scripts/metric_curve.py" extract \
+        --contract "$ART/contracts.json" --log "$log" --out "$tmp" 2>&1)"; then
     if [ ! -s "$TRAIN_DIR/baseline_metrics.jsonl" ] || ! cmp -s "$tmp" "$TRAIN_DIR/baseline_metrics.jsonl"; then
       mv -f "$tmp" "$TRAIN_DIR/baseline_metrics.jsonl"
     else
       rm -f "$tmp"
     fi
   else
-    rm -f "$tmp"   # early-state log (no epoch line yet) — next cycle retries
+    rm -f "$tmp"
+    fin_log "stage=curve note=extract failed (early-state log or pattern drift, next cycle retries): $(printf '%s' "$errout" | tail -n 1)"
   fi
 }
 
@@ -600,6 +628,10 @@ finalizer_main() {
   fin_log "finalizer alive: polling full-train (epochs=$FULL_EPOCHS seed=$FULL_SEED k=$PROBE_K)"
   local relaunches=0
   while true; do
+    # v7 heartbeat: the run lock's mtime says this workspace is alive — a
+    # long training must never look stale to the entry reuse gate
+    touch "$ART/.run_lock" 2>/dev/null \
+      || fin_log "WARN: cannot touch .run_lock heartbeat"
     if [ -s "$TRAIN_RC" ]; then
       local rc; rc="$(cat "$TRAIN_RC")"
       fin_log "stage=train_exit rc=$rc"
@@ -651,17 +683,20 @@ finalizer_main() {
   # ── rc == 0: finalize chain (a stage line per step) ───────────────────────
   fin_log "stage=final_check expected_epochs=$FULL_EPOCHS"
   # tmp + atomic replace (same write discipline as the incremental cycle —
-  # a concurrent curve reader never sees a half-written file)
-  if ! "$PY" "$ART/scripts/metric_curve.py" extract \
-      --contract "$ART/contracts.json" --log "$(train_attempt_log)" \
-      --out "$TRAIN_DIR/.baseline_metrics.final.tmp" \
-      --expected-epochs "$FULL_EPOCHS" >/dev/null 2>&1 \
-      || ! mv -f "$TRAIN_DIR/.baseline_metrics.final.tmp" \
-                "$TRAIN_DIR/baseline_metrics.jsonl"; then
+  # a concurrent curve reader never sees a half-written file). v7: the
+  # extract's stderr lands in finalizer.log VERBATIM (no guessed cause).
+  local fc_err
+  if fc_err="$("$PY" "$ART/scripts/metric_curve.py" extract \
+        --contract "$ART/contracts.json" --log "$(train_attempt_log)" \
+        --out "$TRAIN_DIR/.baseline_metrics.final.tmp" \
+        --expected-epochs "$FULL_EPOCHS" 2>&1)"; then
+    mv -f "$TRAIN_DIR/.baseline_metrics.final.tmp" \
+          "$TRAIN_DIR/baseline_metrics.jsonl"
+  else
     rm -f "$TRAIN_DIR/.baseline_metrics.final.tmp"
-    fin_log "stage=final_check verdict=failed (actual epochs != rendered $FULL_EPOCHS)"
+    fin_log "stage=final_check verdict=failed stderr: $fc_err"
     write_train_final failed 0 final_check \
-      "final check failed: the training log does not carry exactly the rendered $FULL_EPOCHS epochs — 训练须按给定轮数精确执行，自带 early-stopping 的项目不在 workflow 范围（准入条款见 contracts.json reason）"
+      "final check failed: the training log does not carry exactly the rendered $FULL_EPOCHS epochs — 训练须按给定轮数精确执行，自带 early-stopping 的项目不在 workflow 范围（admission_clause_ack 见 contracts.json）"
     exit 0
   fi
   "$PY" "$ART/scripts/push_curves.py" --artifacts "$ART" \
@@ -742,16 +777,16 @@ write_status() { # write_status <state-vector description...>
     echo "| step | name | state | product |"
     echo "|---|---|---|---|"
     echo "| 1 | export + pristine snapshot | $1 | base/model.onnx + baseline/original_shadow/ |"
-    echo "| 2 | profile | $2 | base/profile/ |"
+    echo "| 2 | profile (mfu only) | $2 | base/profile/ |"
     echo "| 3 | analyze | $3 | base/bottleneck_report.json |"
     echo "| 4 | full-train launch (non-blocking) | $4 | baseline/train.rendered.sh + train.pid |"
     echo "| 5 | finalizer launch | $5 | baseline/finalizer.pid + finalizer.log |"
     echo "| 6 | liveness confirmation | $6 | - |"
-    echo "| 7 | emit gate (business_logic.md) | $7 | baseline/business_logic.md |"
+    echo "| 7 | emit gate (three analysis docs) | $7 | business_logic.md + information_analysis.md + mfu_bottleneck_report.md |"
     echo ""
     echo "finalizer tail: $(tail -n 2 "$FINALIZER_LOG" 2>/dev/null | tr '\n' ' ')"
-    echo "train device: $(cat "$DEV_IDX_FILE" 2>/dev/null || echo '-') (ledger claim vid=baseline)"
-    echo "full_train_budget: epochs=$FULL_EPOCHS seed=$FULL_SEED; probe k=$PROBE_K; ckpt_per_epoch=$CKPT_PER_EPOCH; profile mode: ${NPU_CHIP:+mfu (chip=$NPU_CHIP precision=$NPU_PRECISION core_num=$NPU_CORE_NUM)}${NPU_CHIP:-placeholder estimator}"
+    echo "train device: $(cat "$DEV_IDX_FILE" 2>/dev/null || echo "$DEVICE_IDX") (ledger claim vid=baseline)"
+    echo "full_train_budget: epochs=$FULL_EPOCHS seed=$FULL_SEED; probe k=$PROBE_K; ckpt_per_epoch=$CKPT_PER_EPOCH; profile: mfu (chip=$NPU_CHIP precision=$NPU_PRECISION core_num=$NPU_CORE_NUM)"
   } > "$ART/baseline_status.md"
 }
 
@@ -776,6 +811,8 @@ generated = [rel for probe, rel in [
     ("baseline/baseline_k_acc.json", "baseline/baseline_k_acc.json"),
     ("baseline/train_final.json", "baseline/train_final.json"),
     ("baseline/business_logic.md", "baseline/business_logic.md"),
+    ("base/information_analysis.md", "base/information_analysis.md"),
+    ("base/profile/mfu_bottleneck_report.md", "base/profile/mfu_bottleneck_report.md"),
     ("baseline_status.md", "baseline_status.md"),
 ] if (art / probe).exists()]
 print(json.dumps({
@@ -788,6 +825,7 @@ print(json.dumps({
 S1=pending S2=pending S3=pending S4=pending S5=pending S6=pending S7=pending
 fail_step=0 fail_err=""
 PROFILE_FAIL_DETAIL=""
+CLAIM_PARK_DETAIL=""
 
 step_export || { fail_step=1; fail_err="shadow export failed"; }
 [ "$fail_step" -eq 0 ] && { S1=done
@@ -797,7 +835,7 @@ step_export || { fail_step=1; fail_err="shadow export failed"; }
     # SUBAGENT's product, not the chain's — hand control back to the agent
     # (which dispatches the analyzer) and expect a re-invocation
     S2=running; write_status "$S1" running "$S3" "$S4" "$S5" "$S6" "$S7"
-    emit running "baseline step 2: awaiting mfu-analyzer raw products — dispatch the mfu-analyzer subagent (onnx=base/model.onnx, profile_dir=base/profile, report=base/profile/mfu_bottleneck_report.md), then re-invoke"
+    emit running "baseline step 2: awaiting mfu-analyzer raw products — dispatch the mfu-analyzer subagent (onnx=base/model.onnx, profile_dir=base/profile, report=base/profile/mfu_bottleneck_report.md, chip=$NPU_CHIP, precision=$NPU_PRECISION, core_num=$NPU_CORE_NUM), then re-invoke"
     exit 0
   elif [ "$rc2" -ne 0 ]; then
     fail_step=2
@@ -808,7 +846,17 @@ step_export || { fail_step=1; fail_err="shadow export failed"; }
     fi
   fi; }
 [ "$fail_step" -eq 0 ] && { S2=done; step_analyze || { fail_step=3; fail_err="bottleneck analysis failed"; }; }
-[ "$fail_step" -eq 0 ] && { S3=done; step_train_launch || { fail_step=4; fail_err="full training launch failed"; }; }
+[ "$fail_step" -eq 0 ] && { S3=done
+  rc4=0; step_train_launch || rc4=$?
+  if [ "$rc4" -eq 4 ]; then
+    # the agent-chosen idx is already locked: park (re-probe next turn), v7
+    # — a full house at the baseline no longer fails loud
+    S4=running; write_status "$S1" "$S2" "$S3" running "$S5" "$S6" "$S7"
+    emit running "baseline step 4: $CLAIM_PARK_DETAIL"
+    exit 0
+  elif [ "$rc4" -ne 0 ]; then
+    fail_step=4; fail_err="full training launch failed"
+  fi; }
 [ "$fail_step" -eq 0 ] && { S4=done; step_finalizer_launch || { fail_step=5; fail_err="finalizer launch failed"; }; }
 [ "$fail_step" -eq 0 ] && { S5=done
   # liveness confirmation with re-entry equivalence (alive OR train_final)
@@ -857,12 +905,16 @@ step_export || { fail_step=1; fail_err="shadow export failed"; }
     fail_step=6; fail_err="finalizer exited without a terminal state (no train_final.json, finalizer pid dead) — see baseline/finalizer.log"
   fi; }
 [ "$fail_step" -eq 0 ] && { S6=done
-  # emit gate: the business-logic document is a HARD precondition of executed
-  if [ -s "$ART/baseline/business_logic.md" ]; then
+  # emit gate: ALL THREE analysis documents are a HARD precondition of executed
+  missing_docs=""
+  [ -s "$ART/baseline/business_logic.md" ] || missing_docs="baseline/business_logic.md"
+  [ -s "$ART/base/information_analysis.md" ] || missing_docs="${missing_docs:+$missing_docs, }base/information_analysis.md"
+  [ -s "$ART/base/profile/mfu_bottleneck_report.md" ] || missing_docs="${missing_docs:+$missing_docs, }base/profile/mfu_bottleneck_report.md"
+  if [ -z "$missing_docs" ]; then
     S7=done
   else
     S7=running; write_status "$S1" "$S2" "$S3" "$S4" "$S5" "$S6" running
-    emit running "baseline step 7: business_logic.md not yet on disk (business-logic-analyst in flight) — re-invoke"
+    emit running "baseline step 7: analysis document(s) not yet on disk ($missing_docs) — dispatch the missing analyst(s), then re-invoke"
     exit 0
   fi; }
 
@@ -872,7 +924,11 @@ if [ "$fail_step" -ne 0 ]; then
   emit failed "baseline step $fail_step: $fail_err"
   exit 1
 fi
-S7=done
+# first docs-manifest push (best-effort, v7 §4.5: the web panel is visible
+# from the baseline stage on — failure is a stderr note, never a gate)
+"$PY" "$ART/scripts/push_curves.py" --artifacts "$ART" --docs \
+  >/dev/null 2>>"$TRAIN_DIR/.chart_push.err" \
+  || echo "WARN: docs manifest push failed at the baseline emit (best-effort; see $TRAIN_DIR/.chart_push.err)" >&2
 write_status "$S1" "$S2" "$S3" "$S4" "$S5" "$S6" "$S7"
 emit executed ""
 exit 0

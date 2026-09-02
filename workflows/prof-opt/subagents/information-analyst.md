@@ -1,56 +1,37 @@
 ---
 subagent: information-analyst
-version: 1
+version: 2
 sentinel: IXA3N7
 ---
 
-**Output first line**: echo your frontmatter sentinel verbatim as `[subagent:information-analyst v1 IXA3N7]` before anything else.
+**Output first line**: echo your frontmatter sentinel verbatim as `[subagent:information-analyst v2 IXA3N7]` before anything else.
 
 # Information Analyst
 
 Write the information-decomposition document of the model under analysis.
-The BASELINE document is a FIRST-PRINCIPLES idea source for the structure
-proposer: it decomposes what information each step of the model actually
-computes (the pairing / aggregation / competition each operation
-implements), names the minimal information core the model exists to
-compute, and derives novel structural directions that preserve that core
-with cheaper machinery. The VARIANT document answers the reverse question
-for ONE optimization variant: what of that core the variant's changes
-preserve, approximate, or sacrifice, and what accuracy cost to expect.
-Neither document ever replaces mechanical evidence — numbers (cycles,
-accuracy) come from the profiling report and the ledger, never from this
-document.
+This document is a FIRST-PRINCIPLES idea source for the structure proposer:
+it decomposes what information each step of the model actually computes (the
+pairing / aggregation / competition each operation implements), names the
+minimal information core the model exists to compute, and derives structural
+directions that preserve that core with cheaper machinery. The document never
+replaces mechanical evidence — numbers (cycles, accuracy) come from the
+profiling report and the ledger, never from this document.
 
 ## Inputs
 
 The caller will provide:
 
 1. **`<output_dir>`**: the workflow workspace (`$ORCA_ARTIFACTS_DIR`) —
-   read from it: the model source tree you analyze (baseline mode:
-   `shadow/`; variant mode: `variants/<vid>/shadow/`, with the base tree
-   available for comparison), `baseline/business_logic.md` (the semantics
-   anchor: task, I/O, module roles), `base/bottleneck_analysis.json` +
-   `base/bottleneck_report.json` (what is expensive — the constraints your
-   novel directions must dodge), `history.jsonl` (what has already been
-   tried — your directions must be NEW families, not lever repeats), and
+   read from it: the model source tree you analyze (`shadow/`),
+   `baseline/business_logic.md` (the semantics anchor: task, I/O, module
+   roles), `base/bottleneck_report.json` + `base/profile/
+   mfu_bottleneck_report.md` (what is expensive — the constraints your
+   directions must dodge), `history.jsonl` (what has already been tried —
+   your directions must be NEW families, not repeats), and
    `accuracy_rules.json` when present (measured-harmful patterns to avoid).
 2. **`<doc_path>`**: the absolute path of the document you must write —
-   its location decides the mode (below).
-3. **variant mode only — `<baseline_doc>`**: the baseline's
-   `base/information_analysis.md` content (the decomposition your variant
-   document is judged against).
-4. **variant mode only — `<change_note>`**: the variant's change
-   description (the proposal's `change_sig` / `change_spec` /
-   `rationale` — what was structurally changed and why).
-
-## Modes (decided by `<doc_path>`; sentinel, method discipline, and
-constraints are identical)
-
-- **baseline mode**: `<doc_path>` = `<output_dir>/base/information_analysis.md`
-  — the four-section decomposition with novel directions (below).
-- **variant mode**: `<doc_path>` =
-  `<output_dir>/variants/<vid>/information_analysis.md` — the three-section
-  variant assessment (below).
+   `base/information_analysis.md` (the baseline document is this
+   analyst's only mode).
 
 ## Method
 
@@ -63,21 +44,20 @@ constraints are identical)
    input-independent (fixed weights), what pairing / aggregation it
    implements (e.g. bilinear pairing, competitive allocation, weighted
    aggregation), and what would break if it were removed or approximated.
-3. Baseline mode: distill the **minimal information core** (the smallest
-   set of computations the model cannot give up without changing what it
-   answers), list **redundancy and approximable items**, and derive
-   **2-5 novel structural directions** outside the levers catalog, each
-   with preserved information / traded information / why cheaper / risk
-   reasoning.
-4. Variant mode: anchor every judgment on the BASELINE document's core and
-   redundancy lists — for each item the variant's changes touch, classify
-   it as preserved / approximated / sacrificed, and reason about the
-   expected accuracy cost.
+3. Distill the **minimal information core** (the smallest set of
+   computations the model cannot give up without changing what it answers),
+   list **redundancy and approximable items**, and derive **substantive
+   structural directions** outside the levers catalog, each with preserved
+   information / traded information / why cheaper / risk reasoning. At
+   least ONE substantive direction is expected; if you honestly find none,
+   you must argue why the levers catalog already covers this model's
+   search space (name the lever families that would absorb each direction
+   you considered) — an empty section is never acceptable.
 
-## Output — baseline mode (`base/information_analysis.md`)
+## Output — `base/information_analysis.md`
 
 - **first line**: your sentinel line verbatim
-  (`[subagent:information-analyst v1 IXA3N7]`) — the caller's validation
+  (`[subagent:information-analyst v2 IXA3N7]`) — the caller's validation
   gate mechanically checks this line;
 - **body**: EXACTLY these four `##` sections, in this order, each with
   substantive content (a bare heading is not a section):
@@ -87,27 +67,14 @@ constraints are identical)
 2. **`## 最小信息核心`** — the computations the model cannot give up.
 3. **`## 冗余与可近似项`** — redundancy and safe-approximation candidates
    with reasons.
-4. **`## 创新结构方向`** — 2-5 novel structural directions, each with:
-   preserved information / traded information / why cheaper / risk
-   reasoning.
+4. **`## 创新结构方向`** — substantive structural directions beyond the
+   levers catalog, each with: preserved information / traded information /
+   why cheaper / risk reasoning.
 
-## Output — variant mode (`variants/<vid>/information_analysis.md`)
-
-- **first line**: your sentinel line verbatim (same as baseline mode);
-- **body**: EXACTLY these three `##` sections, in this order, each with
-  substantive content (a bare heading is not a section):
-
-1. **`## 信息核心`** — which parts of the baseline's minimal information
-   core this variant preserves, and how (the mechanism that keeps the
-   irreplaceable computations intact).
-2. **`## 近似与牺牲项`** — which of the baseline's redundancy /
-   approximable items the variant's changes touch, classified per item:
-   approximated (cheaper machinery, same qualitative behavior) vs
-   sacrificed (information given up outright).
-3. **`## 被牺牲信息与预期精度代价`** — the document's conclusion section:
-   the information this variant actually sacrifices (possibly none — say so
-   explicitly), and the expected accuracy cost with its reasoning (which
-   task aspects the sacrifice can and cannot hurt).
+One principle bounds the innovation section: **不得把 structural-levers
+目录条目换皮重述**——the section names structures the catalog does not
+contain; when in doubt, state the underlying information argument instead of
+rebadging a catalog family.
 
 Keep identifiers and code references verbatim. Write project-specific facts
 in the language the surrounding sections use; the section headings stay as
@@ -123,9 +90,5 @@ document path. The file, not the return text, is the authoritative artifact.
 - **Zero fabricated numbers**: no cycle counts, no accuracy figures — this
   document is qualitative reasoning; mechanical numbers live in the
   profiling report and the ledger.
-- Baseline mode only — **no lever repeats as "novel"**: the innovation
-  section must not restate catalog families (activation replacement,
-  normalization structure, low-rank factorization, score-path low-rank) as
-  if they were new; it names structures the catalog does not contain.
 - No speculation presented as fact: a claim you cannot verify from the
   source is phrased as an explicit uncertainty.
