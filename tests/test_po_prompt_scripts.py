@@ -76,23 +76,22 @@ def test_write_baseline_lock_anchor(tmp_path: Path):
     (shadow / "pkg").mkdir(parents=True)
     (shadow / "pkg" / "model.py").write_text("class M:\n    pass\n")
     r = _run([sys.executable, str(_FLATTEN / "write_baseline_lock.py"),
-              "--artifacts", str(tmp_path), "--model-path", "pkg/model.py",
-              "--ckpt", ""])
+              "--artifacts", str(tmp_path), "--model-path", "pkg/model.py"])
     assert r.returncode == 0, r.stderr
     lock = json.loads((tmp_path / "BASELINE.lock").read_text(encoding="utf-8"))
+    # v7 schema: version / model_path / py_files_sha256 (the ckpt anchor is
+    # deleted — training always starts from a fixed-seed random init)
+    assert set(lock) == {"version", "model_path", "py_files_sha256"}
+    assert lock["version"] == 2
     assert lock["model_path"] == "pkg/model.py"
-    assert lock["pretrained_ckpt"] == "" and lock["ckpt_sha256"] == ""
     assert list(lock["py_files_sha256"]) == ["pkg/model.py"]
     digest = hashlib.sha256(
         (shadow / "pkg" / "model.py").read_bytes()).hexdigest()
     assert lock["py_files_sha256"]["pkg/model.py"] == digest
-
-    ckpt = tmp_path / "ref.pth"; ckpt.write_bytes(b"weights")
-    _run([sys.executable, str(_FLATTEN / "write_baseline_lock.py"),
-          "--artifacts", str(tmp_path), "--model-path", "pkg/model.py",
-          "--ckpt", str(ckpt)])
-    lock = json.loads((tmp_path / "BASELINE.lock").read_text(encoding="utf-8"))
-    assert lock["ckpt_sha256"] == hashlib.sha256(b"weights").hexdigest()
+    # the ckpt flag is gone: passing it fails loud
+    assert _run([sys.executable, str(_FLATTEN / "write_baseline_lock.py"),
+                 "--artifacts", str(tmp_path), "--model-path", "pkg/model.py",
+                 "--ckpt", ""]).returncode != 0
 
 
 # ── po_contract extractions ───────────────────────────────────────────────────
@@ -139,21 +138,23 @@ def test_snapshot_tree_and_diff_exemptions(tmp_path: Path):
 
 
 def test_shadow_pkgs_csv_resolution_order(tmp_path: Path):
+    # v7 C10: the resolver is a SHARED deployed script (the probe render and
+    # the contract stage both call it — never an inline one-liner)
     (tmp_path / "readiness").mkdir()
     (tmp_path / "readiness" / "readiness.json").write_text(
         '{"shadow_pkgs": ["from_readiness"]}', encoding="utf-8")
-    r = _run([sys.executable, str(_CONTRACT / "shadow_pkgs_csv.py"),
+    r = _run([sys.executable, str(_PO / "shadow_pkgs_csv.py"),
               "--artifacts", str(tmp_path)])
     assert r.returncode == 0 and r.stdout.strip() == "from_readiness"
     # contracts.json, once assembled, wins over readiness
     (tmp_path / "contracts.json").write_text(
         '{"shadow": {"shadow_pkgs": ["a", "b"]}}', encoding="utf-8")
-    r = _run([sys.executable, str(_CONTRACT / "shadow_pkgs_csv.py"),
+    r = _run([sys.executable, str(_PO / "shadow_pkgs_csv.py"),
               "--artifacts", str(tmp_path)])
     assert r.returncode == 0 and r.stdout.strip() == "a,b"
     # neither source -> fail loud
     empty = tmp_path / "empty"; empty.mkdir()
-    r = _run([sys.executable, str(_CONTRACT / "shadow_pkgs_csv.py"),
+    r = _run([sys.executable, str(_PO / "shadow_pkgs_csv.py"),
               "--artifacts", str(empty)])
     assert r.returncode == 1 and "shadow_pkgs not found" in r.stderr
 
@@ -226,8 +227,7 @@ def test_append_impl_row_cli(tmp_path: Path):
               "--history", str(hist), "--vid", "r1-01",
               "--round", "1", "--seq", "1", "--parent-vid", "null",
               "--change-sig", "activation:gelu->relu:b.0",
-              "--probe-epochs", "1", "--probe-max-steps", "null",
-              "--probe-data-value", "null",
+              "--probe-epochs", "1",
               "--target-modules", '["b.0"]',
               "--predicted-delta-cycles", "-100",
               "--base-at-proposal", '{"vid": null, "makespan_cycles": 15288}'])
@@ -235,15 +235,14 @@ def test_append_impl_row_cli(tmp_path: Path):
     rows = [json.loads(ln) for ln in
             hist.read_text(encoding="utf-8").splitlines()]
     assert rows[0]["implemented"] is True
-    assert rows[0]["probe_max_steps"] is None
+    assert "probe_max_steps" not in rows[0]      # v7: the knob fields are gone
     assert rows[0]["base_at_proposal"]["makespan_cycles"] == 15288
     # terminal-skip path: implemented=False + the outcome row in one call
     r = _run([sys.executable, str(_PO / "append_impl_row.py"),
               "--history", str(hist), "--vid", "r1-02",
               "--round", "1", "--seq", "2", "--parent-vid", "r1-01",
               "--change-sig", "norm:rm:b.1",
-              "--probe-epochs", "1", "--probe-max-steps", "null",
-              "--probe-data-value", "null", "--target-modules", '["b.1"]',
+              "--probe-epochs", "1", "--target-modules", '["b.1"]',
               "--predicted-delta-cycles", "-50",
               "--base-at-proposal", '{"vid": "r1-01", "makespan_cycles": 900}',
               "--not-implemented", "--outcome", "variant_broken"])
@@ -259,7 +258,6 @@ def test_append_impl_row_cli(tmp_path: Path):
               "--history", str(hist), "--vid", "r1-03",
               "--round", "1", "--seq", "3", "--parent-vid", "null",
               "--change-sig", "x", "--probe-epochs", "1",
-              "--probe-max-steps", "null", "--probe-data-value", "null",
               "--target-modules", "not-json",
               "--predicted-delta-cycles", "-1",
               "--base-at-proposal", '{"vid": null}'])
@@ -271,7 +269,6 @@ def test_append_impl_row_cli(tmp_path: Path):
               "--history", str(hist), "--vid", "r1-04",
               "--round", "1", "--seq", "4", "--parent-vid", "null",
               "--change-sig", "y", "--probe-epochs", "1",
-              "--probe-max-steps", "null", "--probe-data-value", "null",
               "--target-modules", '["m"]', "--predicted-delta-cycles", "-1",
               "--base-at-proposal", '{"vid": null}',
               "--outcome", "variant_broken"])
@@ -290,12 +287,7 @@ def test_build_sig_cli_matches_builder():
                  "--modules", '["m"]']).returncode == 2
 
 
-def test_healed_files_json(tmp_path: Path):
-    r = _run([sys.executable, str(_PO / "healed_files.py"),
-              "--path", str(tmp_path / "absent.txt")])
-    assert r.returncode == 0 and r.stdout.strip() == "[]"
-    marker = tmp_path / "healed.txt"
-    marker.write_text("a.rendered.sh\n\nb.rendered.sh\n", encoding="utf-8")
-    r = _run([sys.executable, str(_PO / "healed_files.py"),
-              "--path", str(marker)])
-    assert json.loads(r.stdout) == ["a.rendered.sh", "b.rendered.sh"]
+def test_healed_files_script_is_gone():
+    """v7 P5 deletes the heal ledger (write-only artifact): the script must
+    not exist anywhere under the workflow tree."""
+    assert not (_PO / "healed_files.py").exists()

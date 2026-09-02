@@ -105,54 +105,97 @@ def _alloc(artifacts: Path, *args: str,
                      "--artifacts", str(artifacts)], env=env)
 
 
-# ── device_alloc: acquire / release / full house ──────────────────────────────
 
-def test_device_alloc_acquire_is_exclusive_and_fills_in_order(tmp_path):
+_NVIDIA_SMI_STUB = """#!{bash}
+case "$1" in
+  -L) printf 'GPU 0: stub\\nGPU 1: stub\\n' ;;
+  --query-gpu=*) printf '0, GPU-aa\\n1, GPU-bb\\n' ;;
+  --query-compute-apps=*) printf 'GPU-bb, 4242\\n' ;;   # GPU 1 busy-real
+  *) exit 9 ;;
+esac
+"""
+
+_NVIDIA_SMI_IDLE_STUB = """#!{bash}
+case "$1" in
+  -L) printf 'GPU 0: stub\\nGPU 1: stub\\n' ;;
+  --query-gpu=*) printf '0, GPU-aa\\n1, GPU-bb\\n' ;;
+  --query-compute-apps=*) : ;;
+  *) exit 9 ;;
+esac
+"""
+
+
+def _stub_env(tmp_path: Path, *, tools: dict[str, str],
+              backend: str | None = None,
+              real_tools: str = "") -> dict:
+    """PATH holding ONLY the stub tools (plus the essentials bash needs)
+    — a stub's presence/absence is then deterministic. `real_tools` names
+    space-separated host tools to symlink in (their real binaries), for
+    stubs that need to shell out. An optional backend env override rides
+    along."""
+    stub_dir = tmp_path / "stubbin"
+    stub_dir.mkdir(parents=True, exist_ok=True)
+    for name, body in tools.items():
+        (stub_dir / name).write_text(body, encoding="utf-8")
+        (stub_dir / name).chmod(0o755)
+    for name in real_tools.split():
+        target = shutil.which(name)
+        if target:
+            link = stub_dir / name
+            if not link.exists():
+                link.symlink_to(target)
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("ORCA_PO_")}
+    env["PATH"] = ":".join([str(stub_dir),
+                            "/usr/bin", "/bin", "/usr/local/bin"])
+    if backend:
+        env["ORCA_PO_DEVICE_BACKEND"] = backend
+    return env
+
+
+# ── device_alloc v7: probe passthrough / claim --idx / adopt / release ───────
+# (the fuller probe/fail-loud matrix lives in test_po_v7.py)
+
+def test_device_alloc_claim_idx_is_exclusive(tmp_path):
     art = tmp_path / "ws"
     _write_train_device(art, count=2)
-    first = json.loads(_alloc(art, "acquire", "--vid", "r1-01").stdout)
+    first = json.loads(_alloc(art, "claim", "--vid", "r1-01", "--idx", "0").stdout)
     assert first["ok"] is True and first["idx"] == 0
     lock = json.loads((art / "devices" / "0.lock").read_text(encoding="utf-8"))
     assert lock["vid"] == "r1-01" and lock["backend"] == "cuda"
     assert isinstance(lock["pid"], int) and "acquired_at" in lock
 
-    second = json.loads(_alloc(art, "acquire", "--vid", "r2-01").stdout)
-    assert second["ok"] is True and second["idx"] == 1
+    # the SAME idx again -> ok:false naming the holder (rc 0: park, re-probe)
+    second = _alloc(art, "claim", "--vid", "r2-01", "--idx", "0")
+    assert second.returncode == 0, second.stderr
+    payload = json.loads(second.stdout)
+    assert payload["ok"] is False
+    assert "device 0 locked by vid=r1-01" in payload["reason"]
 
-    # all devices locked -> {"ok": false} is a WAIT state, not an error (rc 0)
-    full = _alloc(art, "acquire", "--vid", "r3-01")
-    assert full.returncode == 0, full.stderr
-    payload = json.loads(full.stdout)
-    assert payload["ok"] is False and payload["locked"] == [0, 1]
+    # a DIFFERENT idx is fine
+    third = json.loads(_alloc(art, "claim", "--vid", "r2-01", "--idx", "1").stdout)
+    assert third["ok"] is True and third["idx"] == 1
 
 
-def test_device_alloc_acquire_skips_dead_lock_without_recycling(tmp_path):
-    """Acquire never recycles (that is free's job): a dead-pid lock still
-    blocks its index — double-checking the division of labor the spec pins."""
+def test_device_alloc_claim_out_of_range_fails_loud(tmp_path):
+    art = tmp_path / "ws"
+    _write_train_device(art, count=2)
+    for bad in ("2", "-1"):
+        proc = _alloc(art, "claim", "--vid", "r1-01", "--idx", bad)
+        assert proc.returncode == 2, proc.stderr
+        assert "outside" in proc.stderr
+
+
+def test_device_alloc_claim_dead_owner_lock_still_blocks(tmp_path):
+    """v7 division of labor: claim NEVER recycles — even a dead-pid lock
+    blocks its idx (recycling is release/report-sweep business, by explicit
+    decision, never a side effect of claiming)."""
     art = tmp_path / "ws"
     _write_train_device(art, count=2)
     _write_lock(art, 0, "r0-99", _dead_pid())
-    out = json.loads(_alloc(art, "acquire", "--vid", "r1-01").stdout)
-    assert out["ok"] is True and out["idx"] == 1
-    assert (art / "devices" / "0.lock").is_file()   # untouched by acquire
-
-
-def test_device_alloc_acquire_with_live_owner_pid_survives_free(tmp_path):
-    """A lock acquired with an explicit long-lived owner pid (--pid) is NOT
-    reclaimed by a later free while that owner lives — the ledger's mutual
-    exclusion must not rest on the short-lived acquirer process alone."""
-    art = tmp_path / "ws"
-    _write_train_device(art, count=2)
-    out = json.loads(_alloc(art, "acquire", "--vid", "r1-01",
-                             "--pid", str(os.getpid())).stdout)
-    assert out["ok"] is True and out["pid"] == os.getpid()
-    env = _stub_env(tmp_path, tools={
-        "nvidia-smi": _NVIDIA_SMI_IDLE_STUB.format(bash=_BASH)})
-    proc = _alloc(art, "free", env=env)
-    assert proc.returncode == 0, proc.stderr
-    payload = json.loads(proc.stdout)
-    assert payload["recycled"] == [] and payload["locked"] == [out["idx"]]
-    assert payload["free"] == [i for i in (0, 1) if i != out["idx"]]
+    out = json.loads(_alloc(art, "claim", "--vid", "r1-01", "--idx", "0").stdout)
+    assert out["ok"] is False and "r0-99" in out["reason"]
+    assert (art / "devices" / "0.lock").is_file()   # untouched by claim
 
 
 def test_device_alloc_release_is_idempotent(tmp_path):
@@ -165,137 +208,15 @@ def test_device_alloc_release_is_idempotent(tmp_path):
     assert not (art / "devices" / "0.lock").exists()
 
     again = _alloc(art, "release", "--idx", "0")
-    assert again.returncode == 0, again.stderr       # §7.6: no double release
+    assert again.returncode == 0, again.stderr       # no double release
     payload = json.loads(again.stdout)
     assert payload["released"] is False and payload["idx"] == 0
 
 
 def test_device_alloc_missing_train_device_fails_loud(tmp_path):
-    proc = _alloc(tmp_path / "ws", "acquire", "--vid", "r1-01")
+    proc = _alloc(tmp_path / "ws", "claim", "--vid", "r1-01", "--idx", "0")
     assert proc.returncode == 2
-    assert "train_device.json" in proc.stderr
-
-
-# ── device_alloc free: real occupancy UNION live locks, dead-pid recycling ────
-
-_NVIDIA_SMI_STUB = r"""#!{bash}
-if [ "${{1:-}}" = "-L" ]; then
-  printf 'GPU 0: stub\nGPU 1: stub\n'
-elif [ "${{1:-}}" = "--query-gpu=index,uuid" ]; then
-  printf '0, GPU-aa\n1, GPU-bb\n'
-elif [ "${{1:-}}" = "--query-compute-apps=gpu_uuid,pid" ]; then
-  printf 'GPU-aa, 4242\n'
-else
-  echo "unsupported query: $*" >&2; exit 9
-fi
-"""
-
-# same machine, but every GPU idle (no compute apps)
-_NVIDIA_SMI_IDLE_STUB = r"""#!{bash}
-if [ "${{1:-}}" = "-L" ]; then
-  printf 'GPU 0: stub\nGPU 1: stub\n'
-elif [ "${{1:-}}" = "--query-gpu=index,uuid" ]; then
-  printf '0, GPU-aa\n1, GPU-bb\n'
-elif [ "${{1:-}}" = "--query-compute-apps=gpu_uuid,pid" ]; then
-  :
-else
-  echo "unsupported query: $*" >&2; exit 9
-fi
-"""
-
-_NPU_SMI_INFO_TABLE = """+----------------------------------------------------+
-| NPU | Name  | Health | Process                      |
-|===  | ===== | ====== | ============================ |
-| 0   | 910B3 | OK     | 4242                         |
-| 1   | 910B3 | OK     | -                            |
-+----------------------------------------------------+
-"""
-
-
-def _stub_env(tmp_path: Path, *, tools: dict[str, str],
-              real_tools: str = "python3 dirname grep sed head mkdir") -> dict:
-    """PATH holding ONLY the named tool stubs plus the few real utilities the
-    scripts need — backend-tool presence/absence is then deterministic."""
-    stub_dir = tmp_path / "stubbin"
-    stub_dir.mkdir(parents=True, exist_ok=True)
-    for name, body in tools.items():
-        stub = stub_dir / name
-        stub.write_text(body, encoding="utf-8")
-        stub.chmod(0o755)
-    for name in real_tools.split():
-        link = stub_dir / name
-        if not link.exists():
-            target = shutil.which(name)
-            if target:
-                link.symlink_to(target)
-    env = {k: v for k, v in os.environ.items()
-           if not k.startswith("ORCA_PO_DEVICE")}
-    env["PATH"] = str(stub_dir)
-    return env
-
-
-def test_device_alloc_free_unions_real_occupancy_and_live_locks(tmp_path):
-    art = tmp_path / "ws"
-    _write_train_device(art, backend="cuda", count=2)
-    # device 0: really busy (a foreign process), no lock; device 1: live lock
-    _write_lock(art, 1, "r1-01", os.getpid())
-    env = _stub_env(tmp_path, tools={
-        "nvidia-smi": _NVIDIA_SMI_STUB.format(bash=_BASH)})
-    proc = _alloc(art, "free", env=env)
-    assert proc.returncode == 0, proc.stderr
-    out = json.loads(proc.stdout)
-    assert out["free"] == []                      # 0 busy-real, 1 live-locked
-    assert out["busy_real"] == [0] and out["locked"] == [1]
-
-
-def test_device_alloc_free_recycles_dead_pid_with_disclosure(tmp_path):
-    art = tmp_path / "ws"
-    _write_train_device(art, backend="cuda", count=2)
-    env = _stub_env(tmp_path, tools={
-        "nvidia-smi": _NVIDIA_SMI_IDLE_STUB.format(bash=_BASH)})
-    dead = _dead_pid()
-    live = _write_lock(art, 1, "r1-01", os.getpid())
-    dead_lock = _write_lock(art, 0, "r0-99", dead)
-    proc = _alloc(art, "free", env=env)
-    assert proc.returncode == 0, proc.stderr
-    out = json.loads(proc.stdout)
-    # the dead-pid lock was reclaimed (and disclosed), the live one kept
-    assert not dead_lock.exists() and live.is_file()
-    assert [r["idx"] for r in out["recycled"]] == [0]
-    assert out["recycled"][0]["vid"] == "r0-99" and out["recycled"][0]["pid"] == dead
-    assert "dead" in out["recycled"][0]["reason"]
-    assert out["free"] == [0] and out["locked"] == [1]
-
-
-def test_device_alloc_free_npu_process_column_parse(tmp_path):
-    art = tmp_path / "ws"
-    _write_train_device(art, backend="npu", count=2)
-    env = _stub_env(tmp_path, tools={
-        "npu-smi": f"#!{_BASH}\nprintf '%s' '{_NPU_SMI_INFO_TABLE}'\n"})
-    proc = _alloc(art, "free", env=env)
-    assert proc.returncode == 0, proc.stderr
-    out = json.loads(proc.stdout)
-    assert out["free"] == [1] and out["busy_real"] == [0]
-
-
-def test_device_alloc_free_fails_loud_on_unusable_backend_probe(tmp_path):
-    art = tmp_path / "ws"
-    _write_train_device(art, backend="cuda", count=1)
-    # train_device.json says cuda but no nvidia-smi anywhere -> never a
-    # guessed free set
-    env = _stub_env(tmp_path, tools={})
-    proc = _alloc(art, "free", env=env)
-    assert proc.returncode == 2
-    assert "occupancy" in proc.stderr
-
-    # npu table without a Process column -> same honesty
-    art2 = tmp_path / "ws2"
-    _write_train_device(art2, backend="npu", count=1)
-    env2 = _stub_env(tmp_path / "b", tools={
-        "npu-smi": "#!/bin/sh\nprintf '| NPU  Name |\\n| 0  910B3 |\\n'\n"})
-    proc2 = _alloc(art2, "free", env=env2)
-    assert proc2.returncode == 2
-    assert "Process column" in proc2.stderr
+    assert "train_device.json missing" in proc.stderr
 
 
 # ── resolve_train_device: four-level resolution + write-if-absent + reuse ─────
@@ -471,7 +392,7 @@ def test_gate_success_row_routes_report_even_at_cap(tmp_path):
     assert out["in_flight"] == ["r2-01"]   # passed but not terminal
     assert out["round"] == 2 and out["target_cycles"] == 501
     assert set(out) == {"decision", "round", "target_cycles",
-                        "success_vids", "in_flight", "reason"}
+                        "success_vids", "in_flight", "idle_rounds", "reason"}
 
 
 def test_gate_round_cap_routes_report_without_success(tmp_path):
@@ -523,12 +444,10 @@ def test_gate_missing_origin_anchor_still_fails_loud(tmp_path):
 
 # ── history_lib.append_terminal: row semantics + unchanged dedup key ─────────
 
-def _impl(hist: Path, vid: str, sig: str, *, probe_epochs: int = 1,
-          probe_max_steps=None, probe_data_value=None) -> None:
+def _impl(hist: Path, vid: str, sig: str, *, probe_epochs: int = 1) -> None:
     history_lib.append_implemented(
         hist, vid, round=1, seq=1, parent_vid=None, change_sig=sig,
-        probe_epochs=probe_epochs, probe_max_steps=probe_max_steps,
-        probe_data_value=probe_data_value, target_modules=["m"],
+        probe_epochs=probe_epochs, target_modules=["m"],
         predicted_delta_cycles=-100,
         base_at_proposal={"vid": None, "makespan_cycles": 1000})
 
@@ -589,21 +508,17 @@ def test_append_terminal_keeps_the_vid_change_sig_dedup_key(tmp_path):
     a probe_insufficient sig stays same-config blocked, a config change
     reopens it, and latency_fail remains non-permanent."""
     hist = tmp_path / "history.jsonl"
-    _impl(hist, "r1-01", "norm:relax:m", probe_epochs=1,
-          probe_max_steps=500, probe_data_value=2000)
+    _impl(hist, "r1-01", "norm:relax:m", probe_epochs=1)
     history_lib.append_terminal(hist, "r1-01", outcome="probe_insufficient",
                                 stage="liveness", max_retries_hit=True)
-    assert history_lib.dedup_state(hist, "norm:relax:m", 1, 500,
-                                   2000)["blocked"] is True
-    assert history_lib.dedup_state(hist, "norm:relax:m", 2, 500,
-                                   2000)["blocked"] is False
+    assert history_lib.dedup_state(hist, "norm:relax:m", 1)["blocked"] is True
+    assert history_lib.dedup_state(hist, "norm:relax:m", 2)["blocked"] is True
 
     hist2 = tmp_path / "h2.jsonl"
     _impl(hist2, "r1-01", "act:swap:m")
     history_lib.append_terminal(hist2, "r1-01", outcome="latency_fail",
                                 measured_makespan_cycles=900)
-    assert history_lib.dedup_state(hist2, "act:swap:m", 1,
-                                   None)["blocked"] is False
+    assert history_lib.dedup_state(hist2, "act:swap:m", 1)["blocked"] is False
 
 
 # ── run_latency_recheck: the unified gate boundary (== target passes) ─────────
@@ -617,13 +532,10 @@ def _recheck_ws(tmp_path: Path, *, target: int = 500) -> Path:
     art = tmp_path / "ws"
     (art / "scripts").mkdir(parents=True)
     for src in ("diff_check.py", "history_lib.py", "emit_result.py",
-                "round_state.py"):
+                "round_state.py", "check_verdict.py"):
         shutil.copy(_SCRIPTS / src, art / "scripts" / src)
     (art / "contracts.json").write_text(json.dumps(
         {"interpreter": {"sys_executable": sys.executable}}), encoding="utf-8")
-    (art / "profile_mode.json").write_text(json.dumps(
-        {"mode": "mfu", "chip": "6613", "precision": "INT8", "core_num": 1,
-         "resolved_by": "env"}), encoding="utf-8")
     (art / "base" / "profile").mkdir(parents=True)
     (art / "base" / "profile" / "profile_summary.json").write_text(json.dumps(
         {"schema_version": 1, "onnx": "smoke.onnx",
@@ -993,18 +905,19 @@ def test_repair_trace_unparseable_and_nonlatency_failures_fail_loud(tmp_path):
     assert not (art2 / "variants" / "r1-01" / "repair_trace.json").exists()
 
 
-# ── P1: check_propose_emit v6 — §5.3 gate over both ending paths ───────────────
+# ── P1: check_propose_emit v7 — §5 gate over both ending paths ───────────────
 
 _CHECK_EMIT = _SCRIPTS / "check_propose_emit.py"
-_BL_SENTINEL = "[subagent:business-logic-analyst v1 BLA7K4]"
-_INFO_SENTINEL = "[subagent:information-analyst v1 IXA3N7]"
-_BL_SECTIONS = ("## 任务语义", "## 输入输出", "## 架构动机",
-                "## 逐模块职责与物理意义", "## 训练目标与指标方向", "## 与基线差异")
-_INFO_SECTIONS = ("## 信息核心", "## 近似与牺牲项", "## 被牺牲信息与预期精度代价")
+_VAS_SENTINEL = "[subagent:variant-assessor v1 VAS4K9]"
+_ASSESS_SECTIONS = ("## 任务语义", "## 输入输出", "## 架构动机",
+                    "## 逐模块职责与物理意义", "## 训练目标与指标方向",
+                    "## 与基线差异")
+_ASSESS_SUB = "### 被牺牲信息与预期精度代价"
 
 
-def _variant_doc(sentinel: str, sections: tuple[str, ...],
-                 drop: str = "", bare: bool = False) -> str:
+def _assessment_doc(sections: tuple[str, ...] = _ASSESS_SECTIONS,
+                    drop: str = "", bare: bool = False,
+                    sentinel: str = _VAS_SENTINEL) -> str:
     lines = [sentinel]
     for heading in sections:
         if heading == drop:
@@ -1012,20 +925,27 @@ def _variant_doc(sentinel: str, sections: tuple[str, ...],
         lines.append(heading)
         if not bare:
             lines.append(f"content for {heading}")
+        if heading == "## 与基线差异":
+            lines.append(_ASSESS_SUB)
+            lines.append("sacrificed information and expected cost")
     return "\n".join(lines) + "\n"
+
+
+def _stamp_for(art: Path, vid: str, sig: str) -> str:
+    import hashlib
+    decl = art / "variants" / vid / "declaration.json"
+    return f"{vid}|{sig}|{hashlib.sha256(decl.read_bytes()).hexdigest()}"
 
 
 def _emit_ws(tmp_path: Path, *, outcome: str = "latency_pass",
              delta: int = -600) -> Path:
-    """A green single-variant round: one admitted proposal, both §4.1 analyst
-    documents + conformance, the history rows, and the round analysis."""
+    """A green single-variant round: one admitted proposal, the variant's
+    assessment.md + the v7 analysis stamp, the history rows, and the round
+    analysis."""
     art = tmp_path / "ws"
     (art / "scripts").mkdir(parents=True)
     for src in ("history_lib.py", "round_state.py"):
         shutil.copy(_SCRIPTS / src, art / "scripts" / src)
-    (art / "profile_mode.json").write_text(json.dumps(
-        {"mode": "mfu", "chip": "6613", "precision": "INT8", "core_num": 1}),
-        encoding="utf-8")
     (art / "base" / "profile").mkdir(parents=True)
     (art / "base" / "profile" / "profile_summary.json").write_text(json.dumps(
         {"makespan_cycles": 1000, "op_count": 2}), encoding="utf-8")
@@ -1034,7 +954,7 @@ def _emit_ws(tmp_path: Path, *, outcome: str = "latency_pass",
     rd = art / "rounds" / "001"
     rd.mkdir(parents=True)
     (rd / "proposals.json").write_text(json.dumps({
-        "round": 1, "exhausted": False, "filtered_count": 0,
+        "round": 1, "filtered_count": 0,
         "exhausted_rationale": [],
         "proposals": [{"vid": "r1-01", "lever": "activation",
                        "change_sig": "sig:r1-01", "target_modules": ["m"],
@@ -1051,19 +971,18 @@ def _emit_ws(tmp_path: Path, *, outcome: str = "latency_pass",
         {"vid": "r1-01", "round": 1, "outcome": outcome}) + "\n",
         encoding="utf-8")
     (rd / "analysis.md").write_text(
-        "## latency\nreached the line; calibration note; next direction\n",
+        "## latency\nreached the line; predicted-vs-line margin disclosed; "
+        "soft-alignment: aligned; next direction\n",
         encoding="utf-8")
 
     vd = art / "variants" / "r1-01"
     vd.mkdir(parents=True)
-    (vd / "business_logic.md").write_text(
-        _variant_doc(_BL_SENTINEL, _BL_SECTIONS), encoding="utf-8")
-    (vd / "information_analysis.md").write_text(
-        _variant_doc(_INFO_SENTINEL, _INFO_SECTIONS), encoding="utf-8")
-    (vd / "conformance.md").write_text(
-        f"# conformance — r1-01\n{_BL_SENTINEL} verified\n"
-        f"{_INFO_SENTINEL} verified\n## 对齐结论\naligned\n## 差异披露\nnone\n",
-        encoding="utf-8")
+    (vd / "declaration.json").write_text(json.dumps(
+        {"vid": "r1-01", "change_sig": "sig:r1-01",
+         "predicted_delta_cycles": delta}), encoding="utf-8")
+    (vd / "assessment.md").write_text(_assessment_doc(), encoding="utf-8")
+    (vd / ".analysis_stamp.json").write_text(json.dumps(
+        {"key": _stamp_for(art, "r1-01", "sig:r1-01")}), encoding="utf-8")
 
     hist = art / "history.jsonl"
     _impl(hist, "r1-01", "sig:r1-01")
@@ -1089,9 +1008,7 @@ def _check_emit(art: Path) -> subprocess.CompletedProcess:
 
 def test_emit_gate_green_on_both_ending_paths(tmp_path):
     """The success path (latency_pass) and the honest elimination path
-    (latency_fail after repair exhaustion) both pass the §5.3 gate — and
-    neither needs the retired mode_state machinery (P0's dangling reference
-    is gone: no mode is read anywhere)."""
+    (latency_fail after repair exhaustion) both pass the v7 gate."""
     for outcome in ("latency_pass", "latency_fail"):
         art = _emit_ws(tmp_path / outcome, outcome=outcome)
         proc = _check_emit(art)
@@ -1099,7 +1016,7 @@ def test_emit_gate_green_on_both_ending_paths(tmp_path):
         assert json.loads(proc.stdout)["ok"] is True
 
 
-def test_emit_gate_rejects_multi_proposal_and_above_line_prediction(tmp_path):
+def test_emit_gate_rejects_multi_proposal_and_zero_delta(tmp_path):
     art = _emit_ws(tmp_path / "many")
     proposals_path = art / "rounds" / "001" / "proposals.json"
     doc = json.loads(proposals_path.read_text(encoding="utf-8"))
@@ -1110,62 +1027,92 @@ def test_emit_gate_rejects_multi_proposal_and_above_line_prediction(tmp_path):
     assert proc.returncode == 1
     assert "exactly ONE" in proc.stderr
 
-    # prediction above the frozen line never admits (900 > 500)
+    # v7 §5.2: the ONLY prediction hard gate is a strictly negative delta —
+    # a delta that does not reach the line (1000-100=900 > 500) is ADMITTED
+    # (the margin is a calibration disclosure in the round analysis)
     art2 = _emit_ws(tmp_path / "above", delta=-100)
-    proc2 = _check_emit(art2)
-    assert proc2.returncode == 1
-    assert "admission" in proc2.stderr
+    assert _check_emit(art2).returncode == 0
 
-    # exactly ON the line is admissible (inclusive boundary)
-    art3 = _emit_ws(tmp_path / "on-line", delta=-500)
-    assert _check_emit(art3).returncode == 0
+    # a NON-negative delta is rejected
+    art3 = _emit_ws(tmp_path / "zero", delta=0)
+    proc3 = _check_emit(art3)
+    assert proc3.returncode == 1
+    assert "int < 0" in proc3.stderr
+    # sota_reference may be null (why-no-precedent lives in the rationale)
+    art4 = _emit_ws(tmp_path / "noref")
+    proposals = json.loads((art4 / "rounds" / "001" / "proposals.json")
+                           .read_text(encoding="utf-8"))
+    proposals["proposals"][0]["sota_reference"] = None
+    (art4 / "rounds" / "001" / "proposals.json").write_text(
+        json.dumps(proposals), encoding="utf-8")
+    assert _check_emit(art4).returncode == 0
 
 
-def test_emit_gate_conformance_matrix(tmp_path):
-    """§4.1 document gate: sentinel / non-empty body / conclusion section
-    missing -> intercepted; all present -> admitted."""
-    def break_doc(art: Path, name: str, content: str) -> None:
-        (art / "variants" / "r1-01" / name).write_text(content, encoding="utf-8")
+def test_emit_gate_assessment_matrix(tmp_path):
+    """v7 §5.3: the assessment.md gate — sentinel / non-empty body / six
+    sections / the conclusion sub-section; plus the v7 stamp key."""
+    def break_doc(art: Path, content: str) -> None:
+        (art / "variants" / "r1-01" / "assessment.md").write_text(
+            content, encoding="utf-8")
 
     # sentinel broken
     art = _emit_ws(tmp_path / "s")
-    break_doc(art, "business_logic.md",
-              _variant_doc("wrong sentinel", _BL_SECTIONS))
+    break_doc(art, _assessment_doc(sentinel="wrong sentinel"))
     proc = _check_emit(art)
     assert proc.returncode == 1 and "sentinel" in proc.stderr
 
     # body empty (sentinel only)
     art = _emit_ws(tmp_path / "e")
-    break_doc(art, "information_analysis.md", _INFO_SENTINEL + "\n")
+    break_doc(art, _VAS_SENTINEL + "\n")
     proc = _check_emit(art)
     assert proc.returncode == 1 and "empty" in proc.stderr
 
-    # conclusion section missing (business: 与基线差异)
+    # a section missing
     art = _emit_ws(tmp_path / "c1")
-    break_doc(art, "business_logic.md",
-              _variant_doc(_BL_SENTINEL, _BL_SECTIONS, drop="## 与基线差异"))
+    break_doc(art, _assessment_doc(drop="## 与基线差异"))
     proc = _check_emit(art)
     assert proc.returncode == 1 and "与基线差异" in proc.stderr
 
-    # conclusion section missing (information: 被牺牲信息与预期精度代价)
+    # the conclusion SUB-section missing
     art = _emit_ws(tmp_path / "c2")
-    break_doc(art, "information_analysis.md",
-              _variant_doc(_INFO_SENTINEL, _INFO_SECTIONS,
-                           drop="## 被牺牲信息与预期精度代价"))
+    text = _assessment_doc()
+    text = text.replace(_ASSESS_SUB + "\nsacrificed information and expected cost\n", "")
+    break_doc(art, text)
     proc = _check_emit(art)
     assert proc.returncode == 1 and "被牺牲信息与预期精度代价" in proc.stderr
 
-    # conformance.md empty / not recording both sentinels
-    art = _emit_ws(tmp_path / "cf1")
-    break_doc(art, "conformance.md", "")
+    # the whole document missing
+    art = _emit_ws(tmp_path / "c3")
+    (art / "variants" / "r1-01" / "assessment.md").unlink()
     proc = _check_emit(art)
-    assert proc.returncode == 1 and "conformance" in proc.stderr
+    assert proc.returncode == 1 and "assessment.md" in proc.stderr
 
-    art = _emit_ws(tmp_path / "cf2")
-    break_doc(art, "conformance.md",
-              f"# conformance\n{_BL_SENTINEL} verified\nno info record\n")
+
+def test_emit_gate_stamp_key_matrix(tmp_path):
+    """v7 §5.3 stamp fix: the key is vid|sig|sha256(declaration.json) — a
+    repair that rewrites declaration.json changes the key, so a stale stamp
+    can never green-light a skipped re-assessment."""
+    # a stale stamp (declaration rewritten after stamping) is rejected
+    art = _emit_ws(tmp_path / "stale")
+    decl = art / "variants" / "r1-01" / "declaration.json"
+    doc = json.loads(decl.read_text(encoding="utf-8"))
+    doc["predicted_delta_cycles"] = -601          # the repair rewrite
+    decl.write_text(json.dumps(doc), encoding="utf-8")
     proc = _check_emit(art)
-    assert proc.returncode == 1 and _INFO_SENTINEL in proc.stderr
+    assert proc.returncode == 1
+    assert "v7 key" in proc.stderr
+
+    # re-stamping against the CURRENT declaration re-admits
+    (art / "variants" / "r1-01" / ".analysis_stamp.json").write_text(json.dumps(
+        {"key": _stamp_for(art, "r1-01", "sig:r1-01")}), encoding="utf-8")
+    assert _check_emit(art).returncode == 0
+
+    # a wrong sig in the key is rejected too
+    art2 = _emit_ws(tmp_path / "sig")
+    (art2 / "variants" / "r1-01" / ".analysis_stamp.json").write_text(
+        json.dumps({"key": _stamp_for(art2, "r1-01", "sig:other")}),
+        encoding="utf-8")
+    assert _check_emit(art2).returncode == 1
 
 
 def test_emit_gate_repair_trace_and_analysis_and_direction_rules(tmp_path):
@@ -1206,63 +1153,17 @@ def test_emit_gate_repair_trace_and_analysis_and_direction_rules(tmp_path):
     assert proc.returncode == 1 and "direction.json" in proc.stderr
 
 
-def test_emit_gate_history_and_admission_input_failures(tmp_path):
-    # no history row for the round's vid -> intercepted
-    art = _emit_ws(tmp_path / "nohist")
-    (art / "history.jsonl").unlink()
-    proc = _check_emit(art)
-    assert proc.returncode == 1 and "no history row" in proc.stderr
-
-    # an impl row without a latency-stage outcome is not a legal ending
-    art2 = _emit_ws(tmp_path / "nooutcome")
-    hist = art2 / "history.jsonl"
-    hist.unlink()
-    history_lib.append_implemented(
-        hist, "r1-01", round=1, seq=1, parent_vid=None,
-        change_sig="sig:r1-01", probe_epochs=1, probe_max_steps=None,
-        probe_data_value=None, target_modules=["m"],
-        predicted_delta_cycles=-600,
-        base_at_proposal={"vid": None, "makespan_cycles": 1000})
-    proc2 = _check_emit(art2)
-    assert proc2.returncode == 1 and "legal round ending" in proc2.stderr
-
-    # the admission line needs both single sources (base summary + anchor)
-    art3 = _emit_ws(tmp_path / "noanchor")
-    (art3 / "base" / "origin_anchor.json").unlink()
-    proc3 = _check_emit(art3)
-    assert proc3.returncode == 1 and "target_cycles unavailable" in proc3.stderr
-
-
-def test_emit_gate_zero_proposal_round_is_legal(tmp_path):
-    art = _emit_ws(tmp_path / "z")
-    rd = art / "rounds" / "001"
-    shutil.rmtree(art / "variants")
-    (rd / "verdicts.jsonl").unlink()
-    (rd / "proposals.json").write_text(json.dumps({
-        "round": 1, "exhausted": False, "filtered_count": 1,
-        "exhausted_rationale": [{"lever": "activation", "direction": "x",
-                                 "why_not": "prediction above the target line"}],
-        "proposals": []}), encoding="utf-8")
-    proc = _check_emit(art)
-    assert proc.returncode == 0, proc.stderr
-
-    # but a bare zero-proposal round without rationale is rejected
-    doc = json.loads((rd / "proposals.json").read_text(encoding="utf-8"))
-    doc["exhausted_rationale"] = []
-    (rd / "proposals.json").write_text(json.dumps(doc), encoding="utf-8")
-    assert _check_emit(art).returncode == 1
-
-
 # ── P2: flatten→probe wiring smoke + check_probe_emit v6 (§6.2) ───────────────
 
 _PROBE_EMIT = _SCRIPTS / "check_probe_emit.py"
-_WATCH_SH = _SCRIPTS / "watch_variant.sh"
+_WATCH_PY = _SCRIPTS / "watch_variant.py"
 
 
 def test_flatten_to_probe_resource_chain_smoke(tmp_path):
-    """The entry→probe resource wiring over mocked backend CLIs: the entry
-    resolver freezes train_device.json, and the probe-side ledger turns the
-    same backend facts into claim / mutual exclusion / release."""
+    """The entry→probe resource wiring over mocked backend CLIs (v7): the
+    entry resolver freezes train_device.json; the probe side observes the
+    backend's raw output through `probe`, claims the agent-chosen idx, and
+    adopts a long-lived owner."""
     idle_table = ("| NPU | Name  | Health | Process |\n"
                   "| 0   | 910B3 | OK     | -       |\n"
                   "| 1   | 910B3 | OK     | -       |\n")
@@ -1282,53 +1183,32 @@ def test_flatten_to_probe_resource_chain_smoke(tmp_path):
     assert json.loads((art / "train_device.json").read_text(
         encoding="utf-8"))["backend"] == "npu"
 
-    # probe side: claim (free -> acquire -> idx-in-free-set guard) then adopt
-    # a long-lived owner — the lock must survive free (mutual exclusion rests
-    # on the OWNER, never on the short-lived claiming command)
-    free1 = _alloc(art, "free", env=env)
-    assert free1.returncode == 0, free1.stderr
-    assert json.loads(free1.stdout)["free"] == [0, 1]
-    claimed = _alloc(art, "claim", "--vid", "r1-01", env=env)
+    # probe side: observe (raw passthrough) -> choose idx 0 -> claim -> adopt
+    probe = _alloc(art, "probe", "--backend", "npu", env=env)
+    assert probe.returncode == 0, probe.stderr
+    doc = json.loads(probe.stdout)
+    assert doc["backend"] == "npu" and doc["device_count"] == 2
+    assert doc["locks"] == []
+    assert idle_table in doc["raw"]        # the occupancy text passes through VERBATIM
+
+    claimed = _alloc(art, "claim", "--vid", "r1-01", "--idx", "0", env=env)
     assert claimed.returncode == 0, claimed.stderr
-    doc = json.loads(claimed.stdout)
-    assert doc["ok"] is True and doc["idx"] == 0
+    assert json.loads(claimed.stdout)["ok"] is True
     adopted = _alloc(art, "adopt", "--vid", "r1-01",
                      "--pid", str(os.getpid()), env=env)
     assert adopted.returncode == 0, adopted.stderr
     assert json.loads(adopted.stdout) == {"adopted": True, "idx": 0,
                                           "vid": "r1-01", "pid": os.getpid()}
-    free2 = json.loads(_alloc(art, "free", env=env).stdout)
-    assert free2["free"] == [1] and free2["locked"] == [0]
-    assert free2["recycled"] == []
+    # the live lock shows up in the NEXT probe's ledger view
+    doc2 = json.loads(_alloc(art, "probe", "--backend", "npu", env=env).stdout)
+    assert doc2["locks"] == [{"idx": 0, "vid": "r1-01", "pid": os.getpid(),
+                              "acquired_at": doc2["locks"][0]["acquired_at"]}]
 
     # release reopens the card for the next variant
     rel = _alloc(art, "release", "--idx", "0", env=env)
     assert rel.returncode == 0, rel.stderr
-    assert json.loads(_alloc(art, "free", env=env).stdout)["free"] == [0, 1]
-
-
-def test_device_alloc_claim_guard_never_trains_on_busy_real(tmp_path):
-    """The claim guard: acquire is lock-scoped, so on a machine with a
-    FOREIGN (lockless) process on device 0 it would hand out idx 0 — claim
-    releases that card and fails loud instead of training on it."""
-    art = tmp_path / "ws"
-    _write_train_device(art, backend="cuda", count=2)
-    env = _stub_env(tmp_path, tools={
-        "nvidia-smi": _NVIDIA_SMI_STUB.format(bash=_BASH)})  # GPU 0 busy-real
-
-    proc = _alloc(art, "claim", "--vid", "r1-01", env=env)
-    assert proc.returncode == 2
-    assert "outside the free set" in proc.stderr
-    assert not (art / "devices" / "0.lock").exists()   # never kept
-
-    # the park state: 0 busy-real + 1 live lock -> a legitimate wait, rc 0
-    _write_lock(art, 1, "r0-01", os.getpid())
-    parked = _alloc(art, "claim", "--vid", "r1-01", env=env)
-    assert parked.returncode == 0, parked.stderr
-    payload = json.loads(parked.stdout)
-    assert payload["ok"] is False
-    assert payload["reason"] == "no free training device"
-    assert payload["busy_real"] == [0] and payload["locked"] == [1]
+    assert json.loads(_alloc(art, "probe", "--backend", "npu",
+                             env=env).stdout)["locks"] == []
 
 
 def test_device_alloc_adopt_rebinds_ownership_fail_loud(tmp_path):
@@ -1373,21 +1253,21 @@ def test_watch_variant_pins_signature_and_fails_loud_on_torn_ws(tmp_path):
     env = dict(os.environ)
     env["ORCA_ARTIFACTS_DIR"] = str(art)
 
-    helped = _run_cli([_BASH, str(_WATCH_SH), "--help"], env=env)
+    helped = _run_cli([sys.executable, str(_WATCH_PY), "--help"], env=env)
     assert helped.returncode == 0
     assert "--vid" in helped.stdout and "--device" in helped.stdout
 
-    missing_vid = _run_cli([_BASH, str(_WATCH_SH), "--device", "0"], env=env)
+    missing_vid = _run_cli([sys.executable, str(_WATCH_PY), "--device", "0"], env=env)
     assert missing_vid.returncode == 2
-    bad_device = _run_cli([_BASH, str(_WATCH_SH), "--vid", "r1-01",
-                           "--device", "x"], env=env)
+    bad_device = _run_cli([sys.executable, str(_WATCH_PY), "--vid", "r1-01",
+                           "--device", "-3"], env=env)
     assert bad_device.returncode == 2
-    unknown = _run_cli([_BASH, str(_WATCH_SH), "--vid", "r1-01",
+    unknown = _run_cli([sys.executable, str(_WATCH_PY), "--vid", "r1-01",
                         "--device", "0", "--bogus"], env=env)
     assert unknown.returncode == 2
 
     # well-formed invocation over a torn workspace (no contracts) -> FATAL
-    torn = _run_cli([_BASH, str(_WATCH_SH), "--vid", "r1-01",
+    torn = _run_cli([sys.executable, str(_WATCH_PY), "--vid", "r1-01",
                      "--device", "0"], env=env)
     assert torn.returncode == 2
     assert "contracts.json" in torn.stderr
@@ -1428,7 +1308,7 @@ def _probe_ws(tmp_path: Path, *, makespan: int = 400,
         # pid for liveness + attribution, so the fake one is session-leading
         # and cmdline-attributed (auto-reaped after the test)
         (vd / "watchdog.pid").write_text(
-            f"{_attributed_session_sleeper('watch_variant.sh').pid}\n",
+            f"{_attributed_session_sleeper('watch_variant.py').pid}\n",
             encoding="utf-8")
     if liveness is not None:
         record = {"vid": "r1-01", "epoch1_ok": True, "device": 0,
@@ -1610,10 +1490,11 @@ def test_probe_emit_pid_attribution_and_input_failures(tmp_path):
     (art3 / "variants" / "r1-01" / "train" / "train.pid").write_text(
         f"{os.getpid()}\n", encoding="utf-8")
     proc3 = _check_probe(art3)
-    assert proc3.returncode == 1 and "target_cycles unavailable" in proc3.stderr
+    assert proc3.returncode == 1
+    assert "origin_anchor" in proc3.stderr       # via check_verdict per-vid
 
 
-# ── P3: watch_variant.sh — warmup / streak boundaries / early-stop kill ──────
+# ── P3: watch_variant.py — warmup / streak boundaries / early-stop kill ────
 
 _EPOCH_LINE = "epoch {e} metric {m}"
 
@@ -1633,7 +1514,7 @@ def _watch_ws(tmp_path: Path, *, epochs: int = 20, log_epochs=None,
     (art / "scripts").mkdir(parents=True)
     for src in ("metric_curve.py", "verdict_decide.py", "history_lib.py",
                 "ledger_aggregate.py", "device_alloc.py", "render_run.sh",
-                "assert_shadow.py"):
+                "assert_shadow.py", "pid_lib.py"):
         shutil.copy(_SCRIPTS / src, art / "scripts" / src)
     (art / "orca_inject").mkdir(parents=True)
     for src in ("header.env", "sitecustomize.py"):
@@ -1644,6 +1525,8 @@ def _watch_ws(tmp_path: Path, *, epochs: int = 20, log_epochs=None,
     (art / "contracts.json").write_text(json.dumps({
         "interpreter": {"sys_executable": sys.executable},
         "full_train_budget": {"epochs": epochs, "seed": 7},
+        "proxy_budget": {"epochs": 1, "seed": 7},
+        "early_stop": {"warmup_frac": 0.1, "streak_frac": 0.3},
         "eval": {"metric_extraction": {
                      "kind": "stdout_regex",
                      "pattern": r"final metric: ([0-9]*\.?[0-9]+)"},
@@ -1705,7 +1588,7 @@ def _watch_ws(tmp_path: Path, *, epochs: int = 20, log_epochs=None,
 def _watch_run(art: Path, *extra: str) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     env["ORCA_ARTIFACTS_DIR"] = str(art)
-    return _run_cli([_BASH, str(_WATCH_SH), "--vid", "r1-01",
+    return _run_cli([sys.executable, str(_WATCH_PY), "--vid", "r1-01",
                      "--device", "0", *extra], env=env, timeout=180)
 
 
@@ -1756,11 +1639,11 @@ def test_watch_warmup_epochs_are_never_judged(tmp_path):
     assert (art / "devices" / "0.lock").is_file()
 
 
-def test_watch_nine_over_budget_epochs_do_not_kill(tmp_path):
-    """Judged epochs 3..11 (nine consecutive over-budget) leave the training
-    alive — the boundary is >= 10, and a poll cycle over an ALREADY-counted
-    epoch must not inflate the streak either."""
-    art = _watch_ws(tmp_path, epochs=20, log_epochs=range(1, 12))
+def test_watch_five_over_budget_epochs_do_not_kill(tmp_path):
+    """Judged epochs 3..7 (five consecutive over-budget) leave the training
+    alive — v7's threshold for E=20 is max(2, ceil(0.3 x 20)) = 6, and a poll
+    cycle over an ALREADY-counted epoch must not inflate the streak."""
+    art = _watch_ws(tmp_path, epochs=20, log_epochs=range(1, 8))
     sleeper = _attributed_session_sleeper("train.rendered.sh")
     (art / "variants" / "r1-01" / "train" / "train.pid").write_text(
         f"{sleeper.pid}\n", encoding="utf-8")
@@ -1768,24 +1651,25 @@ def test_watch_nine_over_budget_epochs_do_not_kill(tmp_path):
     assert first.returncode == 0, first.stderr
     status = _train_status(art)
     assert status["stage"] == "training"
-    assert status["epoch"] == 11 and status["over_budget_streak"] == 9
+    assert status["epoch"] == 7 and status["over_budget_streak"] == 5
     assert status["gap"] == pytest.approx(0.4)        # 0.9 - 0.5, normalized
 
     # a re-poll over the SAME curve: per-epoch counting, never per-cycle
     second = _watch_run(art, "--once")
     assert second.returncode == 0, second.stderr
-    assert _train_status(art)["over_budget_streak"] == 9
+    assert _train_status(art)["over_budget_streak"] == 5
     assert sleeper.poll() is None
     assert _latest_row(art).get("outcome") == "latency_pass"
 
 
-def test_watch_ten_over_budget_epochs_kill_then_replay_never_rekills(tmp_path):
-    """streak 10 kills the attributed process group, records the terminal
-    accuracy_fail row with the FROZEN re-parsed depth, does the full §7.4
+def test_watch_six_over_budget_epochs_kill_then_replay_never_rekills(tmp_path):
+    """A streak reaching the E-derived threshold (max(2, ceil(0.3 x 20)) = 6)
+    kills the attributed process group, records the terminal
+    accuracy_fail row with the FROZEN re-parsed depth, does the full
     terminal tail — and a re-entry replays the terminal without re-killing
     or appending a second history row."""
-    art = _watch_ws(tmp_path, epochs=20, log_epochs=range(1, 13))
-    # judged epochs 3..12 -> the streak reaches 10 exactly at epoch 12
+    art = _watch_ws(tmp_path, epochs=20, log_epochs=range(1, 9))
+    # judged epochs 3..8 -> the streak reaches 6 exactly at epoch 8
     sleeper = _attributed_session_sleeper("train.rendered.sh")
     (art / "variants" / "r1-01" / "train" / "train.pid").write_text(
         f"{sleeper.pid}\n", encoding="utf-8")
@@ -1795,14 +1679,14 @@ def test_watch_ten_over_budget_epochs_kill_then_replay_never_rekills(tmp_path):
 
     status = _train_status(art)
     assert status["stage"] == "killed"
-    assert status["stopped_at_epoch"] == 12           # frozen re-parse
-    assert status["over_budget_streak"] == 10
+    assert status["stopped_at_epoch"] == 8            # frozen re-parse
+    assert status["over_budget_streak"] == 6
     assert status["gap"] == pytest.approx(0.4)
 
     row = _latest_row(art)
     assert row["outcome"] == "accuracy_fail"
-    assert row["stopped_at_epoch"] == 12
-    assert row["over_budget_streak"] == 10
+    assert row["stopped_at_epoch"] == 8
+    assert row["over_budget_streak"] == 6
     assert row["gap"] == pytest.approx(0.4)
 
     # the terminal tail: lock released, rules marker, shard (with the
@@ -1828,7 +1712,7 @@ def test_watch_ten_over_budget_epochs_kill_then_replay_never_rekills(tmp_path):
 def test_watch_kill_attribution_refusal_is_fatal_no_terminal(tmp_path):
     """§14: the kill attribution check failing refuses the kill and FATALs —
     the stranger survives, no terminal is written, the lock stays."""
-    art = _watch_ws(tmp_path, epochs=20, log_epochs=range(1, 13))
+    art = _watch_ws(tmp_path, epochs=20, log_epochs=range(1, 9))
     stranger = subprocess.Popen(["sleep", "300"], stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL,
                                 start_new_session=True)
@@ -1927,63 +1811,77 @@ def test_watch_nonzero_rc_is_probe_insufficient_train(tmp_path):
     assert not attempts.exists()
 
 
-def test_watch_crash_without_rc_relaunches_then_finalizes(tmp_path):
-    """A dead group with no rc is a crash scene: the attempt log is archived,
-    partial ckpts wiped, the wrapper re-launched (from scratch), the claim
-    re-adopted — and the fresh run terminalizes through the real chain."""
+def test_watch_crash_without_rc_is_terminal_probe_insufficient(tmp_path):
+    """v7 crash row: a group dying WITHOUT an rc file is TERMINAL — stage
+    failed, outcome probe_insufficient (stage "crash"), the crash
+    attribution + log paths disclosed in watchdog.log, the card released.
+    (The v6 relaunch machinery is deleted: a crash closes the variant
+    honestly instead of silently retraining from scratch.)"""
     art = _watch_ws(tmp_path, epochs=5)                # no log, no rc yet
     vd = art / "variants" / "r1-01"
     dead = _dead_pid()
     (vd / "train" / "train.pid").write_text(f"{dead}\n", encoding="utf-8")
     (vd / "train" / "train.log").write_text(
         _EPOCH_LINE.format(e=1, m="0.85") + "\n", encoding="utf-8")
-    (vd / "metrics" / "metrics.jsonl").write_text(
-        json.dumps({"epoch": 1, "metric": 0.85}) + "\n", encoding="utf-8")
-    # the eval products for the fresh attempt (the wipe glob only matches
-    # *.pt, the .metric sidecars survive)
-    _write_final_metric_ckpts(art, 5, "final metric: 0.88\n")
 
-    relaunched = _watch_run(art, "--once")
-    assert relaunched.returncode == 0, relaunched.stderr
-    status = _train_status(art)
-    assert status["stage"] == "training" and status["epoch"] == 0   # reset
-    assert (vd / "train" / ".train_attempts").read_text(
-        encoding="utf-8").strip() == "1"
-    assert (vd / "train" / "train.crash1.log").is_file()           # archived
-    assert not (vd / "metrics" / "metrics.jsonl").exists()  # stale curve dropped
-    fresh_pid = int((vd / "train" / "train.pid").read_text(
-        encoding="utf-8").strip())
-    assert fresh_pid != dead and fresh_pid > 0
-    lock = json.loads((art / "devices" / "0.lock").read_text(encoding="utf-8"))
-    assert lock["vid"] == "r1-01"                       # claim re-adopted
-
-    # the fresh (stub) training finishes on its own; the next cycle finalizes
-    rc_path = vd / "train" / "rc"
-    for _ in range(100):
-        if rc_path.is_file():
-            break
-        time.sleep(0.2)
-    assert rc_path.read_text(encoding="utf-8").strip() == "0"
-    finalized = _watch_run(art, "--once")
-    assert finalized.returncode == 0, finalized.stderr
-    assert _train_status(art)["stage"] == "done"
-    assert _latest_row(art)["outcome"] == "success"
-
-
-def test_watch_crash_relaunch_budget_exhausted_is_probe_insufficient(tmp_path):
-    art = _watch_ws(tmp_path, epochs=5)
-    vd = art / "variants" / "r1-01"
-    (vd / "train" / "train.pid").write_text(f"{_dead_pid()}\n", encoding="utf-8")
-    (vd / "train" / ".train_attempts").write_text("3\n", encoding="utf-8")
     proc = _watch_run(art, "--once")
     assert proc.returncode == 0, proc.stderr
-    assert _train_status(art)["stage"] == "failed"
+    status = _train_status(art)
+    assert status["stage"] == "failed"
     row = _latest_row(art)
     assert row["outcome"] == "probe_insufficient"
-    assert row["stage"] == "relaunch_exhausted"
-    assert row["max_retries_hit"] is True
-    assert not (art / "devices" / "0.lock").exists()
+    assert row["stage"] == "crash"
+    assert row["max_retries_hit"] is False
+    assert not (art / "devices" / "0.lock").exists()    # the card is freed
+    # the crash attribution + log paths are DISCLOSED in watchdog.log
+    log = (vd / "watchdog.log").read_text(encoding="utf-8")
+    assert "stage=crash" in log and "train.log" in log
     assert _watch_shard(art)["status"] == "probe_insufficient"
+
+
+def test_watch_sigterm_kills_group_writes_terminal_releases_card(tmp_path):
+    """v7 SIGTERM row: the platform tearing the run down stops the training
+    honestly — attribution-checked kill of the training group, terminal
+    probe_insufficient (stage sigterm), card released, never an orphan."""
+    art = _watch_ws(tmp_path, epochs=20, log_epochs=range(1, 3),
+                    candidate="0.5")
+    vd = art / "variants" / "r1-01"
+    sleeper = _attributed_session_sleeper("train.rendered.sh")
+    (vd / "train" / "train.pid").write_text(f"{sleeper.pid}\n",
+                                            encoding="utf-8")
+    env = dict(os.environ)
+    env["ORCA_ARTIFACTS_DIR"] = str(art)
+    guardian = subprocess.Popen(
+        [sys.executable, str(_WATCH_PY), "--vid", "r1-01", "--device", "0"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+    try:
+        # wait for the guardian's startup + first cycle (watchdog.log)
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            log = vd / "watchdog.log"
+            if log.is_file() and "watchdog alive" in log.read_text(
+                    encoding="utf-8"):
+                break
+            time.sleep(0.2)
+        guardian.send_signal(signal.SIGTERM)
+        sleeper.wait(timeout=20)                       # the group was killed
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if guardian.poll() is not None:
+                break
+            time.sleep(0.2)
+        assert guardian.poll() is not None
+        status = _train_status(art)
+        assert status["stage"] == "killed"
+        row = _latest_row(art)
+        assert row["outcome"] == "probe_insufficient"
+        assert row["stage"] == "sigterm"
+        assert not (art / "devices" / "0.lock").exists()
+        log = (vd / "watchdog.log").read_text(encoding="utf-8")
+        assert "stage=sigterm" in log
+    finally:
+        if guardian.poll() is None:
+            guardian.kill()
 
 
 def test_watch_reentry_terminal_with_no_lock_is_a_clean_replay(tmp_path):
@@ -2014,9 +1912,9 @@ def test_watch_within_budget_epoch_resets_the_streak(tmp_path):
     art = _watch_ws(tmp_path, epochs=30)               # warmup = ceil(3) = 3
     td = art / "variants" / "r1-01" / "train"
     over, within = "0.5", "0.89"                       # baseline 0.9 budget 0.05
-    curve = [(e, over) for e in range(4, 13)]          # nine over budget
-    curve.append((13, within))                         # gap 0.01 -> RESET
-    curve += [(e, over) for e in range(14, 23)]        # nine more over
+    curve = [(e, over) for e in range(4, 12)]          # eight over budget
+    curve.append((12, within))                         # gap 0.01 -> RESET
+    curve += [(e, over) for e in range(13, 21)]        # eight more over
     (td / "train.log").write_text(
         _epoch_log_lines([(e, "0.9") for e in (1, 2, 3)])
         + _epoch_log_lines(curve), encoding="utf-8")
@@ -2026,8 +1924,8 @@ def test_watch_within_budget_epoch_resets_the_streak(tmp_path):
     assert proc.returncode == 0, proc.stderr
     status = _train_status(art)
     assert status["stage"] == "training"
-    assert status["epoch"] == 22
-    assert status["over_budget_streak"] == 9           # reset at epoch 13
+    assert status["epoch"] == 20
+    assert status["over_budget_streak"] == 8           # reset at epoch 12
     assert status["gap"] == pytest.approx(0.4)
     assert sleeper.poll() is None
     assert _latest_row(art).get("outcome") == "latency_pass"
@@ -2037,7 +1935,7 @@ def test_watch_lower_better_direction_early_stops(tmp_path):
     """lower_better is a user-configurable contract: the normalized loss
     flips (candidate ABOVE the baseline is the bad side) and the same
     streak/kill machinery applies."""
-    art = _watch_ws(tmp_path, epochs=20, log_epochs=range(1, 13),
+    art = _watch_ws(tmp_path, epochs=20, log_epochs=range(1, 9),
                     candidate="0.9", baseline="0.5",
                     direction="lower_better")
     sleeper = _attributed_session_sleeper("train.rendered.sh")
@@ -2058,13 +1956,13 @@ def test_watch_extract_failure_cycle_keeps_recorded_progress(tmp_path):
     """A transient curve-parse failure must not silently reset the streak
     (that would postpone the early stop by whole budget segments): the
     failed cycle rewrites the status with the recorded progress kept."""
-    art = _watch_ws(tmp_path, epochs=20, log_epochs=range(1, 12))  # streak 9
+    art = _watch_ws(tmp_path, epochs=20, log_epochs=range(1, 8))   # streak 5
     td = art / "variants" / "r1-01" / "train"
     sleeper = _attributed_session_sleeper("train.rendered.sh")
     (td / "train.pid").write_text(f"{sleeper.pid}\n", encoding="utf-8")
     first = _watch_run(art, "--once")
     assert first.returncode == 0, first.stderr
-    assert _train_status(art)["over_budget_streak"] == 9
+    assert _train_status(art)["over_budget_streak"] == 5
 
     # the log turns unparseable mid-run (torn tail, wrong pattern, ...)
     (td / "train.log").write_text("torn mid-run garbage\n", encoding="utf-8")
@@ -2073,7 +1971,7 @@ def test_watch_extract_failure_cycle_keeps_recorded_progress(tmp_path):
     assert second.returncode == 0, second.stderr
     status = _train_status(art)
     assert status["stage"] == "training"
-    assert status["epoch"] == 11 and status["over_budget_streak"] == 9  # kept
+    assert status["epoch"] == 7 and status["over_budget_streak"] == 5  # kept
     assert sleeper.poll() is None
 
 
@@ -2087,9 +1985,18 @@ def test_watch_waiting_resumes_when_anchor_lands_and_bounds_on_dead_baseline(tmp
     _write_final_metric_ckpts(art, 5, "final metric: 0.88\n")
     anchor = art / "baseline" / "baseline_full_acc.json"
     anchor.unlink()
+    # a recorded progress row exists (the B12 regression guard): the WAITING
+    # rewrite must PRESERVE the last known epoch/metric/gap, not null them
+    (art / "variants" / "r1-01" / "train_status.json").write_text(json.dumps(
+        {"vid": "r1-01", "stage": "training", "epoch": 5, "metric": 0.85,
+         "gap": 0.05, "over_budget_streak": 0, "stopped_at_epoch": None,
+         "device": 0, "ts": "2026-09-01T00:00:00+00:00"}), encoding="utf-8")
     waiting = _watch_run(art, "--once")
     assert waiting.returncode == 0, waiting.stderr
-    assert _train_status(art)["stage"] == "waiting"
+    wstatus = _train_status(art)
+    assert wstatus["stage"] == "waiting"
+    assert wstatus["epoch"] == 5 and wstatus["metric"] == 0.85   # kept (B12)
+    assert wstatus["gap"] == pytest.approx(0.05)
 
     # the anchor lands -> the next cycle runs the full final chain
     anchor.write_text(json.dumps(
@@ -2224,17 +2131,18 @@ def test_scenario_two_cards_two_variants_parallel_block_release(tmp_path):
     its card and the next claim takes THAT card."""
     art = tmp_path / "ws"
     _write_train_device(art, count=2)
-    v1 = json.loads(_alloc(art, "acquire", "--vid", "r1-01").stdout)
-    v2 = json.loads(_alloc(art, "acquire", "--vid", "r2-01").stdout)
+    v1 = json.loads(_alloc(art, "claim", "--vid", "r1-01", "--idx", "0").stdout)
+    v2 = json.loads(_alloc(art, "claim", "--vid", "r2-01", "--idx", "1").stdout)
     assert v1["ok"] is True and v1["idx"] == 0
     assert v2["ok"] is True and v2["idx"] == 1     # parallel, both held
 
-    busy = json.loads(_alloc(art, "acquire", "--vid", "r3-01").stdout)
-    assert busy["ok"] is False                     # the park condition
+    # the park condition: the agent-chosen idx already locked (holder named)
+    busy = json.loads(_alloc(art, "claim", "--vid", "r3-01", "--idx", "0").stdout)
+    assert busy["ok"] is False and "r1-01" in busy["reason"]
 
     rel = _alloc(art, "release", "--idx", str(v1["idx"]))
     assert rel.returncode == 0, rel.stderr         # r1-01 reached a terminal
-    v3 = json.loads(_alloc(art, "acquire", "--vid", "r3-01").stdout)
+    v3 = json.loads(_alloc(art, "claim", "--vid", "r3-01", "--idx", "0").stdout)
     assert v3["ok"] is True and v3["idx"] == 0     # the freed card
     held = sorted(json.loads((art / "devices" / f"{i}.lock").read_text(
         encoding="utf-8"))["vid"] for i in (0, 1))
@@ -2260,7 +2168,7 @@ def test_scenario_streaming_early_stop_end_to_end(tmp_path):
     assert sleeper.poll() is None
 
     with open(vd / "train" / "train.log", "a", encoding="utf-8") as fh:
-        for e in range(3, 13):                     # judged epochs -> streak 10
+        for e in range(3, 9):                      # judged -> streak 6 (E=20)
             fh.write(_EPOCH_LINE.format(e=e, m="0.5") + "\n")
     kill = _watch_run(art, "--once")
     assert kill.returncode == 0, kill.stderr
@@ -2268,11 +2176,11 @@ def test_scenario_streaming_early_stop_end_to_end(tmp_path):
 
     status = _train_status(art)
     assert status["stage"] == "killed"
-    assert status["over_budget_streak"] == 10
-    assert status["stopped_at_epoch"] == 12
+    assert status["over_budget_streak"] == 6
+    assert status["stopped_at_epoch"] == 8
     row = _latest_row(art)
     assert row["outcome"] == "accuracy_fail"
-    assert row["stopped_at_epoch"] == 12 and row["gap"] == pytest.approx(0.4)
+    assert row["stopped_at_epoch"] == 8 and row["gap"] == pytest.approx(0.4)
     assert not (art / "devices" / "0.lock").exists()
     assert (vd / ".rules_pending").is_file()
 
