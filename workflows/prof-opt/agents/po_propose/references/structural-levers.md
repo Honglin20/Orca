@@ -1,11 +1,17 @@
 # Structural Levers Reference
 
-Catalog of structure-level model changes, used as BACKGROUND PRIORS by the
-proposal stage. Every entry names: the structural template (before / after),
-the hardware evidence that makes it applicable, the accuracy risk, and public
-references. The evidence you actually reason from is the current run's
-bottleneck analysis + business-logic document — this catalog tells you what
-kinds of structure changes exist, not which one to pick this round.
+An on-demand DICTIONARY of structure-level model changes, indexed by
+trigger op — consult the entries your selected bottleneck's trigger ops
+name; do NOT read this cover-to-cover every round. The evidence you
+actually reason from is the current run's mfu bottleneck report
+(`base/profile/mfu_bottleneck_report.md` — root causes first) plus the
+mechanical report (`base/bottleneck_report.json`: `hot_patterns`,
+`cost_table`, `critical_path`, `pipeline_breakdown`) and the
+business-logic document; this catalog tells you what kinds of structure
+changes exist, not which one to pick this round. Structural priors live
+HERE and only here — the mfu-analyzer's root-cause vocabulary (DMA 搬运 /
+小算子碎片 / 子图串行化 / 算力利用率) is diagnostic language, and each entry
+below is annotated with the root-cause types it typically addresses.
 
 Training paradigm note: every variant trains FROM SCRATCH at a fixed seed —
 no weight is ever inherited, so a change may freely alter the parameter set.
@@ -18,21 +24,19 @@ the training entry is contract-templated and physically outside the shadow
 closure an edit can reach, and a hyperparameter "change" produces an empty
 op delta that the strictly-negative admission gate rejects anyway.
 
-This catalog covers six evidence-gated lever families — the three
-conservative ones (activation replacement, normalization structure,
-zero-parameter relocation) plus capacity redistribution, projection
-factorization, and attention/score-path restructuring.
+Accuracy-risk grades (one vocabulary, everywhere): `low` (mathematically
+identical or recovered almost always), `medium` (usually recovered by a
+fresh training), `high` (may need the full training budget or may not
+recover). The proposal's `predicted_acc_impact` uses the same three values.
 
-## How to use this reference
+## How to use an entry
 
-1. Read the current bottleneck analysis (`base/bottleneck_analysis.json` —
-   the semantic selection) and the mechanical report behind it
-   (`base/bottleneck_report.json`): `hot_patterns`, `cost_table`,
-   `critical_path`, `pipeline_breakdown`.
-2. Match selected bottlenecks to entries below. An entry applies when its
-   trigger ops appear in the bottleneck's pattern with a meaningful share,
-   AND the business-logic document (`baseline/business_logic.md`) confirms
-   the surrounding semantics allow the change.
+1. From the mfu report's 瓶颈根因 section, name the root cause and the ops
+   it implicates; look those ops up in the index below.
+2. An entry applies when its trigger ops appear in the implicated pattern
+   with a meaningful share, AND the business-logic document
+   (`baseline/business_logic.md`) confirms the surrounding semantics allow
+   the change.
 3. Open the current shadow model source under `shadow/`, locate the module
    sites behind the listed onnx node names, and count how many sites the
    change would touch.
@@ -41,14 +45,12 @@ factorization, and attention/score-path restructuring.
    (`base/model.onnx`) — export decomposition varies with framework
    version; the actual graph is the truth. Op delta = (per-site removal +
    per-site insertion) x site count.
-5. Feed the op delta to the cycle predictor with the affected sites' shape
-   classes so the prediction prices the actual sites (from
-   `base/profile/taskgraph.json`: element count = product of the site row's
-   `output_dimensions`, bucketed by the cost_table's shape-class labels).
-   Only strictly negative predictions are admissible; when the inserted op
-   type is absent from the cost table, pass an explicit per-op cost override
-   derived from the closest same-class row and record that derivation in
-   `prediction_basis`.
+5. Feed the op delta + the affected taskgraph operator NAMES to the cycle
+   predictor (it derives each site's shape class and critical-path weight
+   itself). Only strictly negative predictions are admissible; when the
+   inserted op type is absent from the cost table, pass an explicit per-op
+   cost override derived from the closest same-class row and record that
+   derivation in `prediction_basis`.
 
 **Count from the actual graph — pinned discipline**: modern exporters at
 opset 17 frequently FUSE a decomposition chain into ONE node
@@ -58,22 +60,29 @@ carries BOTH trigger forms — the decomposed chain AND the fused single
 operator — and the op delta ALWAYS counts the operators the actual exported
 graph shows.
 
-Accuracy-risk grades: `low` (mathematically identical or recovered almost
-always), `medium` (usually recovered by a fresh training), `high` (may need
-the full training budget or may not recover).
+## Index by trigger op
+
+| Trigger op(s) in the profile | Root-cause affinity | Entries |
+|---|---|---|
+| `Erf` + `Div`/`Add`/`Mul` chains, `Tanh` chains, `Sigmoid`+`Mul`, fused `Gelu`/`Erf` | 算力利用率 (transcendental ops at a low per-element rate) | A1-A5 |
+| `LayerNormalization` (fused) or `ReduceMean`/`Sub`/`Pow`/`Sqrt`/`Div` chains, `ReduceL2` norm chains | 算力利用率 / 子图串行化 (reduction + division barriers mid-path) | N1-N3 |
+| `Transpose`/`Reshape`/`Cast`/`Concat`/`Split` pairs, small-shape elementwise swarms | 小算子碎片 / DMA 搬运 | C2 |
+| `Softmax` (fused or `ReduceMax`+`Sub`+`Exp`+`ReduceSum`+`Div`), score `MatMul`/`Transpose` clusters | 算子碎片 / 子图串行化 | C1, S1 |
+| `MatMul`/`Gemm` in a latency-dominant shape class | 算力利用率 (shape pricing) | D1, D2, F1, F2 |
+| Long dependent chains of cheap elementwise/reduction ops | 子图串行化 | S2 |
 
 ---
 
 ## Lever 1 — Activation replacement
 
 Activations are parameter-free: replacing one never changes any parameter.
-
-Hardware rationale shared by all entries: transcendental functions (erf,
-tanh, sigmoid-family, exp, sqrt, division) execute at a low per-element rate
-on most hardware, while simple elementwise ops (compare, multiply, add) run
+Shared hardware rationale: transcendental functions (erf, tanh,
+sigmoid-family, exp, sqrt, division) execute at a low per-element rate on
+most hardware, while simple elementwise ops (compare, multiply, add) run
 several times faster per element. When activation clusters sit on the
 critical path, swapping them replaces transcendental work with cheap
-elementwise work and shortens the dependency chain per site.
+elementwise work and shortens the dependency chain per site. (Typically
+addresses 算力利用率.)
 
 **Fused-form note**: `Relu`, `Hardswish` and `Sigmoid` already export as
 single operators. When the exporter emits a fused activation node (e.g. one
@@ -85,9 +94,8 @@ graph shows.
 
 - **Template**: `self.act = nn.GELU()` -> `self.act = nn.ReLU()` (or
   `F.gelu(x)` -> `F.relu(x)`), applied at every listed site.
-- **Evidence**: hot pattern whose ops are the GELU decomposition — the erf
-  form exports as `Erf` plus a small `Div`/`Add`/`Mul` chain; the tanh
-  approximation as `Tanh` plus `Mul`/`Add`.
+- **Trigger ops**: the GELU decomposition — erf form `Erf` + `Div`/`Add`/
+  `Mul` chain; tanh form `Tanh` + `Mul`/`Add` chain; or fused `Gelu`/`Erf`.
 - **Export pattern per site (typical, opset 17)**: erf form removes about
   `{Erf: 1, Div: 1, Add: 1, Mul: 2}`, inserts `{Relu: 1}`; tanh form
   removes about `{Tanh: 1, Mul: 3, Add: 1}`, inserts `{Relu: 1}`.
@@ -101,7 +109,7 @@ graph shows.
 
 - **Template**: `nn.GELU()` -> `nn.ReLU() ** 2` (equivalently
   `F.relu(x).square()` — keep one canonical form in the edit).
-- **Evidence**: same GELU clusters as A1; prefer when a non-monotonic bump
+- **Trigger ops**: same GELU clusters as A1; prefer when a non-monotonic bump
   near the negative axis matters for the model family (grade the risk
   slightly above A1).
 - **Export pattern per site**: as A1 plus one extra `Mul` on the insert
@@ -114,8 +122,8 @@ graph shows.
 ### A3. GELU / SiLU -> hard-swish
 
 - **Template**: `nn.GELU()` / `nn.SiLU()` -> `nn.Hardswish()`.
-- **Evidence**: GELU or SiLU (`Sigmoid` + `Mul` decomposition) clusters on
-  the critical path. `HardSwish` may export as one op or decompose into
+- **Trigger ops**: GELU or SiLU (`Sigmoid` + `Mul` decomposition) clusters
+  on the critical path. `HardSwish` may export as one op or decompose into
   `Mul + Add + Relu + Mul` — use whichever form the export produces.
 - **Accuracy risk**: medium.
 - **References**: MobileNetV3 (Howard et al., 2019).
@@ -124,7 +132,7 @@ graph shows.
 
 - **Template**: `nn.SiLU()` -> `nn.ReLU()` (also covers `x * sigmoid(x)`
   functional forms).
-- **Evidence**: `Sigmoid` + `Mul` clusters at activation positions.
+- **Trigger ops**: `Sigmoid` + `Mul` clusters at activation positions.
 - **Export pattern per site**: removes about `{Sigmoid: 1, Mul: 1}`,
   inserts `{Relu: 1}`.
 - **Accuracy risk**: medium.
@@ -135,7 +143,7 @@ graph shows.
 ### A5. Hidden activation -> sigmoid
 
 - **Template**: any hidden activation -> `nn.Sigmoid()`.
-- **Evidence**: only when A1-A4 are inapplicable and the cost table shows
+- **Trigger ops**: only when A1-A4 are inapplicable and the cost table shows
   `Sigmoid` meaningfully cheaper than the current op mix.
 - **Accuracy risk**: high. Hidden-layer sigmoid use is mostly historical;
   propose only when nothing cheaper remains.
@@ -149,28 +157,26 @@ graph shows.
 Entries here may add, remove, or reshape parameters — the from-scratch
 training paradigm makes any parameter-set change viable; the op delta
 (counted from the actual exported graph) is the only declaration that must
-match reality.
-
-Hardware rationale shared by all entries: a normalization layer exports as a
-reduction chain (`ReduceMean`/`ReduceSum` + `Pow` + `Sqrt` + `Div`) plus
-parameterized elementwise ops, and sits mid-critical-path as a full
-dependency barrier. Removing or cheapening normalization removes reduction +
-division work and shortens the chain.
+match reality. Shared hardware rationale: a normalization layer exports as
+a reduction chain plus parameterized elementwise ops and sits
+mid-critical-path as a full dependency barrier; removing or cheapening it
+removes reduction + division work and shortens the chain. (Typically
+addresses 算力利用率; mid-path barriers also feed 子图串行化.)
 
 ### N1. LayerNorm -> RMSNorm
 
 - **Template**: `nn.LayerNorm(d)` -> RMS normalization (mean subtraction and
   bias removed; scale kept): `x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True)
   + eps) * weight`.
-- **Evidence**: LayerNorm clusters. Fused export form (the common opset-17
-  shape): one `LayerNormalization` node per site; decomposed form:
+- **Trigger ops**: LayerNorm clusters. Fused export form (the common
+  opset-17 shape): one `LayerNormalization` node per site; decomposed form:
   `ReduceMean` x2, `Sub`, `Pow`, `Sqrt`, `Div`, `Mul`, `Add`.
 - **Export pattern per site (typical)**: decomposed form removes roughly
   `{ReduceMean: 2, Sub: 1, Add: 1}` keeping `{Pow: 1, ReduceMean: 1, Sqrt:
   1, Div: 1, Mul: 2}`; fused form removes `{LayerNormalization: 1}` and
   inserts the RMSNorm decomposition — count from the actual graph.
-- **Accuracy risk**: medium-low; RMSNorm is the standard normalization in
-  current open language models.
+- **Accuracy risk**: medium (low end); RMSNorm is the standard normalization
+  in current open language models.
 - **References**: RMSNorm (Zhang & Sennrich, 2019); LLaMA / T5 / Gemma.
 
 ### N2. Remove redundant normalization
@@ -178,7 +184,7 @@ division work and shortens the chain.
 - **Template**: delete a normalization module that is provably redundant —
   immediately followed by another normalization of the same tensor, or on a
   branch whose result is only consumed in scale-invariant ways.
-- **Evidence**: repeated `ReduceL2`/`Sqrt`/`Div` (or `ReduceSum` + `Pow`)
+- **Trigger ops**: repeated `ReduceL2`/`Sqrt`/`Div` (or `ReduceSum` + `Pow`)
   rows chained on the critical path — common in similarity / retrieval heads
   and QK-normalized attention. Verify the redundancy actually holds in the
   source; if the per-sample norm feeds magnitude-sensitive computation, the
@@ -196,12 +202,12 @@ division work and shortens the chain.
   REMOVED entirely (`linear(normalize(x))` becomes `linear(x)`). The
   from-scratch retraining re-learns the adjacent weights; the norm's own
   parameters disappear.
-- **Evidence**: `LayerNormalization` clusters at opset 17 (the fused form of
-  the same structure also applies in decomposed form).
+- **Trigger ops**: `LayerNormalization` clusters at opset 17 (the fused form
+  of the same structure also applies in decomposed form).
 - **Export pattern per site (fused form)**: removes
   `{LayerNormalization: 1}`, inserts nothing.
 - **Accuracy risk**: medium — rank after the exact-identity entries (C2,
-  and N2 when the redundancy is exact); the probe stage exists to judge
+  and N2 when the redundancy is exact); the training stage exists to judge
   exactly this kind of change.
 - **References**: normalization-free training literature (NFNet, Brock et
   al., 2021).
@@ -215,9 +221,10 @@ division work and shortens the chain.
 - **Template**: `softmax(Q @ K^T / sqrt(d))` -> `relu(Q @ K^T / sqrt(d))`
   (optionally a parameter-free constant row rescale; never add learned
   parameters).
-- **Evidence**: `Softmax` clusters at attention positions. Fused form: ONE
-  `Softmax` node per site; decomposed form: max-reduction + `Sub` + `Exp` +
-  sum-reduction + `Div`.
+- **Trigger ops**: `Softmax` clusters at attention positions (fused: ONE
+  `Softmax` node per site; decomposed: max-reduction + `Sub` + `Exp` +
+  sum-reduction + `Div`). Root-cause affinity: 算子碎片 / 子图串行化 of the
+  score path.
 - **Export pattern per site**: fused form removes `{Softmax: 1}`, inserts
   `{Relu: 1}`; decomposed form removes about `{ReduceMax: 1, Sub: 1, Exp:
   1, ReduceSum: 1, Div: 1}`, inserts `{Relu: 1}`.
@@ -232,8 +239,10 @@ division work and shortens the chain.
   immediately followed by its inverse, a dtype cast round-trip, a
   concatenation immediately split back apart. Wire the input straight to the
   consumer.
-- **Evidence**: `Transpose`/`Reshape`/`Cast`/`Concat`/`Split` op pairs on
+- **Trigger ops**: `Transpose`/`Reshape`/`Cast`/`Concat`/`Split` op pairs on
   the critical path whose output shape equals the original input shape.
+  Root-cause affinity: 小算子碎片 / DMA 搬运 (each redundant pair is a real
+  data movement).
 - **Export pattern per site**: removes the pair's two ops, inserts nothing.
 - **Accuracy risk**: low — mathematically identical when the pair truly
   cancels; verify shapes before declaring it.
@@ -248,7 +257,8 @@ division work and shortens the chain.
 These entries change width/depth while preserving the model's input/output
 contract. Justified only when profiling shows a matrix-multiply shape class
 is latency-dominant and the target hardware prices tall/narrow or
-short/wide shapes inefficiently.
+short/wide shapes inefficiently. (Typically addresses 算力利用率 in
+shape pricing.)
 
 ### D1. Deeper-narrower block
 
@@ -256,10 +266,10 @@ short/wide shapes inefficiently.
   with narrower blocks of near-equal total capacity (e.g. `Linear(d, 4d) ->
   Linear(4d, d)` becomes two `d -> 2d -> d` residual sub-blocks) when the
   profile shows the smaller shape class is materially cheaper per MAC.
-- **Evidence**: hot `MatMul`/`Gemm` rows in a poorly priced shape class plus
-  a cost-table ratio showing the narrower decomposition lowers cycles.
-- **Accuracy expectation**: `small_negative` with `medium` confidence for a
-  near-capacity redistribution; `unknown` when capacity changes materially.
+- **Trigger ops**: hot `MatMul`/`Gemm` rows in a poorly priced shape class
+  plus a cost-table ratio showing the narrower decomposition lowers cycles.
+- **Accuracy risk**: medium for a near-capacity redistribution; high when
+  capacity changes materially.
 - **References**: MobileNet width multipliers (Howard, 2017); EfficientNet
   compound scaling (Tan & Le, 2019).
 
@@ -268,9 +278,10 @@ short/wide shapes inefficiently.
 - **Template**: collapse repeated shallow blocks into one wider block when
   per-block movement/reduction overhead dominates and the fused shape stays
   hardware-efficient.
-- **Evidence**: repeated subgraph overhead, high movement/reduction share,
-  and an actual graph pattern proving consumers allow fusion.
-- **Accuracy expectation**: `small_negative`, `medium` confidence.
+- **Trigger ops**: repeated subgraph overhead, high movement/reduction
+  share, and an actual graph pattern proving consumers allow fusion.
+  Root-cause affinity: 小算子碎片 / 子图串行化 of repeated blocks.
+- **Accuracy risk**: medium.
 - **References**: mobile CNN/transformer designs: removing sequential
   overhead helps only when representational width is retained.
 
@@ -282,21 +293,21 @@ short/wide shapes inefficiently.
 
 - **Template**: `Linear(a, b)` -> `Linear(a, r)` + `Linear(r, b)` with `r`
   from a measured shape-class break-even, not guesswork.
-- **Evidence**: the original shape class is latency-dominant and the cost
+- **Trigger ops**: the original shape class is latency-dominant and the cost
   table proves the two smaller multiplications plus the intermediate
   movement are cheaper. Do not propose when movement cancels the saving.
-- **Accuracy expectation**: `small_negative` at mild rank reduction,
-  `medium` confidence; `unknown` when `r` removes a third or more of the
-  original rank.
+- **Accuracy risk**: medium at mild rank reduction; high when `r` removes a
+  third or more of the original rank.
 - **References**: ALBERT parameter factorization (Lan et al., 2020).
 
 ### F2. Shared projection
 
 - **Template**: reuse one projection for structurally equivalent branches
   the business-logic document identifies as interchangeable.
-- **Evidence**: multiple equivalent `MatMul` clusters with identical input
+- **Trigger ops**: multiple equivalent `MatMul` clusters with identical input
   shape and no semantics requiring independent parameters.
-- **Accuracy expectation**: `unknown`, `medium` confidence.
+- **Accuracy risk**: medium (higher than F1 on typical tasks — verify the
+  interchangeability claim against the business-logic document).
 - **References**: ALBERT cross-layer sharing (Lan et al., 2020).
 
 ---
@@ -309,10 +320,11 @@ short/wide shapes inefficiently.
   business logic permits an approximation and profiling proves `Softmax`
   plus score matmuls dominate. Allowed forms: low-rank score projection or a
   mathematically stated efficient-attention replacement.
-- **Evidence**: `Softmax`, `Transpose`, and score `MatMul` dominating the
-  critical path; the replacement exports to supported operators.
-- **Accuracy expectation**: `unknown` with `low` confidence; require a
-  probe win before promotion.
+- **Trigger ops**: `Softmax`, `Transpose`, and score `MatMul` dominating the
+  critical path (子图串行化 of the score path); the replacement exports to
+  supported operators.
+- **Accuracy risk**: high; require a measured latency win before the
+  training pipeline invests in it.
 - **References**: Performer FAVOR+ (Choromanski et al., 2020), linear
   transformers (Katharopoulos et al., 2020), FlashAttention's IO-aware
   formulation (Dao et al., 2022).
@@ -322,41 +334,9 @@ short/wide shapes inefficiently.
 - **Template**: rewrite adjacent elementwise/reduction chains as one
   model-level operation when export emits the fused operator and no semantic
   intermediate is externally consumed.
-- **Evidence**: long dependent chains of cheap operators with high combined
-  share and scheduling delay.
-- **Accuracy expectation**: `none` when mathematically identical; otherwise
-  `unknown`.
+- **Trigger ops**: long dependent chains of cheap operators with high
+  combined share and scheduling delay (子图串行化 / 小算子碎片).
+- **Accuracy risk**: low when mathematically identical; otherwise medium —
+  state which.
 - **References**: operator fusion and IO-aware execution are standard
   latency techniques; the exported ONNX graph is the final truth.
-
----
-
-## Proposal admission checklist (mechanical, all must hold)
-
-1. `predicted_delta_cycles < 0` — strictly negative, produced by the cycle
-   predictor script, never by mental arithmetic.
-2. Every `edited_files` entry is a path inside the current shadow tree.
-3. The op delta is consistent with the change description: per-site pattern
-   x site count, verified against the actual base onnx.
-4. The change signature is built canonically by the signature builder —
-   never hand-assembled.
-5. Accuracy-risk fields (`expected_accuracy_impact`,
-   `accuracy_confidence`, `accuracy_evidence`) and `sota_reference` are
-   present.
-
-## Accuracy and Pareto ranking contract
-
-Every proposal carries: `expected_accuracy_impact` (`none` /
-`small_negative` / `large_negative` / `unknown`), `accuracy_confidence`
-(`low` / `medium` / `high`), `accuracy_evidence` (ledger rows, lever priors,
-same-run curve evidence), `sota_reference` (concrete references).
-
-Discard dominated candidates: another candidate with no worse expected
-accuracy risk and a larger predicted latency reduction dominates. Rank
-remaining Pareto candidates by measured evidence from the experiment
-ledger, then by larger predicted reduction and lower accuracy risk. Keep at
-most one aggressive `unknown` / `low-confidence` candidate per round when a
-conservative candidate is available.
-
-Never treat an SOTA reference as proof of accuracy: profiling is the latency
-truth, training is the accuracy truth.

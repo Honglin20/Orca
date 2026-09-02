@@ -5,9 +5,6 @@ Thin wrapper over history_lib.append_implemented (and, for a broken
 implementation, the append_outcome row that follows it) so the node prompt
 stays a single invocation with no import-path knowledge. The field set and
 its validation stay in history_lib — the only write path for history.jsonl.
-
-Nullable flags accept ``null``/``none``: a pinned "mechanism absent" value,
-never an unset one (same semantics as the dedup CLI in history_lib).
 """
 from __future__ import annotations
 
@@ -17,7 +14,22 @@ import os
 import sys
 
 from history_lib import append_implemented, append_outcome
-from history_lib import JOINT_RETRY_OUTCOMES, nullable_int, nullable_value
+from history_lib import JOINT_RETRY_OUTCOMES
+
+
+def nullable_value(raw: str):
+    """CLI-facing nullable value: ``null``/``none`` -> None, else int/float/
+    raw string (the --parent-vid flag's parser)."""
+    if raw.strip().lower() in ("null", "none"):
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    try:
+        return float(raw)
+    except ValueError:
+        return raw
 
 
 def main() -> int:
@@ -33,11 +45,7 @@ def main() -> int:
                     help="lineage parent vid, or null (the base never advances)")
     ap.add_argument("--change-sig", required=True)
     ap.add_argument("--probe-epochs", type=int, required=True,
-                    help="contracts.json proxy_budget.epochs")
-    ap.add_argument("--probe-max-steps", type=nullable_int, required=True,
-                    help="proxy_budget.max_steps, or null")
-    ap.add_argument("--probe-data-value", type=nullable_value, required=True,
-                    help="proxy_budget.data_value, or null")
+                    help="contracts.json proxy_budget.epochs (epoch-only, v7)")
     ap.add_argument("--target-modules", required=True,
                     help="JSON list from declaration.target_modules")
     ap.add_argument("--predicted-delta-cycles", type=int, required=True)
@@ -64,8 +72,7 @@ def main() -> int:
             ns.history, ns.vid,
             round=ns.round, seq=ns.seq, parent_vid=ns.parent_vid,
             change_sig=ns.change_sig,
-            probe_epochs=ns.probe_epochs, probe_max_steps=ns.probe_max_steps,
-            probe_data_value=ns.probe_data_value,
+            probe_epochs=ns.probe_epochs,
             target_modules=modules,
             predicted_delta_cycles=ns.predicted_delta_cycles,
             base_at_proposal=base,

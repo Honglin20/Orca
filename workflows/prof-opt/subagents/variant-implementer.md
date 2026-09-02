@@ -27,10 +27,19 @@ The caller will provide:
    (vid, change_spec, edited_files, op_delta, change_sig, target_modules,
    predicted_delta_cycles, and the identity fields you must copy verbatim).
 3. **`<repair_directive>`**: empty on the first pass. On a repair pass it
-   names the failure to fix: `structural:<file-layer finding>` (your
-   declaration disagreed with the real diff) or
-   `latency:<verdict summary>` (the latency recheck rejected the variant —
-   read `variants/<vid>/verdict.json` and `rounds/<RRR>/verdicts.jsonl`).
+   names the failure to fix, as one of three prefixed forms:
+   - `structural:<file-layer finding>` — your declaration disagreed with
+     the real diff (read `variants/<vid>/declaration.json` against the
+     actual tree and reconcile the edit, never the declaration);
+   - `latency:<the FULL TEXT of the latest mfu report>` — the latency
+     recheck rejected the variant; the payload IS the variant's current
+     `variants/<vid>/profile/mfu_bottleneck_report.md` in full (its
+     瓶颈根因 section tells you where the cycles actually went);
+   - `analysis:<the quoted conflict>` — the soft-alignment judgment found
+     the variant breaks the documented I/O contract / a module's
+     documented role, or the assessment self-contradicts; fix the
+     STRUCTURE so the conflict disappears (the changed structure will be
+     re-assessed afterwards).
 
 ## Per-proposal procedure
 
@@ -109,6 +118,10 @@ your return value.
 - A repair pass that cannot fix the declared failure →
   report the terminal skip honestly with the remaining evidence; never
   declare DONE for an edit you could not verify.
+- An `analysis:` repair fixes the structure, never the paperwork: if the
+  quoted conflict describes what the code truly does, change the code so
+  the conflict no longer holds (or take the terminal-skip path); never
+  reword a declaration to dodge a semantic conflict.
 - Never weaken a declaration to match an accidental edit (edit the code to
   match the declaration, or take the mismatch path).
 

@@ -1,31 +1,32 @@
 #!/usr/bin/env python3
-"""Pre-return gate for po_propose (v6, SPEC §5.3).
+"""Pre-return gate for po_propose (v7, SPEC §5).
 
 Verifies the single-variant convergence loop closed its disk state before
 the node emits:
 
   1. proposals.json parses with `round == R` and holds EXACTLY ONE
-     proposal whose PREDICTED makespan (base makespan +
-     predicted_delta_cycles) is <= the frozen target_cycles (inclusive
-     boundary, same as the recheck gate). A zero-proposal round is legal
+     proposal whose `predicted_delta_cycles` is an int < 0 — the ONLY
+     admission hard gate left (v7 §5.2: whether the predicted makespan
+     reaches the frozen line is a calibration DISCLOSURE in the round
+     analysis, never a rejection here). A zero-proposal round is legal
      only with a non-empty `exhausted_rationale`.
-  2. The round's variant carries the three §4.1 analysis documents —
-     business_logic.md / information_analysis.md (variant mode: sentinel
-     first line, non-empty body, required section headings incl. the
-     conclusion section) and conformance.md (present, non-empty, records
-     both analyst sentinels).
-  3. The vid has its expected history row; a latency-passing vid has a
+  2. The round's variant carries `variants/<vid>/assessment.md` (the
+     variant-assessor subagent's product — sentinel first line, non-empty
+     body, the six required section headings including the conclusion
+     sub-section `### 被牺牲信息与预期精度代价`). The v6 two-document +
+     conformance.md bundle is deleted.
+  3. The analysis stamp uses the v7 key
+     `<vid>|<change_sig>|sha256(variants/<vid>/declaration.json)` — both
+     repair classes (latency / structural) rewrite declaration.json, so
+     the key changes with them and the mechanical re-entry guard holds.
+  4. The vid has its expected history row; a latency-passing vid has a
      `latency_pass` row, an eliminated vid its terminal/elimination
      outcome, and a latency_fail elimination also lands in
      rounds/<R>/direction.json `failed_sigs`.
-  4. variants/<vid>/repair_trace.json, when present, records
-     repair_count == len(attempts) and repair_count <= 5 (§5.2 — the
-     over-budget repair is intercepted here even if the recheck guard was
-     bypassed).
-  5. rounds/<R>/analysis.md exists, is non-empty, and carries the
-     `## latency` section — required on BOTH ending paths (reached the
-     line and latency_fail elimination; SPEC §5.1 Step6 "written every
-     round").
+  5. variants/<vid>/repair_trace.json, when present, records
+     repair_count == len(attempts) and repair_count <= 5.
+  6. rounds/<R>/analysis.md exists, is non-empty, and carries the
+     `## latency` section — required on BOTH ending paths.
 
 This is structural completeness only; proposal quality, verdicts, and the
 soft-alignment judgment ("does the variant still make sense vs the
@@ -34,21 +35,19 @@ baseline") are not re-judged here.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
 
-BL_SENTINEL = "[subagent:business-logic-analyst v1 BLA7K4]"
-INFO_SENTINEL = "[subagent:information-analyst v1 IXA3N7]"
-# variant-mode section contracts (§4.1): the last heading of each document is
-# its conclusion section — the node's mechanical Step2 gate checks the same
-# set, so the emit gate re-asserts it end-to-end.
-BUSINESS_HEADINGS = ("## 任务语义", "## 输入输出", "## 架构动机",
-                     "## 逐模块职责与物理意义", "## 训练目标与指标方向",
-                     "## 与基线差异")
-INFO_VARIANT_HEADINGS = ("## 信息核心", "## 近似与牺牲项",
-                         "## 被牺牲信息与预期精度代价")
-# §4.3 outcomes a round's single vid may legitimately end on at emit time
+VAS_SENTINEL = "[subagent:variant-assessor v1 VAS4K9]"
+# variant-assessor section contract (§5.3): the last heading of the
+# document is its conclusion section and carries the required sub-section
+ASSESSMENT_HEADINGS = ("## 任务语义", "## 输入输出", "## 架构动机",
+                       "## 逐模块职责与物理意义", "## 训练目标与指标方向",
+                       "## 与基线差异")
+ASSESSMENT_SUBSECTION = "### 被牺牲信息与预期精度代价"
+# §5.3 outcomes a round's single vid may legitimately end on at emit time
 LEGAL_END_OUTCOMES = frozenset({
     "latency_pass", "latency_fail", "structural_mismatch", "variant_broken",
     "unsupported_op"})
@@ -64,23 +63,51 @@ def _load_json(path: Path, what: str) -> dict | list | None:
         raise ValueError(f"{what} unparseable: {path} ({exc})") from exc
 
 
-def _check_doc(path: Path, label: str, sentinel: str,
-               headings: tuple[str, ...], problems: list[str]) -> None:
-    """Sentinel + non-empty body + required section headings (§4.1)."""
+def _check_assessment(path: Path, vid: str, problems: list[str]) -> None:
+    """Sentinel + non-empty body + the six section headings + the
+    conclusion sub-section (§5.3)."""
     if not path.is_file():
-        problems.append(f"{label} missing ({path})")
+        problems.append(f"{vid} assessment.md missing ({path})")
         return
     lines = path.read_text(encoding="utf-8").splitlines()
-    if not lines or lines[0].strip() != sentinel:
-        problems.append(f"{label} first line is not the sentinel {sentinel!r}")
+    if not lines or lines[0].strip() != VAS_SENTINEL:
+        problems.append(f"{vid} assessment.md first line is not the sentinel "
+                        f"{VAS_SENTINEL!r}")
         return
     body = [l for l in lines[1:] if l.strip()]
     if not body:
-        problems.append(f"{label} body is empty (sentinel only)")
+        problems.append(f"{vid} assessment.md body is empty (sentinel only)")
     present = {l.strip() for l in lines}
-    for heading in headings:
+    for heading in ASSESSMENT_HEADINGS:
         if heading not in present:
-            problems.append(f"{label} missing section heading {heading!r}")
+            problems.append(f"{vid} assessment.md missing section heading "
+                            f"{heading!r}")
+    if ASSESSMENT_SUBSECTION not in present:
+        problems.append(f"{vid} assessment.md missing the conclusion "
+                        f"sub-section {ASSESSMENT_SUBSECTION!r}")
+
+
+def _check_analysis_stamp(art: Path, vid: str, sig: str,
+                          problems: list[str]) -> None:
+    """The v7 stamp key: vid|change_sig|sha256(declaration.json) — changes
+    with either repair class, so a stale stamp can never green-light a
+    skipped re-assessment (§5.3 stamp fix)."""
+    stamp_path = art / "variants" / vid / ".analysis_stamp.json"
+    decl_path = art / "variants" / vid / "declaration.json"
+    if not decl_path.is_file():
+        problems.append(f"{vid} declaration.json missing (the stamp key "
+                        "hashes it)")
+        return
+    expected = (f"{vid}|{sig}|"
+                f"{hashlib.sha256(decl_path.read_bytes()).hexdigest()}")
+    stamp = _load_json(stamp_path, f"{vid} .analysis_stamp.json")
+    if not isinstance(stamp, dict) or stamp.get("key") != expected:
+        got = stamp.get("key") if isinstance(stamp, dict) else None
+        problems.append(
+            f"{vid} .analysis_stamp.json does not carry the v7 key "
+            f"{expected!r} (got {got!r}) — the assessment was not stamped "
+            "against the CURRENT declaration (re-run the variant-assessor "
+            "and write the stamp)")
 
 
 def _check_repair_trace(path: Path, vid: str, problems: list[str]) -> None:
@@ -110,7 +137,7 @@ def _check_repair_trace(path: Path, vid: str, problems: list[str]) -> None:
     if count > REPAIR_MAX:
         problems.append(
             f"{vid} repair_trace repair_count={count} exceeds the repair "
-            f"budget of {REPAIR_MAX} (§5.2) — the 6th repair must be "
+            f"budget of {REPAIR_MAX} — the 6th repair must be "
             "intercepted, never emitted")
 
 
@@ -145,35 +172,6 @@ def main() -> int:
               file=sys.stderr)
         return 1
 
-    profile_mode = "placeholder"
-    try:
-        pm = _load_json(art / "profile_mode.json", "profile_mode.json")
-        if pm is None:
-            problems.append("profile_mode.json missing (entry stage incomplete)")
-        elif not isinstance(pm, dict) or pm.get("mode") not in ("placeholder", "mfu"):
-            problems.append("profile_mode.json mode must be placeholder|mfu")
-        else:
-            profile_mode = pm["mode"]
-    except ValueError as exc:
-        problems.append(str(exc))
-
-    # admission line: base makespan + frozen target (both single-sourced)
-    try:
-        summary = _load_json(art / "base" / "profile" / "profile_summary.json",
-                             "base/profile/profile_summary.json")
-        anchor = _load_json(art / "base" / "origin_anchor.json",
-                            "base/origin_anchor.json")
-    except ValueError as exc:
-        summary = anchor = None
-        problems.append(str(exc))
-    base_ms = (summary.get("makespan_cycles")
-               if isinstance(summary, dict) else None)
-    target = (anchor.get("target_cycles")
-              if isinstance(anchor, dict) else None)
-    if not isinstance(base_ms, int) or not isinstance(target, int):
-        problems.append("base makespan / target_cycles unavailable "
-                        "(baseline stage incomplete)")
-
     rd = art / f"rounds/{r:03d}"
     proposal: dict = {}
     try:
@@ -191,7 +189,7 @@ def main() -> int:
             elif len(prop_list) > 1:
                 problems.append(
                     f"proposals holds {len(prop_list)} entries — exactly ONE "
-                    "proposal per round (v6 §5.1)")
+                    "proposal per round")
             elif prop_list:
                 proposal = prop_list[0]
             elif not (isinstance(proposals.get("exhausted_rationale"), list)
@@ -221,14 +219,9 @@ def main() -> int:
             if not isinstance(delta, int) or isinstance(delta, bool) \
                     or delta >= 0:
                 problems.append(
-                    f"{vid} predicted_delta_cycles must be an int < 0")
-            elif isinstance(base_ms, int) and isinstance(target, int):
-                predicted = base_ms + delta
-                if predicted > target:   # inclusive: == target is admissible
-                    problems.append(
-                        f"{vid} predicted makespan {predicted} > target "
-                        f"{target} — the proposal never met the admission "
-                        "line (§5.1)")
+                    f"{vid} predicted_delta_cycles must be an int < 0 (the "
+                    "only admission hard gate; reaching the target line is a "
+                    "calibration disclosure, v7 §5.2)")
             if not proposal.get("edited_files"):
                 problems.append(f"{vid} edited_files must be non-empty")
             tpid = proposal.get("target_pattern_id")
@@ -263,28 +256,16 @@ def main() -> int:
                 if not isinstance(direction, dict):
                     problems.append(
                         "rounds/<R>/direction.json missing on the latency_fail "
-                        "path (§5.1 Step4: failed_sigs must land there)")
+                        "path (failed_sigs must land there)")
                 elif sig not in direction.get("failed_sigs", []):
                     problems.append(
                         f"direction.json failed_sigs does not contain {vid}'s "
-                        "change_sig (§5.1 Step4)")
+                        "change_sig")
 
             vdir = art / "variants" / vid
-            _check_doc(vdir / "business_logic.md",
-                       f"{vid} business_logic.md", BL_SENTINEL,
-                       BUSINESS_HEADINGS, problems)
-            _check_doc(vdir / "information_analysis.md",
-                       f"{vid} information_analysis.md", INFO_SENTINEL,
-                       INFO_VARIANT_HEADINGS, problems)
-            conf = vdir / "conformance.md"
-            if not conf.is_file() or conf.stat().st_size == 0:
-                problems.append(f"{vid} conformance.md missing or empty")
-            else:
-                text = conf.read_text(encoding="utf-8")
-                for sentinel in (BL_SENTINEL, INFO_SENTINEL):
-                    if sentinel not in text:
-                        problems.append(
-                            f"{vid} conformance.md does not record {sentinel}")
+            _check_assessment(vdir / "assessment.md", vid, problems)
+            _check_analysis_stamp(art, vid, proposal.get("change_sig", ""),
+                                  problems)
             _check_repair_trace(vdir / "repair_trace.json", vid, problems)
 
     analysis_path = rd / "analysis.md"
@@ -295,8 +276,8 @@ def main() -> int:
                     analysis_path.read_text(encoding="utf-8").splitlines()}
         if "## latency" not in headings:
             problems.append("rounds/<R>/analysis.md has no '## latency' "
-                            "section (§5.1 Step6: written every round, both "
-                            "ending paths)")
+                            "section (written every round, both ending "
+                            "paths)")
     verdicts = rd / "verdicts.jsonl"
     if not proposal:
         # a zero-proposal round never measured anything: no verdicts file is
@@ -317,7 +298,7 @@ def main() -> int:
         for p in problems:
             print(f"check_propose_emit: FAIL {p}", file=sys.stderr)
         return 1
-    print(json.dumps({"ok": True, "round": r, "profile_mode": profile_mode}))
+    print(json.dumps({"ok": True, "round": r}))
     return 0
 
 

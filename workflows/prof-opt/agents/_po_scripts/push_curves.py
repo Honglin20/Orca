@@ -90,9 +90,7 @@ _BASELINE_DOC_ROWS = (
      "base/profile/mfu_bottleneck_report.md"),
 )
 _VARIANT_DOC_FILES = (
-    "business_logic.md",
-    "information_analysis.md",
-    "conformance.md",
+    "assessment.md",
     "profile/mfu_bottleneck_report.md",
 )
 _RULES_ROW = ("rules", "accuracy_rules_snapshot.json",
