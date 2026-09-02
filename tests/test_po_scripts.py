@@ -2029,6 +2029,32 @@ def test_baseline_chain_profile_block_is_the_dispatch_source(tmp_path: Path):
     assert "profile" in proc.stderr
 
 
+@pytest.mark.parametrize("field,name", [
+    ("shadow", "shadow.shadow_pkgs"),
+    ("full_train_budget", "full_train_budget.seed"),
+    ("proxy_budget", "proxy_budget.epochs"),
+    ("train", "train.ckpt_per_epoch"),
+])
+def test_baseline_chain_contract_field_guards_fail_loud(tmp_path: Path,
+                                                         field: str,
+                                                         name: str):
+    """Every contracts.json field the chain consumes downstream has a hard
+    empty-value gate (set -uo pipefail has no -e — read_contract's FATAL
+    alone cannot stop the script): dropping one field exits 2 naming it,
+    never a silent empty value that renders a broken training."""
+    art, env = _mfu_baseline_ws(tmp_path)
+    contracts = json.loads((art / "contracts.json").read_text(encoding="utf-8"))
+    contracts.pop(field)
+    (art / "contracts.json").write_text(json.dumps(contracts), encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
+         "--seed", "0", "--device", "0"],
+        capture_output=True, text=True, timeout=60, env=env)
+    assert proc.returncode == 2, proc.stdout
+    assert name in proc.stderr
+    assert "refusing to continue" in proc.stderr
+
+
 def test_check_baseline_docs_gate(tmp_path: Path):
     """v7 §4.3: the THREE-document gate (sentinel + sections per doc). The
     fixture documents pass; each violation class (doc missing, section
