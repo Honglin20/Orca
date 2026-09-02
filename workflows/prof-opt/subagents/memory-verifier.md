@@ -42,8 +42,8 @@ understanding, not mere existence:
   the training entry and confirm those exact values.
 - **Metric direction presence and correctness** — the Training And Evaluation
   section must explicitly state each ranking metric's direction
-  (`higher-better` / `lower-better`). When absent, determine it from the source
-  (accuracy-like → higher-better, loss-like → lower-better) and record it; when
+  (`higher_better` / `lower_better`). When absent, determine it from the source
+  (accuracy-like → higher_better, loss-like → lower_better) and record it; when
   present, verify it is correct.
 - **Interpreter claim** — the recorded working interpreter must be the one that
   actually imports `torch`, `onnx`, and the project's own packages (verify by

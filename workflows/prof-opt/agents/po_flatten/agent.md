@@ -131,11 +131,14 @@ depend on — record both in the **Data And Environment** section:
   (project venv / conda / system python3), and from Step 3 on you export
   `ORCA_PYTHON=<that path>` for every command you run. The same interpreter is used
   by every downstream node (they read it back from `readiness/readiness.json`).
-- **Metric direction**: in **Training And Evaluation**, EVERY ranking metric gets
-  its own list item with an explicit direction marker, spelled exactly
-  `higher_better` / `lower_better` (one spelling everywhere — the same tokens
-  `contracts.json` uses), e.g. `- top1 accuracy: higher_better`. Downstream gates
-  normalize by this; a missing or old-spelled (`higher-better`) marker is a
+- **Metric direction**: in **Training And Evaluation**, EVERY list item in the
+  section is gate-checked — each ranking metric gets its own list item with an
+  explicit direction marker, spelled exactly `higher_better` / `lower_better`
+  (one spelling everywhere — the same tokens `contracts.json` uses), e.g.
+  `- top1 accuracy: higher_better`; any non-metric list item in that section
+  (paradigm notes, entry descriptions) must carry the explicit tag
+  `(non-metric)`. Downstream gates normalize by this; a missing marker, an
+  untagged non-metric item, or an old-spelled (`higher-better`) marker is a
   validation failure.
 
 ## Workflow

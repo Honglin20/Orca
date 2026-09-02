@@ -156,21 +156,31 @@ import sys
 from pathlib import Path
 
 text = Path(sys.argv[1]).read_text(encoding="utf-8")
-m = re.search(r"^##[ \t]*Training And Evaluation[ \t]*$(.*)",
+m = re.search(r"^##[ \t]*Training And Evaluation[ \t]*$\n"
+              r"(.*?)(?=^##[ \t]|\Z)",
               text, re.MULTILINE | re.DOTALL)
 section = m.group(1) if m else ""
-# v7 F10: every metric LIST ITEM must carry a direction marker, one spelling
-# everywhere (higher_better / lower_better — the same tokens contracts.json
-# uses). A list item that names a metric without a marker is a validation
-# failure; at least one metric must be listed at all.
+# F10: EVERY list item in the section is judged — no keyword guessing. Each
+# item must either carry a direction marker (higher_better / lower_better —
+# the same tokens contracts.json uses) or be explicitly tagged (non-metric);
+# a keyword-shaped item cannot slip past, and at least one metric must be
+# listed at all.
 items = [l for l in section.splitlines() if l.strip().startswith(("- ", "* "))]
 problems = []
-metric_items = [l for l in items if "metric" in l.lower() or "better" in l.lower()]
-for l in items:
-    if "better" in l.lower() and "better_" not in l:
-        problems.append(f"direction marker uses the old hyphen spelling: {l.strip()!r}")
-    if "metric" in l.lower() and "better" not in l.lower():
-        problems.append(f"metric listed without a direction marker: {l.strip()!r}")
+metric_items = []
+for raw in items:
+    l = raw.lower()
+    if "higher_better" in l or "lower_better" in l:
+        metric_items.append(raw)
+        continue
+    if "higher-better" in l or "lower-better" in l:
+        problems.append(f"direction marker uses the old hyphen spelling: {raw.strip()!r}")
+        metric_items.append(raw)
+        continue
+    if "(non-metric)" in l:
+        continue
+    problems.append(f"list item carries neither a direction marker nor the "
+                    f"(non-metric) tag: {raw.strip()!r}")
 if not metric_items:
     problems.append("no ranking-metric list item found in '## Training And "
                     "Evaluation' (expected e.g. '- <metric>: higher_better')")

@@ -22,6 +22,11 @@ already reached a terminal row is out of scope):
      file is the proof).
   5. liveness record: variants/<vid>/train/liveness.json parses and records
      epoch1_ok true.
+  6. DONE marker integrity: sha256(variants/<vid>/declaration.json) equals
+     the DONE marker's recorded declaration_sha256 — a declaration edited
+     after the implementation was marked DONE (or a stale marker from an
+     earlier repair pass) means the measured structure and the disk state
+     disagree; fail loud, never launch on it.
 
 Structural completeness only — launch outcomes and verdicts themselves are
 never re-judged here (Step 0 already compared the verdict once; this gate
@@ -30,6 +35,7 @@ re-asserts it end-to-end).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -168,6 +174,35 @@ def _check_vid(art: Path, vid: str, problems: list[str]) -> None:
                             "liveness proof is a hard emit precondition)")
     elif liveness_rec.get("epoch1_ok") is not True:
         problems.append(f"{vid} liveness.json epoch1_ok is not true")
+
+    # 6. DONE marker pins the measured declaration (write_done_marker's
+    #    hash discipline): the declaration on disk must be the one the
+    #    implementation completed against
+    done_path = vdir / "DONE"
+    decl_path = vdir / "declaration.json"
+    if not done_path.is_file():
+        problems.append(f"{vid} DONE marker missing (the implementation "
+                        "completion proof)")
+    elif not decl_path.is_file():
+        problems.append(f"{vid} declaration.json missing (the DONE marker's "
+                        "hash has nothing to pin)")
+    else:
+        try:
+            done = json.loads(done_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            done = None
+            problems.append(f"{vid} DONE marker unparseable ({exc})")
+        if isinstance(done, dict):
+            recorded = done.get("declaration_sha256")
+            actual = hashlib.sha256(
+                decl_path.read_text(encoding="utf-8").encode()).hexdigest()
+            if recorded != actual:
+                problems.append(
+                    f"{vid} DONE.declaration_sha256 does not match the "
+                    f"current declaration.json — the declaration changed "
+                    f"after the implementation was marked DONE (recorded "
+                    f"{recorded}, actual {actual}); torn workspace, never "
+                    f"launched on")
 
 
 def main() -> int:

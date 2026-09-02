@@ -291,3 +291,62 @@ def test_healed_files_script_is_gone():
     """v7 P5 deletes the heal ledger (write-only artifact): the script must
     not exist anywhere under the workflow tree."""
     assert not (_PO / "healed_files.py").exists()
+
+
+# ── manifest direction gate (check_flatten.sh embedded check) ─────────────────
+
+_DIRECTION_HEREDOC = None
+
+
+def _direction_check_proc(manifest: Path) -> subprocess.CompletedProcess:
+    """Run check_flatten.sh's embedded direction check on a standalone
+    manifest — the heredoc python is self-contained (reads sys.argv[1]),
+    so extract it once and drive it directly."""
+    global _DIRECTION_HEREDOC
+    import re
+    if _DIRECTION_HEREDOC is None:
+        text = (_FLATTEN / "check_flatten.sh").read_text(encoding="utf-8")
+        blocks = re.findall(r"<<'PY'[^\n]*\n(.*?)\nPY\n", text, re.DOTALL)
+        hits = [b for b in blocks if "Training And Evaluation" in b]
+        assert len(hits) == 1, "direction-check heredoc not uniquely found"
+        _DIRECTION_HEREDOC = hits[0]
+    return _run([sys.executable, "-c", _DIRECTION_HEREDOC, str(manifest)])
+
+def test_manifest_direction_gate_matrix(tmp_path: Path):
+    """The tightened judgment: EVERY list item in the Training And
+    Evaluation section is checked — a direction marker, or the explicit
+    (non-metric) tag; keyword-shaped items cannot slip past, and the old
+    hyphen spelling still fails."""
+    def manifest(items: str) -> Path:
+        p = tmp_path / f"m{abs(hash(items)) % 10**8}.md"
+        p.write_text(
+            "# manifest\n\n## Training And Evaluation\n" + items +
+            "\n\n## Data And Environment\n- Interpreter: /usr/bin/python3\n",
+            encoding="utf-8")
+        return p
+
+    # green: metric items with markers + a tagged non-metric note
+    ok = manifest("- top1 accuracy: higher_better\n"
+                  "- val loss: lower_better\n"
+                  "- trains with AdamW, one cycle (non-metric)\n")
+    proc = _direction_check_proc(ok)
+    assert proc.returncode == 0, proc.stderr
+
+    # an untagged non-metric item is rejected (no keyword escape)
+    bad = manifest("- top1 accuracy: higher_better\n"
+                   "- trains with AdamW, one cycle\n")
+    proc = _direction_check_proc(bad)
+    assert proc.returncode == 1
+    assert "non-metric" in proc.stderr
+
+    # the old hyphen spelling is rejected
+    hyphen = manifest("- top1 accuracy: higher-better\n")
+    proc = _direction_check_proc(hyphen)
+    assert proc.returncode == 1
+    assert "hyphen" in proc.stderr
+
+    # no metric item at all is rejected
+    none = manifest("- trains with AdamW (non-metric)\n")
+    proc = _direction_check_proc(none)
+    assert proc.returncode == 1
+    assert "no ranking-metric" in proc.stderr

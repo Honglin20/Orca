@@ -242,6 +242,9 @@ lock naming it still exists under `devices/` → run the release once
 The node's Step 4. `generated_artifacts` lists only files that exist:
 `variants/<VID>/train/train.rendered.sh`, `train.pid`,
 `liveness.json`, `variants/<VID>/metrics/metrics.jsonl`, `probe_status.md`
-(plus `variants/<VID>/watchdog.pid` / `watchdog.log` when present). A
+(plus `variants/<VID>/watchdog.pid` / `watchdog.log` when present, and the
+watchdog-owned terminal products `variants/<VID>/train_status.json` /
+`variants/<VID>/eval/final_acc.json` / `variants/<VID>/eval/k_acc.json`
+when a re-entry finds the vid already terminal). A
 `probe_insufficient` vid contributes its history row only — its partial
 launch products are not listed.

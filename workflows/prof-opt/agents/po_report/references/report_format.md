@@ -287,26 +287,37 @@ workspace file makes the merge refuse (exit 2, the mirror survives), and
 an EMPTY rule set overwriting a non-empty mirror requires an explicit
 `--allow-empty` the builder never passes. Any failure — including a
 refusal — is written into `reason` and the report continues; `status` is
-never changed by the merge. (No `accuracy_rules.md` table mirror is
-written: the JSON mirror is the merge's single product.)
+never changed by the merge.
 
 ## 5. prof_opt_report.md (human-readable, workspace root)
 
-Sections: Disclosure (the three lines: profiling source with the
+The report uses EXACTLY these eleven `##` headings, in this order (the
+structural gate `scripts/check_report.py` validates the set and the
+disclosure tokens — write them as pinned):
+
+`## 披露` · `## 终态` · `## 逐轮表` · `## 训练结局披露` · `## 胜出者` ·
+`## 公平性说明` · `## 基线与最终` · `## 轮次结论` · `## 精度规则` ·
+`## 写回` · `## 面板与文档`
+
+Section content: 披露 (the three lines: profiling source with the
 contracts profile block, training device backend verbatim, chart daemon
 state from .chart_push.log + the pushed dictionary; + scripts .VERSION
-stamp) · Terminal State
+stamp — the three lines carry the anchor tokens `mfu 实测`,
+`train_device`, `chart daemon`) · 终态
 (status/stage/reason, including the harvest disclosure when it fired) ·
-Per-Round Table (round, proposals, verdict outcome counts, the round's
-variant and its fate, round best makespan) · **Training Outcome
-Disclosure** (mechanical counts over every `variants/<vid>/
+逐轮表 (round, proposals, verdict outcome counts, the round's
+variant and its fate, round best makespan) · **训练结局披露**
+(mechanical counts over every `variants/<vid>/
 train_status.json`: early-stopped (`killed`) vs natural completion
 (`done`) vs failed launches (`failed`/absent), each with its
 `stopped_at_epoch` and `over_budget_streak` where recorded — the
-streaming judge's exercise disclosure) · Winner (vid, change signature,
+streaming judge's exercise disclosure; a variant whose watchdog produced
+`variants/<vid>/eval/k_acc.json` (per-epoch checkpoints enabled) cites
+that k-th-ckpt eval as auxiliary evidence, and one that reached its
+terminal without it says so) · 胜出者 (vid, change signature,
 lineage chain, gap, makespan, within_budget; on a no-winner terminal the
 explicit "no success variant — no promotion" line referencing the
-dashboard for what was tried) · **Fairness Note** (one short paragraph:
+dashboard for what was tried) · **公平性说明** (one short paragraph:
 the baseline and every variant were trained FROM SCRATCH under the SAME
 `full_train_budget` value-level fingerprint (`contracts.json` — epochs /
 seed / data); a variant that fell behind the accuracy budget was
@@ -314,20 +325,20 @@ early-stopped by the streaming judge and can never be the winner; the
 winner completed the full rendered epochs and its final eval was judged
 against the baseline full-training anchor. **The epoch count cited here
 is `full_train_budget.epochs` read from `contracts.json` — the EFFECTIVE
-value the fingerprint carries, never the raw argparse count**) · Baseline
-vs Final (baseline makespan / full-training anchor; winner makespan /
+value the fingerprint carries, never the raw argparse count**) · 基线与最终
+(baseline makespan / full-training anchor; winner makespan /
 accuracy / gap / budget verdict — the baseline side reads
-`base/origin_anchor.json`) · **Round Conclusions** (one line per round distilled
+`base/origin_anchor.json`) · **轮次结论** (one line per round distilled
 from that round's `rounds/<NNN>/analysis.md` — the latency lessons
 exactly as recorded at round end; then a two-to-three-line cross-round
 summary: which lever families delivered vs were falsified, and the
 predicted-vs-actual calibration drift; rounds whose analysis file is
-absent are skipped, never fabricated) · Accuracy Rules (the run's rule
+absent are skipped, never fabricated) · 精度规则 (the run's rule
 file summary: rule count, the highest-confidence harmful/benign patterns,
-the merge outcome and the mirror paths) · Write-Back (written files,
+the merge outcome and the mirror paths) · 写回 (written files,
 conflicts, deletions, informational skips of shadow-synthesized files; on
 a no-winner terminal: the explicit "no success variant — nothing to
-write back" line) · **Dashboard And Docs** (point at `dashboard.html` /
+write back" line) · **面板与文档** (point at `dashboard.html` /
 `dashboard.json` and the `prof-opt/docs` analysis-docs manifest — the
 portable summary of curves, pareto, gap table, and every variant's
 analysis documents; reference the paths, never inline the content) ·

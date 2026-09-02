@@ -1,34 +1,38 @@
-"""test_po_v6.py — v6 mechanism tests (single-variant convergence redesign).
+"""test_po_v6.py — mechanism tests (single-variant convergence loop).
 
-Script-level unit tests for the v6 P0 mechanics: the training-device
-resolver (four-level first-match-wins + write-if-absent + reuse-mismatch
-fail-loud), the device allocation ledger (O_EXCL acquire / free = the
-complement of real occupancy UNION live locks, dead-pid recycling with
-disclosure / idempotent release / full-house {"ok": false}), round_state
-working = current + 1, the gate decision order (success -> report / round
-cap -> report / loop, with in_flight), history append_terminal row
-semantics + the unchanged (vid, change_sig) dedup key, the unified latency
+Script-level unit tests kept current with the v7 surface: the
+training-device resolver (env override -> probe chain first-match-wins,
+write-if-absent, reuse-mismatch fail-loud, NO_REUSE overwrite), the
+device allocation ledger (probe raw passthrough / O_EXCL claim --idx /
+adopt with pid_lib liveness / idempotent release / locked {"ok": false}),
+round_state working = current + 1, the gate decision order (success ->
+report / round cap -> report / idle streak -> report / loop, with
+in_flight), history append_terminal row semantics + the (vid, change_sig)
+dedup key with probe_insufficient permanently consumed, the latency
 recheck boundary (makespan == target passes), the ledger aggregator's
 purity (same shard set -> same output, full rebuildability), and the
-deployed-set stamp roundtrip over the three new scripts.
+deployed-set stamp roundtrip.
 
-P3 adds the watchdog face (§7): warmup is never judged, the over-budget
-streak counts once per NEW epoch (9 does not kill / 10 kills / a terminal
-replay never re-kills), the early-stop kill refuses a pid that fails the
-/proc attribution check, natural completion runs the final-budget verdict
-(success / accuracy_fail), a crash without rc re-launches (budget 3 ->
-probe_insufficient), and re-entry is idempotent in all three states. Every
-curve is a mock log file — nothing trains, no GPU/NPU is ever required.
+The watchdog face (watch_variant.py): warmup is never judged, the
+over-budget streak counts once per NEW epoch and fires at the
+E-derived threshold max(2, ceil(0.3 x E)) (a terminal replay never
+re-kills), the early-stop kill refuses a pid that fails the /proc
+attribution check, natural completion runs the final-budget verdict
+(success / accuracy_fail) with the last-known epoch/metric/gap preserved
+while the baseline anchor is pending, a crash without rc is a terminal
+failure, and re-entry is idempotent in all states. Every curve is a mock
+log file — nothing trains, no GPU/NPU is ever required.
 
-The closing section carries the four §13.2 scenario smokes: the
-single-variant convergence loop (one vid repairing in place), the
-two-card parallel/block/release ledger sequence, the streaming early-stop
+The closing section carries the scenario smokes: the single-variant
+convergence loop (one vid repairing in place), the two-card
+parallel/block/release ledger sequence, the streaming early-stop
 end-to-end (curve growth -> kill -> terminal -> derived dashboard), and
 the gate's report exits (success with an in-flight survivor + the round
 cap awaiting in-flight terminals).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -1297,6 +1301,16 @@ def _probe_ws(tmp_path: Path, *, makespan: int = 400,
                                pred_actual_ratio=None, outcome="latency_pass")
     vd = art / "variants" / "r1-01"
     (vd / "train").mkdir(parents=True)
+    # the implementation completion proof: DONE pins the declaration it was
+    # written against (write_done_marker's hash discipline)
+    decl_text = json.dumps({"vid": "r1-01", "edited_files": [],
+                            "op_delta": {}, "predicted_delta_cycles": -400})
+    (vd / "declaration.json").write_text(decl_text, encoding="utf-8")
+    (vd / "DONE").write_text(json.dumps({
+        "vid": "r1-01",
+        "declaration_sha256": hashlib.sha256(
+            decl_text.encode()).hexdigest(),
+        "ts": "2026-09-01T00:00:00+00:00"}), encoding="utf-8")
     if verdict:
         (vd / "verdict.json").write_text(json.dumps(
             {"vid": "r1-01", "round": 1, "outcome": "latency_pass",
@@ -1375,6 +1389,26 @@ def test_probe_emit_green_launch_state(tmp_path):
     finally:
         sleeper.terminate()
         sleeper.wait()
+
+
+def test_probe_emit_rejects_declaration_drift_after_done(tmp_path):
+    """The DONE marker pins the measured declaration: editing
+    declaration.json after the marker was written (a repair pass that
+    finished the paperwork but not the re-measure) is a torn workspace —
+    the gate fails loud instead of launching the drifted structure."""
+    art = _probe_ws(tmp_path, liveness={})
+    (art / "variants" / "r1-01" / "train" / "train.pid").write_text(
+        f"{os.getpid()}\n", encoding="utf-8")
+    drifted = json.loads(
+        (art / "variants" / "r1-01" / "declaration.json").read_text(
+            encoding="utf-8"))
+    drifted["predicted_delta_cycles"] = -1        # edited after DONE
+    (art / "variants" / "r1-01" / "declaration.json").write_text(
+        json.dumps(drifted), encoding="utf-8")
+    proc = _check_probe(art)
+    assert proc.returncode == 1
+    assert "declaration_sha256" in proc.stderr
+    assert "torn workspace" in proc.stderr
 
 
 def test_probe_emit_rejects_torn_verdict(tmp_path):

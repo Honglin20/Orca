@@ -176,11 +176,14 @@ python3 "$ORCA_ARTIFACTS_DIR/scripts/emit_result.py" \
   --field 'error=' \
   --field device=<idx|null> \
   --field epoch1_ok=<true|false> \
-  --field 'generated_artifacts=["variants/<VID>/train/train.rendered.sh", "variants/<VID>/train/train.pid", "variants/<VID>/train/liveness.json", "variants/<VID>/metrics/metrics.jsonl", "probe_status.md"]'
+  --field 'generated_artifacts=["variants/<VID>/train/train.rendered.sh", "variants/<VID>/train/train.pid", "variants/<VID>/train/liveness.json", "variants/<VID>/metrics/metrics.jsonl", "variants/<VID>/train_status.json", "variants/<VID>/eval/final_acc.json", "variants/<VID>/eval/k_acc.json", "probe_status.md"]'
 ```
 
 List a path only when the file exists on disk (drop a `probe_insufficient`
-vid's launch products; its history row is the record). On workspace-level
+vid's launch products; its history row is the record). The watchdog-owned
+products (`train_status.json`, `eval/final_acc.json`, `eval/k_acc.json`)
+appear on re-entries after a vid reached its terminal — they are the
+watchdog's, listed when present, never waited for. On workspace-level
 breakage the same five fields with `status=failed` and `error` carrying
 the root cause. `status == executed` ⇔ `error == ""`.
 

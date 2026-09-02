@@ -545,3 +545,83 @@ def test_spec_deletion_checklist_paths_are_gone():
     ]
     for rel in gone_rel:
         assert not (wf / rel).exists(), rel
+
+
+# ── check_report.py: the human report's structural gate ───────────────────────
+
+def _report_doc(tmp_path: Path, sections: dict[str, str] | None = None,
+                disclosure: str | None = None) -> Path:
+    """A compliant prof_opt_report.md skeleton (every section + the three
+    disclosure tokens), overridable per test."""
+    body = {
+        "## 披露": disclosure or ("- profiling 来源：mfu 实测 via 用户内网评测工具 "
+                                 "(chip 6613 / INT8 / 1)\n"
+                                 "- 训练设备后端：train_device.json "
+                                 "{backend: cuda, device_count: 2}\n"
+                                 "- chart daemon 状态：pushed curves/pareto "
+                                 "(.chart_push.log 末行)\n"),
+        "## 终态": "status=success stage=report\n",
+        "## 逐轮表": "| round | proposals |\n|---|---|\n",
+        "## 训练结局披露": "killed=1 done=1\n",
+        "## 胜出者": "r1-01 gap=0.02\n",
+        "## 公平性说明": "same full_train_budget\n",
+        "## 基线与最终": "500 -> 240\n",
+        "## 轮次结论": "r1: activation swap delivered\n",
+        "## 精度规则": "3 rules\n",
+        "## 写回": "model_prof_optimized.py\n",
+        "## 面板与文档": "dashboard.html\n",
+    }
+    if sections is not None:
+        body = sections
+    art = tmp_path / "ws"
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "prof_opt_report.md").write_text(
+        "".join(f"{h}\n{t}\n" for h, t in body.items()), encoding="utf-8")
+    return art
+
+
+def _check_report(art: Path):
+    return _run_cli([sys.executable, str(_SCRIPTS / "check_report.py"),
+                     "--artifacts", str(art)])
+
+
+def test_check_report_gate_matrix(tmp_path):
+    # compliant report passes
+    assert _check_report(_report_doc(tmp_path)).returncode == 0
+
+    # a missing section is named
+    doc = _report_doc(tmp_path / "a")
+    text = (doc / "prof_opt_report.md").read_text(encoding="utf-8")
+    (doc / "prof_opt_report.md").write_text(
+        text.replace("## 轮次结论\nr1: activation swap delivered\n", ""),
+        encoding="utf-8")
+    proc = _check_report(doc)
+    assert proc.returncode == 1
+    assert "轮次结论" in proc.stderr
+
+    # a disclosure line gone -> its token is named
+    doc2 = _report_doc(tmp_path / "b",
+                       disclosure="- profiling 来源：mfu 实测 via 内网工具\n"
+                                  "- 训练设备后端：cuda x2\n"
+                                  "- 图表推送正常\n")
+    proc2 = _check_report(doc2)
+    assert proc2.returncode == 1
+    assert "train_device" in proc2.stderr and "chart daemon" in proc2.stderr
+
+    # missing report entirely
+    empty = tmp_path / "c"
+    empty.mkdir()
+    assert _check_report(empty).returncode == 1
+
+
+def test_check_report_literals_pinned_in_format_doc():
+    """Drift pin: every heading and disclosure token the gate enforces is
+    enumerated in report_format.md §5 (the authoring contract) — editing
+    one side alone breaks this test, never the runtime agent."""
+    import check_report
+    fmt = (_REPO / "workflows" / "prof-opt" / "agents" / "po_report"
+           / "references" / "report_format.md").read_text(encoding="utf-8")
+    for heading in check_report.SECTIONS:
+        assert heading in fmt, heading
+    for token in check_report.DISCLOSURE_TOKENS:
+        assert token in fmt, token

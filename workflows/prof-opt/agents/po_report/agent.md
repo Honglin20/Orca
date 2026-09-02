@@ -45,10 +45,8 @@ training/eval step.
   the same name are never overwritten (suffix the copy with the run id
   instead — the run id is `$ORCA_RUN_ID`, the engine-injected run identity
   the workspace `.run_lock` records; a run-metadata value, not tied to the
-  chart env). (`accuracy_rules.md` is NOT archived: the machine-readable
-  mirror `accuracy_rules.json`, written by the rule merge, is that stage's
-  single product — one writer, one policy.) This is a terminal one-time
-  user-side write, same class as the write-back.
+  chart env). This is a terminal one-time user-side write, same class as
+  the write-back.
 - The accuracy budget for the winner verdict is read from the frozen
   origin anchor (`base/origin_anchor.json`), never from a raw input. The
   anchor's baseline makespan / target line / budget also fill the report's
@@ -207,6 +205,16 @@ dashboard and the analysis-docs manifest — never inlines their content).
 python3 "$ORCA_ARTIFACTS_DIR/report_builder.py"
 ```
 
+- **The report's structural gate runs FIRST** (the builder just wrote
+  `prof_opt_report.md`; a failure here means the builder's report is
+  incomplete — fix it and re-run, same fix-loop):
+  ```bash
+  python3 "$ORCA_ARTIFACTS_DIR/scripts/check_report.py" \
+    --artifacts "$ORCA_ARTIFACTS_DIR"
+  ```
+  It checks the eleven required section headings and the disclosure
+  section's three anchor tokens (profiling source / training device
+  backend / chart daemon state).
 - The last stdout line must parse as JSON and carry every schema field
   (`status, stage, reason, winner, baseline, final, rounds_completed,
   proposals_total, history_path, write_back, charts_summary, artifacts,
