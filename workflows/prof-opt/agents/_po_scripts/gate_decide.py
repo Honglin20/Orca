@@ -2,28 +2,37 @@
 """gate_decide.py — pure-read loop/exit decision computed from the workspace.
 
 Reads (never writes): history.jsonl (terminal rows), round_state current
-(the single round source), and the frozen origin anchor
-(base/origin_anchor.json — the target line never moves). The decision order
-is fixed (first match wins, v6 §8.1):
+(the single round source), every round's proposals.json (the idle probe),
+and the frozen origin anchor (base/origin_anchor.json — the target line
+never moves). The decision order is fixed (first match wins, v7 §8):
 
     report   ANY vid has a `success` row in history — the winner judgment
              (gap-best success, ties by makespan) is po_report's job — OR
              round >= max_rounds (hard cap, never loops; with no success the
              in-flight trainings are awaited and harvested by po_report, not
-             killed here)
+             killed here) — OR the latest `idle_round_cap` rounds in a row
+             are all zero-proposal rounds (decision reason `idle_exhausted`:
+             the search space is genuinely spent and idling would burn
+             nothing but time)
     loop     everything else — the ONLY other exit; there is no wall-clock
              cap and no plateau early-exit (a plateau is answered by
              rerouting proposals, not by stopping)
 
+Idle counting: walking from the latest round backwards, a round counts as
+idle iff its proposals.json exists, parses, and holds an EMPTY `proposals`
+list (a legal round outcome with a non-empty `exhausted_rationale`). The
+streak stops at the first non-idle round — non-empty proposals, or a
+missing/unparseable proposals.json (an incomplete round is never evidence
+of an exhausted space).
+
 Exiting never disturbs in-flight work: a success row only truncates FUTURE
 proposal rounds; trainings already released by the probe keep running and
-keep their judgment eligibility for po_report's terminal harvest (v6 §8.1).
-best.json and the v5 mode/round-advance markers are no longer read
-(retired in v6).
+keep their judgment eligibility for po_report's terminal harvest (§8).
+best.json and the v5 mode/round-advance markers are not read (retired).
 
 stdout: single-line JSON {"decision", "round", "target_cycles",
-"success_vids", "in_flight", "reason"}; in_flight = vids with a
-latency_pass row but no terminal row (success / accuracy_fail /
+"success_vids", "in_flight", "idle_rounds", "reason"}; in_flight = vids
+with a latency_pass row but no terminal row (success / accuracy_fail /
 probe_insufficient / latency_fail) in ANY version. A missing origin anchor
 is a hard error.
 """
@@ -55,7 +64,31 @@ def _load_origin_anchor(artifacts: Path) -> dict:
     return anchor
 
 
-def decide(artifacts: Path, max_rounds: int = 100) -> dict:
+def _round_is_idle(artifacts: Path, round_no: int) -> bool | None:
+    """True/False for a zero/non-zero proposal round; None when the round's
+    proposals.json is missing or unparseable (incomplete — never idle)."""
+    path = artifacts / "rounds" / f"{round_no:03d}" / "proposals.json"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(doc, dict) or not isinstance(doc.get("proposals"), list):
+        return None
+    return doc["proposals"] == []
+
+
+def idle_streak(artifacts: Path, round_no: int) -> int:
+    """Consecutive zero-proposal rounds counted backwards from `round_no`."""
+    streak = 0
+    for r in range(round_no, 0, -1):
+        if _round_is_idle(artifacts, r) is True:
+            streak += 1
+        else:
+            break
+    return streak
+
+
+def decide(artifacts: Path, max_rounds: int = 100, idle_round_cap: int = 5) -> dict:
     round_no = current_round(artifacts)       # single source (round_state.py)
     anchor = _load_origin_anchor(artifacts)
     target = anchor["target_cycles"]
@@ -70,6 +103,8 @@ def decide(artifacts: Path, max_rounds: int = 100) -> dict:
                      if row.get("vid") and row.get("outcome") in TERMINAL_OUTCOMES}
     in_flight = sorted(passed_vids - terminal_vids)
 
+    idle_rounds = idle_streak(artifacts, round_no)
+
     if success_vids:
         decision = "report"
         reason = (f"success row(s) on disk for {', '.join(success_vids)} — "
@@ -82,24 +117,36 @@ def decide(artifacts: Path, max_rounds: int = 100) -> dict:
         reason = (f"round {round_no} >= max_rounds {max_rounds} (hard cap, "
                   f"never loops) — no success variant; the report awaits the "
                   f"in-flight terminal states")
+    elif idle_round_cap > 0 and idle_rounds >= idle_round_cap:
+        # the space is spent: the last N rounds each honestly reported zero
+        # admissible proposals — idling further rounds burns nothing but time
+        decision = "report"
+        reason = (f"idle_exhausted: the latest {idle_rounds} round(s) in a row "
+                  f"(>= idle_round_cap {idle_round_cap}) produced zero "
+                  f"proposals each — exit to report; the exhausted_rationale "
+                  f"records name what was tried")
     else:
         decision = "loop"
-        reason = (f"no success row and round {round_no}/{max_rounds} — "
-                  f"reroute proposals (failed_sigs); no other exit")
+        reason = (f"no success row and round {round_no}/{max_rounds} "
+                  f"(idle streak {idle_rounds}/{idle_round_cap}) — reroute "
+                  f"proposals (failed_sigs); no other exit")
 
     return {"decision": decision, "round": round_no, "target_cycles": target,
             "success_vids": success_vids, "in_flight": in_flight,
-            "reason": reason}
+            "idle_rounds": idle_rounds, "reason": reason}
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--artifacts", required=True)
     ap.add_argument("--max-rounds", type=int, default=100)
+    ap.add_argument("--idle-round-cap", type=int, default=5,
+                    help="consecutive zero-proposal rounds before idle exit "
+                         "(<=0 disables the idle exit)")
     ns = ap.parse_args()
 
     try:
-        result = decide(Path(ns.artifacts), ns.max_rounds)
+        result = decide(Path(ns.artifacts), ns.max_rounds, ns.idle_round_cap)
     except (OSError, ValueError, KeyError) as exc:
         print(f"gate_decide: FAIL {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2

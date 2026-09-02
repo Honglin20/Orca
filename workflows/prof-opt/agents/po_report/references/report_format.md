@@ -17,13 +17,19 @@ mechanically, is safe to re-run (write-back is idempotent by the same-content
 rule), and prints the final single-line JSON on stdout. Your reply is that
 line verbatim.
 
-The report's FIRST section is a disclosure block carrying three verbatim
-records: `profile_mode.json` (the profiling configuration every number in
-this report was measured under — mode / chip / precision / core_num /
-resolved_by), `train_device.json` (the training device backend every
-training ran on — backend / device_count / resolved_by), and the deployed
-scripts' version stamp (`scripts/.VERSION` manifest hash). No judgement,
-just provenance.
+The report's FIRST section is the disclosure block carrying exactly
+THREE fixed lines (plus the deployed scripts' version stamp
+`scripts/.VERSION` — provenance, no judgement):
+
+1. **Profiling source**: "mfu 实测 via 用户内网评测工具" — with the
+   profile configuration read from `contracts.json`'s `profile` block
+   (chip / precision / core_num) verbatim. Every cycles number in this
+   report was measured on that one path (no estimator, no fallback).
+2. **Training device backend**: `train_device.json` verbatim (backend /
+   device_count / resolved_by) — the backend every training ran on.
+3. **Chart daemon state**: the LAST line of `.chart_push.log` plus THIS
+   run's pushed dictionary (which charts were pushed, when). An offline
+   daemon or a failed push is WRITTEN DOWN here, never silent.
 
 ## 0. Terminal harvest (wait, never kill — before the state table)
 
@@ -59,6 +65,26 @@ in the disclosure instead of killed. Record `"aborted at terminal"` for
 the `reason` (disclosed, never hidden). The harvested-kill disclosure does
 NOT change `status`/`stage`; the state table below still derives them from
 disk.
+
+## 0b. Card-release sweep (after the harvest, before the state table)
+
+A watchdog that died before its terminal action must not pin a card
+forever. The judgment is MECHANICAL — the ledger's own sweep subcommand
+owns the liveness verdicts and the release (never re-implemented in the
+builder):
+
+```bash
+python3 "$ORCA_ARTIFACTS_DIR/scripts/device_alloc.py" sweep \
+  --artifacts "$ORCA_ARTIFACTS_DIR"
+```
+
+stdout = `{"released": N, "locks": [{idx, vid, pid, liveness, action,
+note?}...]}` — one row per lock: **dead** → released (disclosed in the
+report); **alive** → kept, listed as held; **unknown** → kept with the
+"liveness unverifiable" note (never guess, never release a card an
+unconfirmable owner may still hold); an **unparseable** lock file → kept
+and surfaced. Fold the rows into the report's disclosure section
+verbatim.
 
 ## 1. Terminal-state table (first match wins)
 
@@ -120,9 +146,6 @@ terminal record — torn launch").
   anchor file is absent (pre-baseline terminal) fall back to the current
   `base/profile/profile_summary.json` with an explicit disclosure that the
   value is un-anchored.
-- `pretrained_ref_acc`: number from `baseline/pretrained_ref.json` when that
-  file exists and parses with a numeric `value`; null otherwise. Reference
-  only — never a gate.
 - `final` (all from the WINNER's records; zeroed when there is no winner):
   `acc` from `variants/<vid>/eval/final_acc.json`'s `final_acc` (0 when
   absent); `makespan` from the winner's history snapshot
@@ -156,10 +179,11 @@ diffed against the user's original files at the same relative paths. User
 files are never modified; new files are written beside the originals.
 
 1. **Lock re-verification**: recompute, exactly as `BASELINE.lock` records
-   them, the checksums of the user project files the lock covers.
-   - A structural-anchor mismatch (model path / pretrained checkpoint / their
-     hashes) → `done=false`, one conflict entry describing the anchor
-     mismatch, NO files written.
+   them, the checksums of the user project files the lock covers
+   (lock schema: model_path + the shadow *.py checksum map).
+   - A structural-anchor mismatch (model path / the shadow checksum map) →
+     `done=false`, one conflict entry describing the anchor mismatch, NO
+     files written.
    - A per-file checksum mismatch (the user changed that file during the
      run) → conflict entry `<relpath>: original file changed during the run`,
      that file is not written.
@@ -201,8 +225,9 @@ files are never modified; new files are written beside the originals.
 Before rendering charts, invoke the two deterministic shared scripts:
 `experiment_ledger.py --artifacts <workspace>` and
 `dashboard_snapshot.py --artifacts <workspace>`. Their failure is NOT
-best-effort: an unreadable ledger or dashboard is a report-builder failure.
-Also finalize the live charts (best-effort, never blocks the report):
+best-effort: an unreadable ledger or dashboard is a report-builder failure
+(the builder exits non-zero — never emit a report over a broken memory).
+Also finalize the live charts (the ONLY best-effort command in this node):
 `push_curves.py --artifacts <workspace> --title "(final)" --docs` — the
 terminal push so the final curve / pareto / analysis-docs manifest state is
 visible even if the daemon saw no mid-run poll; a successful push appends
@@ -246,7 +271,7 @@ stdlib-only rendering — no external dependencies):
 
 ## 4b. Accuracy-rule merge (ALWAYS, before the markdown)
 
-Hand the workspace's `accuracy_rules.json` to the two permanent homes —
+Hand the workspace's `accuracy_rules.json` to its permanent home —
 regardless of the terminal status (a failed run's measured lessons are
 the most valuable ones):
 
@@ -256,17 +281,21 @@ python3 "$ORCA_ARTIFACTS_DIR/scripts/rules_pool.py" merge \
 ```
 
 It overwrites the project mirror `<project-root>/docs/prof-opt/
-accuracy_rules.json` with the workspace rules and merges them into the
-cross-run pool. Best-effort: on any disclosed failure, say so in `reason`
-and continue. Then write the human-readable table mirror
-`<project-root>/docs/prof-opt/accuracy_rules.md` (one row per rule:
-pattern / direction / generality / confidence / evidence rounds / gap /
-statement).
+accuracy_rules.json` with the workspace rules (the mirror is the one
+permanent home — there is no cross-run pool). PROTECTED: an unparseable
+workspace file makes the merge refuse (exit 2, the mirror survives), and
+an EMPTY rule set overwriting a non-empty mirror requires an explicit
+`--allow-empty` the builder never passes. Any failure — including a
+refusal — is written into `reason` and the report continues; `status` is
+never changed by the merge. (No `accuracy_rules.md` table mirror is
+written: the JSON mirror is the merge's single product.)
 
 ## 5. prof_opt_report.md (human-readable, workspace root)
 
-Sections: Provenance Disclosure (profile_mode.json verbatim +
-train_device.json verbatim + scripts .VERSION stamp) · Terminal State
+Sections: Disclosure (the three v7 lines: profiling source with the
+contracts profile block, training device backend verbatim, chart daemon
+state from .chart_push.log + the pushed dictionary; + scripts .VERSION
+stamp) · Terminal State
 (status/stage/reason, including the harvest disclosure when it fired) ·
 Per-Round Table (round, proposals, verdict outcome counts, the round's
 variant and its fate, round best makespan) · **Training Outcome
@@ -288,9 +317,7 @@ is `full_train_budget.epochs` read from `contracts.json` — the EFFECTIVE
 value the fingerprint carries, never the raw argparse count**) · Baseline
 vs Final (baseline makespan / full-training anchor; winner makespan /
 accuracy / gap / budget verdict — the baseline side reads
-`base/origin_anchor.json`; add a "pretrained reference" line — path only,
-explicitly non-gating — when `readiness.json` records a provided
-pretrained ckpt) · **Round Conclusions** (one line per round distilled
+`base/origin_anchor.json`) · **Round Conclusions** (one line per round distilled
 from that round's `rounds/<NNN>/analysis.md` — the latency lessons
 exactly as recorded at round end; then a two-to-three-line cross-round
 summary: which lever families delivered vs were falsified, and the

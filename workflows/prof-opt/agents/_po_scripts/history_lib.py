@@ -25,9 +25,10 @@ Dedup side (mechanical rules — no LLM judgement):
     latency_pass    is a process state and NEVER blocks;
     structural_mismatch / variant_broken share ONE joint retry budget per sig
                       (total attempts with those outcomes <= 2, i.e. <= 1 retry);
-    probe_insufficient is retryable iff the proxy config (probe_epochs /
-                      probe_max_steps / probe_data_value) differs from the
-                      current config — the same fields the proxy budget pins.
+    probe_insufficient permanently consumes the signature (v7: the proxy
+                      budget is fixed epoch-only — no knob exists whose
+                      change would reopen it; a genuine retry is a NEW
+                      composition with a new signature).
     accuracy_fail is NOT permanent: a recovery-round composed proposal
                       produces a NEW change_sig that exact-match dedup admits
                       by design (the round-level rerouting signal is the
@@ -47,7 +48,7 @@ from typing import Any
 # exhaustive; builders validate against these so a typo fails loudly.
 IMPL_FIELDS = (
     "vid", "round", "seq", "parent_vid", "change_sig",
-    "probe_epochs", "probe_max_steps", "probe_data_value", "target_modules",
+    "probe_epochs", "target_modules",
     "predicted_delta_cycles", "implemented", "base_at_proposal",
 )
 LATENCY_FIELDS = (
@@ -119,8 +120,7 @@ def _append(path: Path, vid: str, new_fields: dict[str, Any], allowed: tuple[str
 
 def append_implemented(path: str | Path, vid: str, *, round: int, seq: int,
                        parent_vid: str | None, change_sig: str,
-                       probe_epochs: int, probe_max_steps: int | None,
-                       probe_data_value: str | int | float | None,
+                       probe_epochs: int,
                        target_modules: list[str],
                        predicted_delta_cycles: int,
                        base_at_proposal: dict,
@@ -128,10 +128,9 @@ def append_implemented(path: str | Path, vid: str, *, round: int, seq: int,
     """First row of a vid (the proposal node's mechanical write after the
     implementer subagent returns). outcome stays unset unless broken.
 
-    The probe_* fields carry the proxy budget the variant trained under
-    (verbatim from contracts.json proxy_budget) — they are the dedup config
-    fingerprint, so all three must match the current budget for a
-    probe_insufficient sig to count as same-config.
+    probe_epochs carries the proxy depth the variant judged under
+    (verbatim from contracts.json proxy_budget — epoch-only in v7, no knob
+    fields).
 
     base_at_proposal: the base pointer when the proposal was generated,
     e.g. {"vid": null, "makespan_cycles": 15288} — the lineage anchor for
@@ -139,8 +138,6 @@ def append_implemented(path: str | Path, vid: str, *, round: int, seq: int,
     fields = {
         "vid": vid, "round": round, "seq": seq, "parent_vid": parent_vid,
         "change_sig": change_sig, "probe_epochs": probe_epochs,
-        "probe_max_steps": probe_max_steps,
-        "probe_data_value": probe_data_value,
         "target_modules": list(target_modules),
         "predicted_delta_cycles": predicted_delta_cycles,
         "implemented": implemented, "base_at_proposal": dict(base_at_proposal),
@@ -246,16 +243,14 @@ def read_latest(path: str | Path) -> dict[str, dict[str, Any]]:
 
 # ── dedup ────────────────────────────────────────────────────────────────────
 
-def dedup_state(path: str | Path, change_sig: str, probe_epochs: int,
-                probe_max_steps: int | None,
-                probe_data_value: str | int | float | None = None) -> dict[str, Any]:
+def dedup_state(path: str | Path, change_sig: str,
+                probe_epochs: int | None = None) -> dict[str, Any]:
     """Mechanical dedup verdict for a candidate change signature.
 
-    The probe config fingerprint (probe_epochs / probe_max_steps /
-    probe_data_value) mirrors contracts.json proxy_budget — `None` for
-    max_steps/data_value means "mechanism/knob absent", which is a legitimate
-    pinned value, NOT "unset": a same-budget re-proposal of a
-    probe_insufficient sig is blocked, a changed budget reopens it.
+    probe_epochs is carried for disclosure only — the v7 proxy budget is
+    fixed epoch-only, so a probe_insufficient signature is permanently
+    consumed (no config knob exists whose change would reopen it; a genuine
+    retry is a NEW composition).
 
     Returns {"blocked": bool, "reason": str}. Reads ALL version rows for the
     sig (permanent outcomes are judged on any version, not just the latest).
@@ -275,51 +270,24 @@ def dedup_state(path: str | Path, change_sig: str, probe_epochs: int,
 
     for row in hits:
         if row.get("outcome") == "probe_insufficient":
-            same_cfg = (row.get("probe_epochs") == probe_epochs
-                        and row.get("probe_max_steps") == probe_max_steps
-                        and row.get("probe_data_value") == probe_data_value)
-            if same_cfg:
-                return {"blocked": True,
-                        "reason": "probe_insufficient with the SAME proxy budget "
-                                  "(change proxy_budget in contracts.json to retry)"}
+            return {"blocked": True,
+                    "reason": "该签名已永久消费 (probe_insufficient — the proxy "
+                              "budget is fixed epoch-only, no retry path "
+                              "exists; compose a NEW signature instead)"}
     return {"blocked": False, "reason": "no prior terminal outcome for this sig"}
-
-
-def nullable_int(raw: str) -> int | None:
-    """CLI-facing nullable int: ``null``/``none`` -> None (a pinned
-    "mechanism absent" value, never an unset one)."""
-    return None if raw.strip().lower() in ("null", "none") else int(raw)
-
-
-def nullable_value(raw: str):
-    if raw.strip().lower() in ("null", "none"):
-        return None
-    try:
-        return int(raw)
-    except ValueError:
-        pass
-    try:
-        return float(raw)
-    except ValueError:
-        return raw  # a non-numeric knob value (e.g. a fraction string)
 
 
 if __name__ == "__main__":
     # Small self-check CLI: print dedup verdict for one sig (pure read).
-    # The three probe-config flags are REQUIRED on purpose: a silent default
-    # (e.g. max_steps falling back to 500 while the pinned budget is null)
-    # is exactly the fingerprint mismatch that re-admits same-budget retries.
     import argparse
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--history", required=True)
     ap.add_argument("--sig", required=True)
-    ap.add_argument("--probe-epochs", type=int, required=True)
-    ap.add_argument("--probe-max-steps", type=nullable_int, required=True,
-                    help="int, or null/none when no truncation mechanism exists")
-    ap.add_argument("--probe-data-value", type=nullable_value, required=True,
-                    help="knob value, or null/none when no data knob exists")
+    ap.add_argument("--probe-epochs", type=int, required=True,
+                    help="the proxy depth from contracts.json proxy_budget "
+                         "(disclosure only — the v7 budget is fixed "
+                         "epoch-only, probe_insufficient is permanent)")
     ns = ap.parse_args()
-    print(json.dumps(dedup_state(ns.history, ns.sig, ns.probe_epochs,
-                                 ns.probe_max_steps, ns.probe_data_value)))
+    print(json.dumps(dedup_state(ns.history, ns.sig, ns.probe_epochs)))
     sys.exit(0)

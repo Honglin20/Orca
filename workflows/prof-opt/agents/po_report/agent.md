@@ -41,12 +41,14 @@ training/eval step.
 - The report archive directory is fixed at `docs/prof-opt` relative to
   `{{ inputs.project_root }}`. At the END of the builder, copy the run's
   human-readable deliverables into it: `prof_opt_report.md`, the `charts/`
-  files, `baseline_status.md`, and the rule-table mirror
-  `accuracy_rules.md` — created if missing, existing files at the same name
-  are never overwritten (suffix the copy with the run id instead — the run
-  id is `$ORCA_RUN_ID`, the engine-injected run identity the workspace
-  `.run_lock` records; a run-metadata value, not tied to the chart env).
-  This is a terminal one-time user-side write, same class as the write-back.
+  files, and `baseline_status.md` — created if missing, existing files at
+  the same name are never overwritten (suffix the copy with the run id
+  instead — the run id is `$ORCA_RUN_ID`, the engine-injected run identity
+  the workspace `.run_lock` records; a run-metadata value, not tied to the
+  chart env). (`accuracy_rules.md` is NOT archived: the machine-readable
+  mirror `accuracy_rules.json`, written by the rule merge, is that stage's
+  single product — one writer, one policy.) This is a terminal one-time
+  user-side write, same class as the write-back.
 - The accuracy budget for the winner verdict is read from the frozen
   origin anchor (`base/origin_anchor.json`), never from a raw input. The
   anchor's baseline makespan / target line / budget also fill the report's
@@ -118,17 +120,24 @@ builder:
   writes);
 - is safe to re-run (write-back is idempotent: identical content at the
   target counts as written, different content is never overwritten);
-- opens the report's first section with the three disclosure blocks:
-  `profile_mode.json` verbatim (the profiling configuration every number in
-  the report was measured under), `train_device.json` verbatim (the
-  training device backend every training ran on), and the deployed
-  scripts' `.VERSION` manifest stamp (`scripts/.VERSION`);
+- opens the report's first section with the three v7 disclosure lines:
+  the profiling source ("mfu 实测 via 用户内网评测工具", with the
+  `contracts.json` `profile` block verbatim — the configuration every
+  number in the report was measured under), `train_device.json` verbatim
+  (the training device backend every training ran on), and the chart
+  daemon state (`.chart_push.log` last line + this run's pushed
+  dictionary — offline/failed written down), plus the deployed scripts'
+  `.VERSION` manifest stamp (`scripts/.VERSION`);
 - judges the winner from history `success` rows (gap-best, ties by
   makespan — the format document's winner section);
 - reads `base/origin_anchor.json` for the baseline block (original baseline
   makespan, frozen target line, accuracy budget);
 - reads the last round's `proposals.json` and `accuracy_rules.json` as
   report material;
+- runs the CARD-RELEASE SWEEP mechanically — `device_alloc.py sweep`
+  (the ledger's own judgment: dead owners released, alive kept, unknown
+  kept with the "liveness unverifiable" disclosure; every verdict folds
+  into the report's disclosure section — see the format document's 0b);
 - prints the final single-line JSON on stdout; everything else goes to
   stderr.
 
@@ -151,11 +160,12 @@ python3 "$ORCA_ARTIFACTS_DIR/scripts/rules_pool.py" merge \
 
 It overwrites the project mirror
 `{{ inputs.project_root }}/docs/prof-opt/accuracy_rules.json` with the
-workspace rules and merges them into the cross-run pool (model-hash keyed
-evidence, confirm/refute bookkeeping). Best-effort: a disclosed failure
-never changes the report status. Then write the human-readable table mirror
-`docs/prof-opt/accuracy_rules.md` (one row per rule: pattern / direction /
-generality / confidence / evidence rounds / gap / statement).
+workspace rules (no cross-run pool — the mirror is the permanent home).
+PROTECTED both ways: an unparseable workspace rule file makes the merge
+REFUSE (exit 2 — the mirror survives untouched), and an EMPTY rule set
+overwriting a non-empty mirror needs an explicit `--allow-empty` (the
+builder never passes it). A merge failure (including a refusal) is written
+into `reason` — disclosed, never silent — but never changes `status`.
 
 ### Step 3: Charts + human report (inside the builder)
 
@@ -168,6 +178,10 @@ python3 "$ORCA_ARTIFACTS_DIR/scripts/experiment_ledger.py" \
 python3 "$ORCA_ARTIFACTS_DIR/scripts/dashboard_snapshot.py" \
   --artifacts "$ORCA_ARTIFACTS_DIR"
 ```
+
+A failure of either command is a BUILDER FAILURE (fail loud — the report
+is never emitted over an unreadable ledger or dashboard); only
+`push_curves.py` is best-effort.
 
 **Finalize the live charts** (the terminal push, so the final curve /
 pareto / docs-manifest state is visible even if the daemon saw no mid-run
@@ -194,10 +208,9 @@ python3 "$ORCA_ARTIFACTS_DIR/report_builder.py"
 ```
 
 - The last stdout line must parse as JSON and carry every schema field
-  (`status, stage, reason, winner, baseline, final, pretrained_ref_acc,
-  rounds_completed, proposals_total, history_path, write_back,
-  charts_summary, artifacts, error`). Fix the builder and re-run on
-  mismatch (fix-loop ≤ 3).
+  (`status, stage, reason, winner, baseline, final, rounds_completed,
+  proposals_total, history_path, write_back, charts_summary, artifacts,
+  error`). Fix the builder and re-run on mismatch (fix-loop ≤ 3).
 - **Your entire final reply = that single line, verbatim.** No text before
   or after.
 

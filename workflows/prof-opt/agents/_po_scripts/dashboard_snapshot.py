@@ -24,7 +24,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ledger_aggregate  # noqa: E402
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3  # v3: the retired best.json read/field is gone (§12)
 
 
 def _json(path: Path, default: Any) -> Any:
@@ -51,7 +51,6 @@ def _variant_view(row: dict[str, Any]) -> dict[str, Any]:
 
 def snapshot(artifacts: Path) -> dict[str, Any]:
     ledger = ledger_aggregate.aggregate(artifacts)  # §7.5 trigger ②: refresh first
-    best = _json(artifacts / "best.json", None)
     baseline = _json(artifacts / "base" / "bottleneck_report.json", {})
     curves: dict[str, list[dict[str, Any]]] = {}
     curve_files = [(artifacts / "baseline" / "baseline_metrics.jsonl", "baseline")]
@@ -66,7 +65,6 @@ def snapshot(artifacts: Path) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "baseline_makespan_cycles": baseline.get("makespan_cycles"),
-        "best": best,
         "variants": [_variant_view(r) for r in ledger.get("rows", [])],
         "curves": curves,
     }
