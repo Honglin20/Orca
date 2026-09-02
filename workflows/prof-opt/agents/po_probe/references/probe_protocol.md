@@ -1,9 +1,9 @@
 # Probe Protocol
 
-Per-variant launch procedure (claim → render → detach → liveness → emit).
-Paths are relative to the workspace root (`$ORCA_ARTIFACTS_DIR`) unless
-absolute; `<VID>` = the variant being launched; every command runs with the
-workspace root as cwd.
+Per-variant launch procedure (observe → choose → claim → render → detach →
+liveness → emit). Paths are relative to the workspace root
+(`$ORCA_ARTIFACTS_DIR`) unless absolute; `<VID>` = the variant being
+launched; every command runs with the workspace root as cwd.
 
 Budgets and lines used here — all read from disk, never from inputs:
 
@@ -13,7 +13,8 @@ Budgets and lines used here — all read from disk, never from inputs:
   baseline trained under — it differs from the baseline ONLY in structure.
   Never render a smaller epoch count, never tune a data/step cap here.
 - frozen target line = `base/origin_anchor.json` `target_cycles`
-  (read-only; the boundary is inclusive).
+  (read-only; the boundary is inclusive) — judged ONLY through
+  `scripts/check_verdict.py` (the one predicate).
 - training device backend + count = `train_device.json` (resolved once at
   the entry node). Every card in use is owned by an `O_EXCL` lock under
   `devices/`; the ledger (`scripts/device_alloc.py`) is the ONLY
@@ -39,74 +40,60 @@ Budgets and lines used here — all read from disk, never from inputs:
      launch is in flight: resume the liveness poll (never re-detach);
    - otherwise → start at the verdict precondition.
 3. Write `probe_status.md`: training-set list, per-vid stage, live pids,
-   attempt counts, timestamp. Truncate the heal ledger
-   `.po_probe_healed.txt` on node entry (it reports THIS entry's heals
-   only).
+   attempt counts, timestamp.
 
 ## Verdict precondition (HARD — before any resource is claimed)
 
-For each vid in the training set, compare mechanically:
+For each vid in the training set, run the ONE latency-line predicate
+(the recheck gate and the emit gate call the same script):
 
 ```bash
-python3 - "$ORCA_ARTIFACTS_DIR" "<VID>" <<'PY'
-import json, sys
-from pathlib import Path
-art, vid = Path(sys.argv[1]), sys.argv[2]
-try:
-    verdict = json.loads((art / "variants" / vid / "verdict.json")
-                         .read_text(encoding="utf-8"))
-    target = json.loads((art / "base" / "origin_anchor.json")
-                        .read_text(encoding="utf-8"))["target_cycles"]
-except Exception as exc:
-    raise SystemExit(f"FATAL: {vid} verdict/anchor unreadable ({exc}) — torn "
-                     "workspace; never launch, never re-measure here")
-ms = verdict.get("makespan_cycles")
-if not isinstance(ms, int) or isinstance(ms, bool):
-    raise SystemExit(f"FATAL: {vid} verdict.json carries no makespan_cycles — "
-                     "torn workspace (propose and probe disagree)")
-if ms > target:
-    raise SystemExit(f"FATAL: {vid} makespan {ms} > frozen target {target} — "
-                     "torn workspace (the verdict changed between propose "
-                     "and probe); fail loud")
-print(json.dumps({"vid": vid, "makespan_cycles": ms,
-                  "target_cycles": target, "ok": True}))
-PY
+python3 "$ORCA_ARTIFACTS_DIR/scripts/check_verdict.py" --vid <VID>
 ```
 
-A non-zero exit (or a missing verdict.json — same failure class) is a
-workspace-level failure: the node emits `status=failed` with the stderr
-quoted. No card is claimed, nothing launches.
+Exit 0 (`{"vid", "makespan_cycles", "target_cycles", "ok": true}`) → the
+verdict holds. A non-zero exit (missing/unparseable verdict, missing
+makespan, above the frozen line) is a workspace-level failure: the node
+emits `status=failed` with the stderr quoted. No card is claimed, nothing
+launches.
 
-## Device claim (or park)
+## Device: observe → choose → claim (or park)
 
-The free set is ALWAYS computed by the ledger (complement of real backend
-occupancy UNION live locks), never by hand:
+**Observe.** The probe passes the backend CLI's COMPLETE stdout through
+verbatim and parses nothing (reading vendor CLI tables is the node
+agent's judgement call, never the ledger's):
 
 ```bash
-python3 "$ORCA_ARTIFACTS_DIR/scripts/device_alloc.py" free \
-  --artifacts "$ORCA_ARTIFACTS_DIR"
+python3 "$ORCA_ARTIFACTS_DIR/scripts/device_alloc.py" probe \
+  --artifacts "$ORCA_ARTIFACTS_DIR" \
+  --backend "$(python3 -c 'import json; print(json.load(open("train_device.json"))["backend"])')"
 ```
 
-- `free: []` → **park**: final reply is a status message containing
-  `do not call orca next` (name `busy_real` / `locked` and any `recycled`
-  disclosures). ONE check per turn; the next turn re-checks. A full house
-  is a legitimate wait state — never an error, never a busy loop.
-- non-empty → claim, render, and detach chained in ONE command block (so a
-  claimed card never sits behind a dead turn). The claim is ONE
-  deterministic command (free → acquire → the acquired idx must lie inside
-  the free set — acquire is lock-scoped, real occupancy is free's half of
-  the ledger; a card outside the free set is busy-real or torn, never
-  trained on):
+stdout = `{"backend", "device_count", "locks": [{idx, vid, pid,
+acquired_at}...], "raw": "<backend CLI stdout verbatim>"}`.
+
+**Choose.** Read the `raw` text yourself and judge which cards are free;
+cross out every idx in `locks` (this run already holds those). A backend
+CLI that is missing or failing exits 2 — without observation there is no
+honest selection; fail loud, never guess.
+
+**Claim.** With the chosen idx, claim + render + detach chained in ONE
+command block (so a claimed card never sits behind a dead turn):
 
 ```bash
 python3 "$ORCA_ARTIFACTS_DIR/scripts/device_alloc.py" claim \
-  --artifacts "$ORCA_ARTIFACTS_DIR" --vid <VID>
+  --artifacts "$ORCA_ARTIFACTS_DIR" --vid <VID> --idx <IDX>
 ```
 
-`"ok": false` (`no free training device` / `all devices locked`) → park
-(status message). A non-zero exit (busy-real/torn idx guard — the command
-itself releases the offending card before failing) → node `status=failed`
-with the stderr quoted.
+- `"ok": true` → the card is yours (devices/<IDX>.lock, O_EXCL); continue
+  to the render.
+- `"ok": false` (`device <IDX> locked by vid=<...>`) → **park**: status
+  message containing `do not call orca next` (name the holder); ONE
+  re-probe per turn. A full house is a legitimate wait state — same-run
+  watchdogs reach terminal states and release their cards; never an
+  error, never a busy loop.
+- non-zero exit (idx out of range / hard ledger error) → node
+  `status=failed` with the stderr quoted.
 
 Lock ownership: the claim's owner pid is the claiming process (short-lived
 — the render needs the idx, so the claim necessarily precedes the detached
@@ -118,9 +105,9 @@ python3 "$ORCA_ARTIFACTS_DIR/scripts/device_alloc.py" adopt \
   --artifacts "$ORCA_ARTIFACTS_DIR" --vid <VID> --pid <train.pid content>
 ```
 
-Without the adopt, the next `free` anywhere in the run would reclaim the
-lock of a live training — the ledger's mutual exclusion rests on the
-long-lived owner, never on the claim command.
+Without the adopt, nobody links the lock to the live training — the
+ledger's mutual exclusion rests on the long-lived owner, never on the
+claim command.
 
 The release command (every failed launch path, and the probe_insufficient
 terminal — a card never outlives the vid it was claimed for):
@@ -150,10 +137,15 @@ python3 "$ORCA_ARTIFACTS_DIR/scripts/device_alloc.py" release \
      --set "vid=<VID>" \
      --set "device=<IDX>" \
      --set "shadow_dir=$ORCA_ARTIFACTS_DIR/variants/<VID>/shadow" \
-     --set "shadow_pkgs=$(python3 -c "import json; print(','.join(json.load(open('$ORCA_ARTIFACTS_DIR/contracts.json'))['shadow']['shadow_pkgs']))")" \
+     --set "shadow_pkgs=$(python3 "$ORCA_ARTIFACTS_DIR/scripts/shadow_pkgs_csv.py" --artifacts "$ORCA_ARTIFACTS_DIR")" \
      --set "project_root=<project-root>" \
      --set "python=$(python3 -c "import json; print(json.load(open('$ORCA_ARTIFACTS_DIR/contracts.json'))['interpreter']['sys_executable'])")"
    ```
+
+   The `shadow_pkgs` value comes from the shared resolver script
+   `scripts/shadow_pkgs_csv.py` (single resolution order: contracts.json
+   `shadow.shadow_pkgs`, else readiness.json `shadow_pkgs`) — never an
+   inline JSON one-liner.
 
    **Render failure → release the card FIRST, then fail loud** (the error
    names the released idx): a claimed card never outlives a failed render.
@@ -170,41 +162,32 @@ python3 "$ORCA_ARTIFACTS_DIR/scripts/device_alloc.py" release \
 
    Then confirm the wrapper came alive (pid file + `/proc` cmdline
    attribution, bounded wait ≤ 10 × 1s) and **adopt its pid** (the
-   device-claim section's adopt command) — the launch is not finished
+   device section's adopt command) — the launch is not finished
    until the claim is owned by the long-lived wrapper.
 
-3. **Detach the watchdog** (it self-writes `watchdog.pid`; its log lines
-   carry ISO8601 stamps; the card is released by its terminal action):
+3. **Detach the watchdog** (a stdlib-only resident guardian; it self-writes
+   `watchdog.pid`; every watchdog.log line carries an ISO8601 stamp; the
+   card is released by its terminal action):
 
    ```bash
    cd "$ORCA_ARTIFACTS_DIR/variants/<VID>" && \
-   setsid bash "$ORCA_ARTIFACTS_DIR/scripts/watch_variant.sh" \
+   setsid python3 "$ORCA_ARTIFACTS_DIR/scripts/watch_variant.py" \
      --vid <VID> --device <IDX> </dev/null >>watchdog.log 2>&1 &
    ```
 
    Confirm `watchdog.pid` appears (bounded wait ≤ 10 × 1s). The launch is
    incomplete without its guardian.
 
-## Liveness (four conditions, bounded ≤ 15 rounds × ≤ 30 s)
+## Liveness (TWO conditions, bounded ≤ 15 rounds × ≤ 30 s)
 
-Per poll cycle, ALL FOUR must hold:
+Per poll cycle, BOTH must hold (the epoch-1 metric-line parse is the
+watchdog's — it parses the curve every 10 s anyway; a slow first epoch
+is never misjudged as a dead launch here):
 
 1. `train.pid` alive AND its `/proc/<pid>/cmdline` references
    `train.rendered.sh` (attribution — a recycled pid from an unrelated
    process never counts);
-2. `train.log` exists and is non-empty;
-3. the epoch-1 metric line is parseable:
-
-   ```bash
-   python3 "$ORCA_ARTIFACTS_DIR/scripts/metric_curve.py" extract \
-     --contract "$ORCA_ARTIFACTS_DIR/contracts.json" \
-     --log "$ORCA_ARTIFACTS_DIR/variants/<VID>/train/train.log" \
-     --out "$ORCA_ARTIFACTS_DIR/variants/<VID>/metrics/metrics.jsonl"
-   ```
-
-   rc 0 = at least one contiguous-from-1 epoch line parsed (epoch 1 among
-   them — the contracts pattern enforces contiguity);
-4. the four conditions held simultaneously in this cycle.
+2. `train.log` exists and is non-empty.
 
 Never let one sleep approach the single-bash cap; a cycle that tops out
 your turn ends with the status message (`do not call orca next`) and the
@@ -213,23 +196,18 @@ next turn resumes polling.
 **Success** → write the liveness record (atomic replace via a tmp file +
 rename): `variants/<VID>/train/liveness.json` =
 `{"vid": "<VID>", "epoch1_ok": true, "device": <IDX>, "train_pid": <pid>,
-"ts": "<ISO8601>"}`.
+"ts": "<ISO8601>"}` (`epoch1_ok` records that the launch liveness held;
+the curve parsing itself is the watchdog's business).
 
 **Bounded failure** → retry budget. The failure classes, explicitly (an
 ambiguous state is never left to improvisation):
 
-- 15 rounds without all four conditions holding;
+- 15 rounds without both conditions holding;
 - the training crashed: `rc` file present with a non-zero value, or the
   group dead without an rc file;
-- the training finished NATURALLY inside the window (`rc` == 0) but the
-  epoch-1 line never parsed — a fast-completing run that produced no
-  parseable curve is a failed launch for liveness purposes (disclose the
-  rc=0 + empty-curve fact in `probe_status.md`), never a silent pass.
-
-(The remaining natural-completion case — `rc` == 0 AND the epoch-1 line
-already parsed — is a SUCCESS: the four conditions were met while the pid
-was alive; write the liveness record and continue to emit. The training's
-terminal judgment belongs to the watchdog either way.)
+- the training finished NATURALLY inside the window (`rc` == 0) — the
+  launch liveness held; write the liveness record and continue to emit
+  (the training's terminal judgment belongs to the watchdog either way).
 
 - retry at most 2 times: read the train log tail, fix ONLY by re-rendering
   with corrected parameter values (the heal whitelist: path/argument
@@ -239,7 +217,6 @@ terminal judgment belongs to the watchdog either way.)
   relaunch re-creates the checkpoints, the control files must survive),
   relaunch (attempt counter in `probe_status.md`; re-adopt the fresh
   wrapper pid). The card STAYS claimed across retries of the same vid.
-  Record heals under `.po_probe_healed.txt`.
 - exhausted → terminal `probe_insufficient` (typed builder only) + release
   the card + next vid:
 

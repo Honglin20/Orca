@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-"""Pre-return gate for po_probe (v6, SPEC §6.2).
+"""Pre-return gate for po_probe (v7 §6.2).
 
 Verifies the launch-and-release disk state before emit, for every variant
 whose LATEST history row is `latency_pass` (the training set; a vid that
 already reached a terminal row is out of scope):
 
-  1. verdict precondition: variants/<vid>/verdict.json carries
-     makespan_cycles <= the frozen target_cycles (base/origin_anchor.json).
-     A missing/above-line verdict is a torn workspace and must fail here.
+  1. verdict precondition: check_verdict.py — the ONE latency-line
+     predicate (v7 §6.2). A missing/above-line verdict is a torn workspace
+     and must fail here.
   2. device lock: a devices/<idx>.lock exists whose vid matches the vid.
   3. training liveness: variants/<vid>/train/train.pid records a LIVE pid
-     (with /proc cmdline attribution when readable — a recycled pid never
-     counts) OR the training already reached a terminal state
-     (variants/<vid>/train_status.json stage in killed|done|failed — the
-     watchdog's product) with the terminal file on disk.
+     (pid_lib's three-valued liveness — an UNVERIFIABLE pid is disclosed,
+     never counted alive; /proc cmdline attribution when readable — a
+     recycled pid never counts) OR the training already reached a terminal
+     state (variants/<vid>/train_status.json stage in killed|done|failed —
+     the watchdog's product) with the terminal file on disk.
   4. watchdog: variants/<vid>/watchdog.pid records a LIVE pid (with /proc
      cmdline attribution — a recycled pid never counts) OR the training
      already reached a terminal state (a guardian that terminalized and
@@ -30,9 +31,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from check_verdict import check_verdict  # noqa: E402 — the ONE line predicate
+from pid_lib import liveness  # noqa: E402 — the ONE liveness predicate
 
 TERMINAL_TRAIN_STAGES = frozenset({"killed", "done", "failed"})
 
@@ -46,22 +50,6 @@ def _load_json(path: Path, what: str):
         raise ValueError(f"{what} unparseable: {path} ({exc})") from exc
 
 
-def _pid_alive(pid: int) -> bool:
-    if sys.platform == "win32":
-        # os.kill(pid, 0) on Windows TERMINATES the target — never signal a
-        # pid we are only checking. /proc (when present) is the existence
-        # probe; without it liveness cannot be disproven and counts alive.
-        proc = Path(f"/proc/{pid}")
-        return proc.exists() if proc.parent.is_dir() else True
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # alive, owned by another user — still an owner
-    return True
-
-
 def _pid_attributed(pid: int, expect: str) -> bool:
     """True when the pid's /proc cmdline references `expect`. An unreadable
     /proc (non-POSIX host) cannot disprove attribution — count it alive; a
@@ -69,32 +57,20 @@ def _pid_attributed(pid: int, expect: str) -> bool:
     try:
         cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
     except OSError:
-        return True
+        return True   # an unreadable /proc cannot DISPROVE attribution
     if not cmdline:
         return True
     return expect in cmdline.replace(b"\0", b" ").decode("utf-8", "replace")
 
 
-def _check_vid(art: Path, vid: str, target: int, problems: list[str]) -> None:
-    # 1. verdict precondition (inclusive boundary: == target holds)
+def _check_vid(art: Path, vid: str, problems: list[str]) -> None:
+    # 1. verdict precondition — via check_verdict.py, the ONE latency-line
+    # predicate (v7 §6.2: the probe emit gate never re-implements it)
     try:
-        verdict = _load_json(art / "variants" / vid / "verdict.json",
-                             f"{vid} verdict.json")
+        check_verdict(art, vid)
     except ValueError as exc:
-        problems.append(str(exc))
-        verdict = None
-    if not isinstance(verdict, dict):
-        problems.append(f"{vid} verdict.json missing or not an object — torn "
-                        "workspace (propose and probe disagree)")
-    else:
-        ms = verdict.get("makespan_cycles")
-        if not isinstance(ms, int) or isinstance(ms, bool):
-            problems.append(f"{vid} verdict.json carries no makespan_cycles — "
-                            "torn workspace")
-        elif ms > target:
-            problems.append(
-                f"{vid} makespan {ms} > frozen target {target} — torn "
-                "workspace (the verdict changed between propose and probe)")
+        problems.append(f"{vid} {exc} — torn workspace (propose and probe "
+                        "disagree)")
 
     # 2. device lock named for this vid
     vdir = art / "variants" / vid
@@ -132,11 +108,16 @@ def _check_vid(art: Path, vid: str, target: int, problems: list[str]) -> None:
     terminal = (isinstance(train_status, dict)
                 and train_status.get("stage") in TERMINAL_TRAIN_STAGES)
     if pid is not None and not terminal:
-        if not _pid_alive(pid):
+        state = liveness(pid)
+        if state == "dead":
             problems.append(
                 f"{vid} training pid {pid} is dead with no terminal "
                 "train_status.json (stage killed|done|failed) — an "
                 "unjudged dead launch")
+        elif state == "unknown":
+            problems.append(
+                f"{vid} training pid {pid}: liveness unverifiable on this "
+                "host — treated as NOT confirmed alive (never guessed)")
         elif not _pid_attributed(pid, "train.rendered.sh"):
             problems.append(
                 f"{vid} training pid {pid} is alive but its cmdline does not "
@@ -157,29 +138,35 @@ def _check_vid(art: Path, vid: str, target: int, problems: list[str]) -> None:
                             f"{wpid_path.read_text(encoding='utf-8')!r}")
         else:
             if not terminal:
-                if not _pid_alive(wpid):
+                state = liveness(wpid)
+                if state == "dead":
                     problems.append(
                         f"{vid} watchdog pid {wpid} is dead with no terminal "
                         "train_status.json (stage killed|done|failed) — the "
                         "training is unsupervised")
-                elif not _pid_attributed(wpid, "watch_variant.sh"):
+                elif state == "unknown":
+                    problems.append(
+                        f"{vid} watchdog pid {wpid}: liveness unverifiable "
+                        "on this host — treated as NOT confirmed alive "
+                        "(never guessed)")
+                elif not _pid_attributed(wpid, "watch_variant.py"):
                     problems.append(
                         f"{vid} watchdog pid {wpid} is alive but its cmdline "
-                        "does not reference watch_variant.sh (pid reuse — not "
+                        "does not reference watch_variant.py (pid reuse — not "
                         "our guardian)")
 
     # 5. liveness record
     try:
-        liveness = _load_json(vdir / "train" / "liveness.json",
-                              f"{vid} liveness.json")
+        liveness_rec = _load_json(vdir / "train" / "liveness.json",
+                                  f"{vid} liveness.json")
     except ValueError as exc:
-        liveness = None
+        liveness_rec = None
         problems.append(str(exc))
-    if not isinstance(liveness, dict):
+    if not isinstance(liveness_rec, dict):
         if not terminal:
-            problems.append(f"{vid} train/liveness.json missing (the epoch-1 "
+            problems.append(f"{vid} train/liveness.json missing (the launch "
                             "liveness proof is a hard emit precondition)")
-    elif liveness.get("epoch1_ok") is not True:
+    elif liveness_rec.get("epoch1_ok") is not True:
         problems.append(f"{vid} liveness.json epoch1_ok is not true")
 
 
@@ -211,18 +198,6 @@ def main() -> int:
         return 1
 
     try:
-        anchor = _load_json(art / "base" / "origin_anchor.json",
-                            "base/origin_anchor.json")
-    except ValueError as exc:
-        anchor = None
-        problems.append(str(exc))
-    target = anchor.get("target_cycles") if isinstance(anchor, dict) else None
-    if not isinstance(target, int) or isinstance(target, bool):
-        problems.append("base/origin_anchor.json target_cycles unavailable "
-                        "(baseline stage incomplete)")
-        target = None
-
-    try:
         latest = history_lib.read_latest(art / "history.jsonl")
     except Exception as exc:
         print(f"check_probe_emit: FAIL history unreadable: {exc}",
@@ -232,8 +207,7 @@ def main() -> int:
                      if row.get("outcome") == "latency_pass")
 
     for vid in pending:
-        if target is not None:
-            _check_vid(art, vid, target, problems)
+        _check_vid(art, vid, problems)
 
     if problems:
         for p in problems:

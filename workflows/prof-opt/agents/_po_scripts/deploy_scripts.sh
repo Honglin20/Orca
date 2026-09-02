@@ -50,7 +50,7 @@ if [ "$VERIFY" -eq 1 ]; then
   NOW="$(manifest_of "$ART/scripts")"
   WANT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["manifest"])' "$ART/scripts/.VERSION")"
   if [ "$NOW" != "$WANT" ]; then
-    echo "FATAL: deployed script set does not match its .VERSION stamp (now $NOW, stamp $WANT) — tampered or half-deployed workspace; 部署件版本戳不符，需 fresh_start 重建工作区" >&2
+    echo "FATAL: deployed script set does not match its .VERSION stamp (now $NOW, stamp $WANT) — tampered or half-deployed workspace; re-run the entry node's deploy step to redeploy the current script set, or investigate manually (v7 P7: at a MID-STREAM node never respond by wiping a workspace that may hold in-flight training — the entry node alone maps this failure to a fresh_start rebuild)" >&2
     exit 1
   fi
   echo "deploy verify: ok (manifest $NOW)" >&2
