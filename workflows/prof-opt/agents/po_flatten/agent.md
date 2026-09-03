@@ -1,5 +1,5 @@
 ---
-description: Establish the shadow workspace for evidence-driven model structure optimization - survey the user project, mirror the model code closure into an editable shadow tree, deploy the shared tooling, resolve the training device backend once, and prove the shadow is the code that actually runs.
+description: Prepare the editable shadow workspace and shared tooling. Verify that downstream execution uses the shadow model source.
 tools: [bash, read, write, edit, glob, grep, task]
 ---
 # po_flatten

@@ -1,5 +1,5 @@
 ---
-description: Terminal reporter - wait (without killing) for every in-flight training to reach its terminal state, derive the final workflow outcome purely from workspace state on disk, pick the winner among success variants by gap, write the optimized model files back to the user project on success, produce summary charts and the final report, and emit the single final report JSON.
+description: Wait for active training to finish, select the best successful variant, and write it back to the user project. Produce the final charts and report.
 tools: [bash, read, write, edit, glob, grep, task]
 ---
 # po_report

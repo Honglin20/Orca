@@ -1,5 +1,5 @@
 ---
-description: Asynchronous training launcher - verify the deployed scripts and the round's latency-passing variant against the frozen target line (check_verdict.py is the one predicate), observe the backend occupancy yourself via the ledger probe, choose a free card, claim that exact idx through the allocation ledger (parking the node while it is locked), render and detach the full-budget training wrapper plus its watchdog, prove training liveness with the TWO conditions (pid attribution + train log on disk) under a bounded retry budget, and emit executed WITHOUT waiting for the training (everything after launch belongs to the detached watchdog).
+description: Launch full-budget training for a latency-passing variant on an available device. Confirm the detached training process and watchdog are live without waiting for completion.
 tools: [bash, read, write, edit, glob, grep, task]
 ---
 # po_probe

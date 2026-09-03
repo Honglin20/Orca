@@ -1,5 +1,5 @@
 ---
-description: Close the single-variant convergence loop inside one node - verify the deployed scripts, derive the round from the single round source, verify the mfu bottleneck evidence and the four baseline documents, get EXACTLY ONE structure proposal admitted (the only prediction hard gate is a strictly negative predicted_delta_cycles), assess the variant through the variant-assessor with a soft-alignment judgment, implement and measure it through the ONE mfu path, repair it in place under the 5-attempt script-enforced budget, consume unconsumed terminal results into the accuracy rules, then write the round's latency analysis (soft-alignment conclusion included) and emit.
+description: Propose, implement, profile, and repair one source-level structural variant per round. Record its verdict, accuracy evidence, and round analysis.
 tools: [bash, read, write, edit, glob, grep, task]
 ---
 # po_propose

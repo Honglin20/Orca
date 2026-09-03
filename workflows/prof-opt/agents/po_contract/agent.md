@@ -1,5 +1,5 @@
 ---
-description: Discover and empirically verify the three entry contracts (training / evaluation / export) by dispatching focused sub-agents, record the profiling configuration from the workflow inputs, assemble contracts.json (value-level fingerprints, admission ack, early-stop thresholds) and the three run templates from their proposal files, reject early-stopping projects, and validate the final contract with deterministic and semantic gates.
+description: Discover and validate the training, evaluation, export, and profiling contracts. Produce contracts.json and the executable templates used downstream.
 tools: [bash, read, write, edit, glob, grep, task]
 ---
 # po_contract

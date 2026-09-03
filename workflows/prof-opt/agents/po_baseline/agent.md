@@ -1,5 +1,5 @@
 ---
-description: Run the baseline chain non-blockingly - export and profile the pristine shadow through the ONE mfu path (dispatch the mfu-analyzer subagent, which drives the user's in-network evaluation tool; no estimator, no environment sniffing, no fallback), freeze the immutable origin anchors (target line + accuracy budget) from the first profile, pick a free training card by reading the occupancy probe's raw output yourself and hand its idx to the chain, launch the full-budget baseline training detached with a finalizer guardian that delivers the curve and accuracy anchors, dispatch the three baseline analysts in parallel, push the docs manifest, and emit once training liveness is confirmed.
+description: Profile and train the baseline, then freeze the latency and accuracy anchors. Produce the baseline analysis documents and confirm detached training is running.
 tools: [bash, read, write, edit, glob, grep, task]
 ---
 # po_baseline
