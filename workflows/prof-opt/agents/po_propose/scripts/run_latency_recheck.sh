@@ -6,11 +6,10 @@
 # verdict.json:
 #   1. two-layer declaration check (file / graph) against the CURRENT base
 #      (base shadow, base onnx);
-#   2. profile the variant onnx — the mfu four-piece ALREADY under
-#      variants/<vid>/profile/ (v7: mfu is the ONE profiling path; the node
-#      dispatched mfu-analyzer + ran mfu_adapter.py per variant before this
-#      call). A variant without a four-piece is a hard error — there is no
-#      inline profiling path to fall back to.
+#   2. profile the variant onnx — the raw schedule_result.json and the single
+#      mfu_bottleneck_report.md are already under variants/<vid>/profile/
+#      (v7: mfu is the ONE profiling path). The gate reads parallel_cycles
+#      directly from the raw JSON; no derived profiling files exist.
 #   3. latency gate via scripts/check_verdict.py —makespan (v7 §6.2: the
 #      ONE latency-line predicate; this script and the probe emit gate call
 #      it, neither re-implements the comparison). pass <=> makespan <=
@@ -78,9 +77,25 @@ command -v "$PY" >/dev/null 2>&1 || [ -x "$PY" ] || {
 for f in diff_check.py history_lib.py emit_result.py round_state.py check_verdict.py; do
   [ -f "$SCRIPTS/$f" ] || { echo "FATAL: $SCRIPTS/$f not deployed — entry stage incomplete" >&2; exit 2; }
 done
-for req in "$ART/base/profile/profile_summary.json" "$ART/base/model.onnx" "$ART/shadow" "$ART/rounds" "$ART/base/origin_anchor.json"; do
+for req in "$ART/base/profile/mfu_bottleneck_report.md" "$ART/base/model.onnx" "$ART/shadow" "$ART/rounds" "$ART/base/origin_anchor.json"; do
   [ -e "$req" ] || { echo "FATAL: base reference missing: $req (baseline stage incomplete)" >&2; exit 2; }
 done
+
+read_parallel_cycles() { # read_parallel_cycles <profile_dir>
+  "$PY" - "$1" <<'PYEOF'
+import json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+hits = sorted(root.glob("*/schedule_result.json"))
+if len(hits) != 1:
+    raise SystemExit(f"expected exactly one schedule_result.json under {root}, got {len(hits)}")
+doc = json.loads(hits[0].read_text(encoding="utf-8"))
+value = doc.get("parallel_cycles")
+if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    raise SystemExit(f"{hits[0]} carries invalid parallel_cycles: {value!r}")
+print(value)
+PYEOF
+}
 
 # ── target line (origin anchor — single source; read-only) ───────────────────
 TARGET_CYCLES="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["target_cycles"])' "$ART/base/origin_anchor.json")"
@@ -90,7 +105,8 @@ ROUND_RAW="$("$PY" "$SCRIPTS/round_state.py" --artifacts "$ART" current)"
 ROUND="$("$PY" -c 'import json,sys; print(json.loads(sys.argv[1])["round"])' "$ROUND_RAW")"
 [ "$ROUND" -gt 0 ] || { echo "FATAL: no rounds/<NNN>/ directory — proposal stage missing" >&2; exit 2; }
 ROUND_DIR="$ART/rounds/$(printf '%03d' "$ROUND")"
-BASE_MS="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["makespan_cycles"])' "$ART/base/profile/profile_summary.json")"
+BASE_MS="$(read_parallel_cycles "$ART/base/profile")" || {
+  echo "FATAL: baseline raw mfu result is missing or invalid" >&2; exit 2; }
 mkdir -p "$ROUND_DIR"
 VERDICTS="$ROUND_DIR/verdicts.jsonl"
 touch "$VERDICTS"
@@ -266,15 +282,14 @@ PYEOF
     continue
   fi
 
-  # ---- profile: the mfu four-piece (the one profiling path, v7) ----
+  # ---- profile: raw mfu result (the one profiling path, v7) ----
   var_ms=""
-  # the four-piece was produced per-variant by the node (mfu-analyzer
-  # subagent + mfu_adapter.py) BEFORE this call — there is no inline path
-  if [ ! -s "$vdir/profile/profile_summary.json" ]; then
-    echo "FATAL: $vid has no four-piece under variants/$vid/profile/ — profile it first (dispatch mfu-analyzer + run scripts/mfu_adapter.py --profile-dir variants/$vid/profile); there is no inline profiling path" >&2
+  if [ ! -s "$vdir/profile/mfu_bottleneck_report.md" ]; then
+    echo "FATAL: $vid has no mfu_bottleneck_report.md under variants/$vid/profile/ — dispatch mfu-analyzer first" >&2
     exit 2
   fi
-  var_ms="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["makespan_cycles"])' "$vdir/profile/profile_summary.json")"
+  var_ms="$(read_parallel_cycles "$vdir/profile")" || {
+    echo "FATAL: $vid raw schedule_result.json is missing or invalid" >&2; exit 2; }
 
   # ---- latency gate: scripts/check_verdict.py is the ONE predicate ----
   gate="fail"

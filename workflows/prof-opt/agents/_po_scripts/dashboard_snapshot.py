@@ -51,7 +51,7 @@ def _variant_view(row: dict[str, Any]) -> dict[str, Any]:
 
 def snapshot(artifacts: Path) -> dict[str, Any]:
     ledger = ledger_aggregate.aggregate(artifacts)  # §7.5 trigger ②: refresh first
-    baseline = _json(artifacts / "base" / "bottleneck_report.json", {})
+    baseline = _json(artifacts / "base" / "origin_anchor.json", {})
     curves: dict[str, list[dict[str, Any]]] = {}
     curve_files = [(artifacts / "baseline" / "baseline_metrics.jsonl", "baseline")]
     curve_files += [(p, p.parent.parent.name) for p in (artifacts / "variants").glob("*/metrics/metrics.jsonl")]
@@ -64,7 +64,7 @@ def snapshot(artifacts: Path) -> dict[str, Any]:
                 continue
     return {
         "schema_version": SCHEMA_VERSION,
-        "baseline_makespan_cycles": baseline.get("makespan_cycles"),
+        "baseline_makespan_cycles": baseline.get("baseline_makespan_cycles"),
         "variants": [_variant_view(r) for r in ledger.get("rows", [])],
         "curves": curves,
     }

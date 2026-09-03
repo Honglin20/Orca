@@ -2,7 +2,8 @@
 """mfu_benchmark.py — PLACEHOLDER for the real MFU benchmark script.
 
 >>> 用真脚本替换本文件时必须保持：CLI 形状 + 输出文件名/列结构（下方 CONTRACT）。
->>> 若真脚本输出格式不同，改 mfu_adapter.py 适配层，不要改本契约的消费者。
+>>> 真机脚本必须保持 schedule_result.json 的 canonical parallel_cycles 字段；
+>>> latency gate 直接读取该原始 JSON，不存在适配层。
 
 CLI (drop-in compatible with the real script):
 

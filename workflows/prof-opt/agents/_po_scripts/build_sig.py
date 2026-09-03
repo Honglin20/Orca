@@ -1,10 +1,8 @@
 """build_sig.py — CLI wrapper for the canonical change signature.
 
-build_change_sig (predict_delta) is the only legitimate way to assemble a
-change_sig: params come from the predictor, modules are sorted and
-comma-joined inside the builder (dedup is exact-string — a hand-ordered list
-would silently dodge the permanent-dedup set). This wrapper keeps subagent
-prompts to a single call with no import-path knowledge.
+The proposer supplies a stable params string from its concrete change spec;
+modules are sorted and comma-joined here because dedup is exact-string and a
+hand-ordered list would silently dodge the permanent-dedup set.
 """
 from __future__ import annotations
 
@@ -12,14 +10,19 @@ import argparse
 import json
 import sys
 
-from predict_delta import build_change_sig
+
+def build_change_sig(lever: str, params: str, modules: list[str]) -> str:
+    modules_canonical = ",".join(sorted(module for module in modules if module))
+    if not lever or not params or not modules_canonical:
+        raise ValueError("build_change_sig needs non-empty lever, params and modules")
+    return f"{lever}:{params}:{modules_canonical}"
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--lever", required=True)
     ap.add_argument("--params", required=True,
-                    help="params string from the predictor")
+                    help="stable params string from the concrete change spec")
     ap.add_argument("--modules", required=True,
                     help="JSON list of the affected modules (order-insensitive)")
     ns = ap.parse_args()

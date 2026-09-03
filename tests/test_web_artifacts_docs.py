@@ -82,8 +82,8 @@ def _make_artifacts(manager, rid: str) -> Path:
     (root / "base" / "profile" / "mfu_bottleneck_report.md").write_text(
         "# bottleneck\n", encoding="utf-8"
     )
-    (root / "base" / "bottleneck_report.json").write_text(
-        '{"top": [{"op": "conv", "pct": 62.5}]}', encoding="utf-8"
+    (root / "base" / "origin_anchor.json").write_text(
+        '{"baseline_makespan_cycles": 1000}', encoding="utf-8"
     )
     return root
 
@@ -108,8 +108,8 @@ def test_artifacts_file_serves_md_and_json(tmp_path):
                     "# baseline\n\n- 五段结构\n- 训练设备: npu\n",
                 ),
                 (
-                    "base/bottleneck_report.json",
-                    '{"top": [{"op": "conv", "pct": 62.5}]}',
+                    "base/origin_anchor.json",
+                    '{"baseline_makespan_cycles": 1000}',
                 ),
                 (
                     "base/profile/mfu_bottleneck_report.md",

@@ -138,7 +138,7 @@ fi
 # 5. deployed shared tooling
 for f in orca_inject/sitecustomize.py orca_inject/header.env \
          scripts/assert_shadow.py scripts/render_run.sh scripts/emit_result.py \
-         scripts/deploy_scripts.sh scripts/analyze.py scripts/mfu_adapter.py; do
+         scripts/deploy_scripts.sh; do
   [ -s "$ART/$f" ] || bad "deployed tooling missing: $ART/$f (run the deploy step)"
 done
 

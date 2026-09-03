@@ -3,10 +3,7 @@
 Covers: history_lib (builder rejection + the dedup branches over raw rows —
 permanent read-compat, joint retry budget, probe_insufficient permanently
 consumed in v7), gate_decide (loop continuation + the missing-anchor
-invariant), analyze (fixture-driven hot patterns / pipeline breakdown / cost
-table + strict unknown-key failure + the frozen origin anchor), predict_delta
-(v7: taskgraph-derived shape classes + critical-path weighting + the added-op
-override), the mfu_adapter's four-piece mapping, render_run (<<k>> token
+invariant), direct raw MFU result consumption, render_run (<<k>> token
 chain), check_contracts (v7: fairness-invariant token/budget enforcement,
 profile block, admission ack, single training template), run_baseline_chain
 (non-blocking baseline + finalizer guardian; mfu-only profiling with the
@@ -39,9 +36,8 @@ sys.path.insert(0, str(_SCRIPTS))
 
 import history_lib  # noqa: E402
 import push_curves  # noqa: E402
-from analyze import ContractError, analyze  # noqa: E402
+from build_sig import build_change_sig  # noqa: E402
 from gate_decide import decide  # noqa: E402
-from predict_delta import predict_delta  # noqa: E402
 
 
 # ── history_lib ───────────────────────────────────────────────────────────────
@@ -214,462 +210,9 @@ def test_gate_no_longer_reads_proposals_json(tmp_path: Path):
     assert out["decision"] == "loop"
 
 
-# ── analyze ───────────────────────────────────────────────────────────────────
-
-def _write_profile_fixture(profile_dir: Path) -> None:
-    """Chain MatMul -> Erf*3 -> Add, with a cheap Relu side-branch joining at
-    Add. Critical path = the chain; Erf must cluster as the top hot pattern."""
-    ops = [
-        {"name": "mm1", "op_type": "MatMul", "latency": 100, "depends_on": [],
-         "dims": [1, 64], "onnx_nodes": ["/fc1/MatMul"]},
-        {"name": "erf1", "op_type": "Erf", "latency": 50, "depends_on": ["mm1"],
-         "dims": [1, 64], "onnx_nodes": ["/act1/Erf"]},
-        {"name": "relu_side", "op_type": "Relu", "latency": 20, "depends_on": ["mm1"],
-         "dims": [1, 64], "onnx_nodes": ["/side/Relu"]},
-        {"name": "erf2", "op_type": "Erf", "latency": 50, "depends_on": ["erf1"],
-         "dims": [1, 64], "onnx_nodes": ["/act2/Erf"]},
-        {"name": "erf3", "op_type": "Erf", "latency": 50, "depends_on": ["erf2"],
-         "dims": [1, 64], "onnx_nodes": ["/act3/Erf"]},
-        {"name": "add1", "op_type": "Add", "latency": 40,
-         "depends_on": ["erf3", "relu_side"], "dims": [1, 64],
-         "onnx_nodes": ["/join/Add"]},
-    ]
-    by_name = {o["name"]: o for o in ops}
-    level = {}
-    for o in ops:
-        level[o["name"]] = 1 + max((level[d] for d in o["depends_on"]), default=0)
-
-    import csv
-    profile_dir.mkdir(parents=True)
-    taskgraph = {"schema_version": 1, "onnx": "fixture.onnx", "operators": [
-        {"name": o["name"], "op_type": o["op_type"], "task_id": f"t{i:04d}",
-         "pipeline": f"p{level[o['name']]:03d}", "latency": o["latency"],
-         "depends_on": o["depends_on"], "output_memory": 64 * 4,
-         "output_dimensions": o["dims"], "onnx_nodes": o["onnx_nodes"]}
-        for i, o in enumerate(ops)]}
-    (profile_dir / "taskgraph.json").write_text(json.dumps(taskgraph), encoding="utf-8")
-
-    with open(profile_dir / "ops.csv", "w", newline="", encoding="utf-8") as fh:
-        w = csv.writer(fh)
-        w.writerow(["name", "op_type", "task_id", "pipeline", "latency",
-                    "depends_on", "output_memory", "output_dimensions", "onnx_nodes"])
-        for i, o in enumerate(ops):
-            w.writerow([o["name"], o["op_type"], f"t{i:04d}",
-                        f"p{level[o['name']]:03d}", o["latency"],
-                        ";".join(o["depends_on"]), 64 * 4, "x".join(map(str, o["dims"])),
-                        ";".join(o["onnx_nodes"])])
-
-    clock = 0
-    assignments = []
-    for i, o in enumerate(ops):
-        assignments.append({"task_id": f"t{i:04d}", "operator": o["name"],
-                            "pipeline": f"p{level[o['name']]:03d}",
-                            "start_cycle": clock, "end_cycle": clock + o["latency"]})
-        clock += o["latency"]
-    (profile_dir / "schedule.json").write_text(json.dumps(
-        {"schema_version": 1, "makespan_cycles": clock, "assignments": assignments}),
-        encoding="utf-8")
-    (profile_dir / "profile_summary.json").write_text(json.dumps(
-        {"schema_version": 1, "onnx": "fixture.onnx", "makespan_cycles": clock,
-         "op_count": len(ops)}), encoding="utf-8")
-
-
-def test_analyze_hot_patterns_and_breakdown(tmp_path: Path):
-    profile_dir = tmp_path / "base" / "profile"
-    _write_profile_fixture(profile_dir)
-    report = analyze(profile_dir)
-
-    assert report["makespan_cycles"] == 310  # 100+50+50+50+40+20
-    # critical path = mm1 -> erf1 -> erf2 -> erf3 -> add1 (relu_side is a side branch)
-    assert [step["name"] for step in report["critical_path"]] == \
-        ["mm1", "erf1", "erf2", "erf3", "add1"]
-    assert report["critical_path_cycles"] == 290
-
-    top = report["hot_patterns"][0]
-    assert top["op_type"] == "Erf" and top["count"] == 3
-    assert top["total_cycles"] == 150
-    assert top["onnx_nodes"] == ["/act1/Erf", "/act2/Erf", "/act3/Erf"]
-    assert top["task_ids"] == ["t0001", "t0003", "t0004"]  # relu_side is t0002
-    assert top["share"] == round(150 / 290, 6)
-
-    pipelines = {p["pipeline"]: p for p in report["pipeline_breakdown"]}
-    assert pipelines["p002"]["op_count"] == 2  # erf1 + relu_side share level 2
-    assert set(pipelines) == {"p001", "p002", "p003", "p004", "p005"}
-
-    table = {(r["op_type"], r["shape_class"]): r for r in report["cost_table"]}
-    assert table[("Erf", "<1e2")]["count"] == 3
-    assert table[("Erf", "<1e2")]["mean_cycles"] == 50
-    assert table[("MatMul", "<1e2")]["mean_cycles"] == 100
-
-
-def test_analyze_fails_loud_on_unknown_key(tmp_path: Path):
-    profile_dir = tmp_path / "profile"
-    _write_profile_fixture(profile_dir)
-    tg = json.loads((profile_dir / "taskgraph.json").read_text(encoding="utf-8"))
-    tg["operators"][0]["surprise_field"] = 1
-    (profile_dir / "taskgraph.json").write_text(json.dumps(tg), encoding="utf-8")
-    with pytest.raises(ContractError):
-        analyze(profile_dir)
-
-
-def test_analyze_fails_loud_on_cross_artifact_mismatch(tmp_path: Path):
-    profile_dir = tmp_path / "profile"
-    _write_profile_fixture(profile_dir)
-    summary = json.loads((profile_dir / "profile_summary.json").read_text(encoding="utf-8"))
-    summary["makespan_cycles"] += 1  # disagree with schedule.json
-    (profile_dir / "profile_summary.json").write_text(json.dumps(summary), encoding="utf-8")
-    with pytest.raises(ContractError):
-        analyze(profile_dir)
-
-
-# ── predict_delta (v7 §5.2: taskgraph shape derivation + critical-path
-#    weighting; the --sites hand-binning mode is deleted) ──────────────────────
-
-_REPORT = {
-    "cost_table": [
-        {"op_type": "Erf", "shape_class": "<1e2", "count": 4, "mean_cycles": 50,
-         "min_cycles": 50, "max_cycles": 50},
-        {"op_type": "Relu", "shape_class": "<1e2", "count": 2, "mean_cycles": 20,
-         "min_cycles": 20, "max_cycles": 20},
-        {"op_type": "Relu", "shape_class": "1e2-1e4", "count": 2, "mean_cycles": 80,
-         "min_cycles": 80, "max_cycles": 80},
-    ],
-    "critical_path": [
-        {"name": "erf1", "op_type": "Erf", "latency": 50},
-        {"name": "erf2", "op_type": "Erf", "latency": 50},
-    ],
-    "profile_dir": ".",
-}
-
-
-def _tg(path: Path, ops: list[dict]) -> Path:
-    path.mkdir(parents=True, exist_ok=True)
-    (path / "taskgraph.json").write_text(json.dumps(
-        {"schema_version": 1, "onnx": "fixture.onnx",
-         "operators": [{"name": o["name"], "op_type": o["op_type"],
-                        "task_id": f"t{i:04d}", "pipeline": "p000",
-                        "latency": o["latency"], "depends_on": o.get("depends_on", []),
-                        "output_memory": 8, "output_dimensions": o["dims"],
-                        "onnx_nodes": [o["name"]]} for i, o in enumerate(ops)]}),
-        encoding="utf-8")
-    return path
-
-
-def test_predict_delta_arithmetic_and_params(tmp_path: Path):
-    # 4 removed Erf sites, all on the critical path -> weight 1.0 each
-    _tg(tmp_path, [
-        {"name": "erf1", "op_type": "Erf", "latency": 50, "dims": [1, 64]},
-        {"name": "erf2", "op_type": "Erf", "latency": 50, "dims": [1, 64]},
-        {"name": "erf3", "op_type": "Erf", "latency": 50, "dims": [1, 64]},
-        {"name": "erf4", "op_type": "Erf", "latency": 50, "dims": [1, 64]},
-    ])
-    report = dict(_REPORT, profile_dir=str(tmp_path))
-    out = predict_delta(report, {"Erf": -4}, {}, ["erf1", "erf2", "erf3", "erf4"])
-    # erf1/erf2 are on the report's critical_path (1.0), erf3/erf4 off (0.25)
-    assert out["predicted_delta_cycles"] == -(2 * 50 + 2 * 50 * 0.25)
-    assert out["params"] == "Erf-4"
-    assert out["basis"][0]["source"] == "cost_table:by-node"
-    assert out["weights"] == {"on_critical_path": 1.0, "off_critical_path": 0.25,
-                              "added_sites": 1.0}
-    # added sites price at the explicit override (never guessed)
-    out2 = predict_delta(report, {"Erf": -1, "Relu": 1}, {"Relu": 30}, ["erf1"])
-    assert out2["predicted_delta_cycles"] == -50 + 30
-
-
-def test_predict_delta_critical_path_weighting(tmp_path: Path):
-    """v7 §5.2: on-path sites weigh 1.0, off-path 0.25 — and the split is
-    DISCLOSED ({on_path_cycles, off_path_cycles_weighted}), never silent."""
-    _tg(tmp_path, [
-        {"name": "erf1", "op_type": "Erf", "latency": 50, "dims": [1, 64]},
-        {"name": "erf2", "op_type": "Erf", "latency": 50, "dims": [1, 64]},
-        {"name": "erf3", "op_type": "Erf", "latency": 50, "dims": [1, 64],
-         "depends_on": []},
-        {"name": "erf4", "op_type": "Erf", "latency": 50, "dims": [1, 64],
-         "depends_on": []},
-    ])
-    report = dict(_REPORT, profile_dir=str(tmp_path))
-    out = predict_delta(report, {"Erf": -4}, {},
-                        ["erf1", "erf2", "erf3", "erf4"])  # erf1/erf2 on path
-    # 2 sites on-path at 1.0 + 2 sites off-path at 0.25
-    assert out["predicted_delta_cycles"] == -(2 * 50 + 2 * 50 * 0.25)
-    assert out["on_path_cycles"] == 100.0
-    assert out["off_path_cycles_weighted"] == 25.0
-    sites = {s["node"]: s for s in out["basis"][0]["sites"]}
-    assert sites["erf1"]["weight"] == 1.0 and sites["erf1"]["on_critical_path"]
-    assert sites["erf3"]["weight"] == 0.25
-    assert sites["erf3"]["on_critical_path"] is False
-
-
-def test_predict_delta_shape_class_derived_from_taskgraph(tmp_path: Path):
-    """v7: the shape class is DERIVED from the taskgraph node's
-    output_dimensions (dims 1x64 = 64 elements -> <1e2 bucket here) — the
-    LLM never hand-computes element counts."""
-    _tg(tmp_path, [
-        {"name": "big", "op_type": "Relu", "latency": 80, "dims": [1, 500]},
-        {"name": "small", "op_type": "Relu", "latency": 20, "dims": [1, 50]},
-    ])
-    report = dict(_REPORT, profile_dir=str(tmp_path))
-    out = predict_delta(report, {"Relu": -2}, {}, ["big", "small"])
-    sites = {s["node"]: s for s in out["basis"][0]["sites"]}
-    assert sites["big"]["shape_class"] == "1e2-1e4"   # 500 elements
-    assert sites["small"]["shape_class"] == "<1e2"    # 50 elements
-    # -1*80 (big, on-path weight 1.0; neither node is on the critical path
-    # -> both off-path 0.25)
-    assert out["predicted_delta_cycles"] == -int(round((80 + 20) * 0.25))
-
-
-def test_predict_delta_nodes_validation_fails_loud(tmp_path: Path):
-    # a node absent from taskgraph.json
-    _tg(tmp_path, [{"name": "erf1", "op_type": "Erf", "latency": 50,
-                    "dims": [1, 64]}])
-    report = dict(_REPORT, profile_dir=str(tmp_path))
-    with pytest.raises(ValueError, match="absent from taskgraph"):
-        predict_delta(report, {"Erf": -1}, {}, ["ghost"])
-    # wrong node count for the delta
-    with pytest.raises(ValueError, match="operator\\(s\\) of op_type"):
-        predict_delta(report, {"Erf": -2}, {}, ["erf1"])
-    # an ADDED op with no override: never guessed
-    with pytest.raises(ValueError, match="refusing to guess"):
-        predict_delta(report, {"Relu": 1}, {})
-    # duplicate node names
-    with pytest.raises(ValueError, match="duplicate"):
-        predict_delta(report, {"Erf": -2}, {}, ["erf1", "erf1"])
-
-
-def test_predict_delta_missing_taskgraph_fails_loud(tmp_path: Path):
-    report = dict(_REPORT, profile_dir=str(tmp_path / "nope"))
-    with pytest.raises(ValueError, match="taskgraph.json not found"):
-        predict_delta(report, {"Erf": -1}, {}, ["erf1"])
-
-# ── mfu_adapter: raw mfu_benchmark products -> contract four-piece ────────────
-
-def _mfu_raw_fixture(tmp_path: Path) -> tuple[Path, dict]:
-    """Run the deployed-shape mfu_benchmark placeholder on a real tiny onnx —
-    the raw products carry exactly the documented contract shapes, so the
-    adapter is tested against the same form the real remote script must keep
-    (the placeholder's docstring pins the interface). Returns (profile_dir,
-    schedule_result)."""
-    torch = pytest.importorskip("torch")
-    pytest.importorskip("onnx")
-
-    class Tiny(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.fc1 = torch.nn.Linear(32, 32)
-            self.act = torch.nn.GELU()
-            self.fc2 = torch.nn.Linear(32, 32)
-
-        def forward(self, x):
-            return self.fc2(self.act(self.fc1(x)))
-
-    onnx_path = tmp_path / "model.onnx"
-    model = Tiny().eval()
-    torch.onnx.export(model, torch.randn(1, 32), str(onnx_path),
-                      input_names=["x"], output_names=["out"],
-                      opset_version=17, do_constant_folding=True)
-    profile_dir = tmp_path / "profile"
-    proc = subprocess.run(
-        [sys.executable, str(_SCRIPTS / "mfu_benchmark.py"), str(onnx_path),
-         "--chip", "6613", "--precision", "INT8", "--core-num", "1",
-         "-o", str(profile_dir), "--timeout", "60"],
-        capture_output=True, text=True, timeout=120)
-    assert proc.returncode == 0, proc.stderr
-    schedule = json.loads(
-        next(p for p in sorted(profile_dir.rglob("schedule_result.json")))
-        .read_text(encoding="utf-8"))
-    return profile_dir, schedule
-
-
-def test_mfu_adapter_maps_raw_products_into_contract_four_piece(tmp_path: Path):
-    """Field-by-field mapping: makespan == schedule_result.parallel_cycles
-    (the canonical makespan), structural fields verbatim from the raw
-    taskgraph, latency joined from the subgraph tasks, and the strict
-    analyzer accepts the result (closed schema + cross-artifact agreement)."""
-    import mfu_adapter  # noqa: E402
-
-    profile_dir, schedule = _mfu_raw_fixture(tmp_path)
-    raw_dir = next(p for p in sorted(profile_dir.glob("*/schedule_result.json"))).parent
-    raw_tg = json.loads(
-        next(raw_dir.glob("*_taskgraph.json")).read_text(encoding="utf-8"))
-    raw_tasks = json.loads(
-        (raw_dir / "subgraph_0_tasks.json").read_text(encoding="utf-8"))["tasks"]
-    cycles_by_task = {t["task_id"]: t["cycles"] for t in raw_tasks}
-
-    result = mfu_adapter.adapt(profile_dir, None)
-
-    assert result["makespan_cycles"] == schedule["parallel_cycles"]
-    tg = json.loads((profile_dir / "taskgraph.json").read_text(encoding="utf-8"))
-    sc = json.loads((profile_dir / "schedule.json").read_text(encoding="utf-8"))
-    sm = json.loads((profile_dir / "profile_summary.json").read_text(encoding="utf-8"))
-    assert sm["makespan_cycles"] == schedule["parallel_cycles"] == sc["makespan_cycles"]
-    assert sm["onnx"] == raw_tg["onnx"]
-    assert sm["op_count"] == len(raw_tg["operators"]) == len(tg["operators"])
-    for op, raw in zip(tg["operators"], raw_tg["operators"]):
-        assert op["name"] == raw["name"]
-        assert op["op_type"] == raw["op_type"]
-        assert op["task_id"] == raw["task_id"]
-        assert op["pipeline"] == raw["pipeline"]
-        assert op["depends_on"] == raw["depends_on"]
-        assert op["output_memory"] == raw["output_memory"]
-        assert op["output_dimensions"] == raw["output_dimensions"]
-        assert op["latency"] == cycles_by_task[raw["task_id"]]  # joined, not guessed
-        assert op["onnx_nodes"] == [raw["name"]]                # 1:1 rule
-    # derived schedule: end-start == latency and max(end) == canonical makespan
-    lat = {op["task_id"]: op["latency"] for op in tg["operators"]}
-    for a in sc["assignments"]:
-        assert a["end_cycle"] - a["start_cycle"] == lat[a["task_id"]]
-    assert sc["makespan_cycles"] == max(a["end_cycle"] for a in sc["assignments"])
-    # ops.csv carries exactly the contract columns
-    lines = (profile_dir / "ops.csv").read_text(encoding="utf-8").splitlines()
-    assert lines[0] == ("name,op_type,task_id,pipeline,latency,depends_on,"
-                        "output_memory,output_dimensions,onnx_nodes")
-    assert len(lines) - 1 == len(tg["operators"])
-    # the strict analyzer (closed schema + cross-artifact consistency) accepts it
-    report = analyze(profile_dir)
-    assert report["makespan_cycles"] == schedule["parallel_cycles"]
-    assert report["hot_patterns"], "the tiny GELU graph must yield hot patterns"
-
-
-def test_mfu_adapter_is_idempotent_and_honors_onnx_override(tmp_path: Path):
-    import mfu_adapter  # noqa: E402
-
-    profile_dir, _ = _mfu_raw_fixture(tmp_path)
-    mfu_adapter.adapt(profile_dir, None)
-    before = {name: (profile_dir / name).read_bytes() for name in
-              ("taskgraph.json", "ops.csv", "schedule.json", "profile_summary.json")}
-    mfu_adapter.adapt(profile_dir, str(tmp_path / "elsewhere.onnx"))
-    after = {name: (profile_dir / name).read_bytes() for name in before}
-    # deterministic re-derivation: ONLY the onnx-bearing fields may move
-    assert after["ops.csv"] == before["ops.csv"]
-    assert after["schedule.json"] == before["schedule.json"]
-    sm = json.loads(after["profile_summary.json"].decode("utf-8"))
-    assert sm["onnx"] == str((tmp_path / "elsewhere.onnx").resolve())
-
-
-def test_mfu_adapter_fails_loud_on_missing_or_inconsistent_raw(tmp_path: Path):
-    """Every conversion gap is a hard error naming what is missing — the
-    adapter must never fabricate a field or silently average two disagreeing
-    artifacts (the whole point of routing real evaluations through it)."""
-    import mfu_adapter  # noqa: E402
-
-    profile_dir, _ = _mfu_raw_fixture(tmp_path)
-    raw_dir = next(p for p in sorted(profile_dir.glob("*/schedule_result.json"))).parent
-
-    # 1. no raw products at all
-    empty = tmp_path / "empty_profile"
-    empty.mkdir()
-    with pytest.raises(mfu_adapter.AdapterError, match="no mfu_benchmark raw products"):
-        mfu_adapter.adapt(empty, None)
-
-    # 2. ambiguous raw dirs (two onnx stems profiled into one dir)
-    shutil.copytree(raw_dir, profile_dir / "other_stem")
-    with pytest.raises(mfu_adapter.AdapterError, match="ambiguous"):
-        mfu_adapter.adapt(profile_dir, None)
-    shutil.rmtree(profile_dir / "other_stem")
-
-    # 3. a taskgraph field the raw products simply do not carry
-    case_no = 0
-
-    def copy_fixture() -> Path:
-        nonlocal case_no
-        case_no += 1
-        fresh = tmp_path / f"case_{case_no}"
-        shutil.copytree(profile_dir, fresh)
-        return fresh
-
-    fresh = copy_fixture()
-    rd = next(p for p in sorted(fresh.glob("*/schedule_result.json"))).parent
-    doc = json.loads((rd / "model_taskgraph.json").read_text(encoding="utf-8"))
-    del doc["operators"][0]["output_memory"]
-    (rd / "model_taskgraph.json").write_text(json.dumps(doc), encoding="utf-8")
-    with pytest.raises(mfu_adapter.AdapterError,
-                       match=r"missing field\(s\).*output_memory"):
-        mfu_adapter.adapt(fresh, None)
-
-    # 4. the latency csv disagrees with the subgraph tasks
-    fresh = copy_fixture()
-    rd = next(p for p in sorted(fresh.glob("*/schedule_result.json"))).parent
-    doc = json.loads((rd / "subgraph_0_tasks.json").read_text(encoding="utf-8"))
-    doc["tasks"][0]["cycles"] += 1
-    (rd / "subgraph_0_tasks.json").write_text(json.dumps(doc), encoding="utf-8")
-    with pytest.raises(mfu_adapter.AdapterError, match="inconsistent cycles"):
-        mfu_adapter.adapt(fresh, None)
-
-    # 5. canonical makespan below the dependency critical path
-    fresh = copy_fixture()
-    rd = next(p for p in sorted(fresh.glob("*/schedule_result.json"))).parent
-    doc = json.loads((rd / "schedule_result.json").read_text(encoding="utf-8"))
-    doc["parallel_cycles"] = 1
-    (rd / "schedule_result.json").write_text(json.dumps(doc), encoding="utf-8")
-    with pytest.raises(mfu_adapter.AdapterError,
-                       match="below the dependency critical path"):
-        mfu_adapter.adapt(fresh, None)
-
-    # 6. a taskgraph operator with no subgraph task (graphs disagree)
-    fresh = copy_fixture()
-    rd = next(p for p in sorted(fresh.glob("*/schedule_result.json"))).parent
-    doc = json.loads((rd / "subgraph_0_tasks.json").read_text(encoding="utf-8"))
-    doc["tasks"] = doc["tasks"][1:]
-    (rd / "subgraph_0_tasks.json").write_text(json.dumps(doc), encoding="utf-8")
-    with pytest.raises(mfu_adapter.AdapterError, match="no task for task_id"):
-        mfu_adapter.adapt(fresh, None)
-
-    # 7. duplicate task_id in the subgraph tasks (ambiguous raw products —
-    # a silent dict overwrite would pick a winner without telling anyone)
-    fresh = copy_fixture()
-    rd = next(p for p in sorted(fresh.glob("*/schedule_result.json"))).parent
-    doc = json.loads((rd / "subgraph_0_tasks.json").read_text(encoding="utf-8"))
-    doc["tasks"].append(dict(doc["tasks"][0]))
-    (rd / "subgraph_0_tasks.json").write_text(json.dumps(doc), encoding="utf-8")
-    with pytest.raises(mfu_adapter.AdapterError, match="duplicate task_id"):
-        mfu_adapter.adapt(fresh, None)
-
-
-def test_mfu_adapter_accepts_scalar_output_operator(tmp_path: Path):
-    """An operator whose primary output is a SCALAR carries an empty
-    output_dimensions list — a legal static shape, not a corrupt artifact
-    (the validation must price it into the smallest shape bucket, never
-    reject it)."""
-    import mfu_adapter  # noqa: E402
-
-    profile_dir, schedule = _mfu_raw_fixture(tmp_path)
-    raw_tg = (next(p for p in sorted(profile_dir.glob("*/schedule_result.json")))
-              .parent / "model_taskgraph.json")
-    doc = json.loads(raw_tg.read_text(encoding="utf-8"))
-    doc["operators"][0]["output_dimensions"] = []
-    raw_tg.write_text(json.dumps(doc), encoding="utf-8")
-
-    result = mfu_adapter.adapt(profile_dir, None)
-
-    assert result["makespan_cycles"] == schedule["parallel_cycles"]
-    tg = json.loads((profile_dir / "taskgraph.json").read_text(encoding="utf-8"))
-    assert tg["operators"][0]["output_dimensions"] == []
-    # downstream: the analyzer prices the scalar op into the smallest bucket
-    report = analyze(profile_dir)
-    assert report["makespan_cycles"] == schedule["parallel_cycles"]
-    scalar_rows = [row for row in report["cost_table"]
-                   if row["shape_class"] == "<1e2"]
-    assert scalar_rows, "the scalar-output op must land in the <1e2 bucket"
-
-
-def test_mfu_adapter_cli_fail_loud_exit_code(tmp_path: Path):
-    """The CLI surface the chain drives: rc=2 + a stderr line naming the gap."""
-    empty = tmp_path / "nope"
-    empty.mkdir()
-    proc = subprocess.run(
-        [sys.executable, str(_SCRIPTS / "mfu_adapter.py"),
-         "--profile-dir", str(empty)],
-        capture_output=True, text=True, timeout=60)
-    assert proc.returncode == 2
-    assert "mfu_adapter:" in proc.stderr
-    assert "raw products" in proc.stderr
-
-
-# ── predict_delta.build_change_sig ────────────────────────────────────────────
+# ── build_sig canonicalization ────────────────────────────────────────────────
 
 def test_build_change_sig_is_canonical():
-    from predict_delta import build_change_sig
-
     a = build_change_sig("activation", "Erf-4;Relu+2", ["blocks.1.mlp", "blocks.0.mlp"])
     b = build_change_sig("activation", "Erf-4;Relu+2", ["blocks.0.mlp", "blocks.1.mlp"])
     assert a == b == "activation:Erf-4;Relu+2:blocks.0.mlp,blocks.1.mlp"
@@ -1230,7 +773,7 @@ def _baseline_ws(tmp_path: Path, *, full_epochs: int = 2, probe_k: int = 1,
     (art / "orca_inject").mkdir(parents=True)
     proj.mkdir()
     for src in ("render_run.sh", "assert_shadow.py", "metric_curve.py",
-                "push_curves.py", "analyze.py", "device_alloc.py",
+                "push_curves.py", "device_alloc.py",
                 "pid_lib.py"):
         shutil.copy(_SCRIPTS / src, art / "scripts" / src)
     shutil.copy(_SCRIPTS / "orca_inject" / "header.env",
@@ -1239,12 +782,12 @@ def _baseline_ws(tmp_path: Path, *, full_epochs: int = 2, probe_k: int = 1,
                 art / "orca_inject" / "sitecustomize.py")
     (art / "shadow" / "pkg").mkdir(parents=True)
     (art / "shadow" / "pkg" / "__init__.py").write_text("", encoding="utf-8")
-    (art / "base" / "profile").mkdir(parents=True)
+    raw_profile = art / "base" / "profile" / "model"
+    raw_profile.mkdir(parents=True)
     (art / "base" / "model.onnx").write_bytes(b"onnx-bytes")
-    (art / "base" / "profile" / "profile_summary.json").write_text(
-        json.dumps({"makespan_cycles": 500}), encoding="utf-8")
-    (art / "base" / "bottleneck_report.json").write_text(
-        json.dumps({"makespan_cycles": 500, "hot_patterns": []}), encoding="utf-8")
+    (raw_profile / "schedule_result.json").write_text(json.dumps({
+        "serial_cycles": 700, "parallel_cycles": 500,
+    }), encoding="utf-8")
     (art / "baseline").mkdir()
     if with_docs:
         (art / "baseline" / "business_logic.md").write_text(_BL_MD, encoding="utf-8")
@@ -1831,7 +1374,7 @@ def test_baseline_chain_relaunch_budget_is_three(tmp_path: Path):
 def _mfu_baseline_ws(tmp_path: Path) -> tuple[Path, dict]:
     """Baseline workspace for the mfu handshake (v7: the ONE profiling path):
     a REAL exported onnx (the chain skips its export step), no profiling
-    products yet, and the adapter deployed. The dispatch parameters come
+    products yet. The dispatch parameters come
     from contracts.json's profile block. Returns (art, env)."""
     torch = pytest.importorskip("torch")
 
@@ -1846,15 +1389,12 @@ def _mfu_baseline_ws(tmp_path: Path) -> tuple[Path, dict]:
             return self.fc2(self.act(self.fc1(x)))
 
     art = _baseline_ws(tmp_path, full_epochs=1)
-    shutil.copy(_SCRIPTS / "mfu_adapter.py", art / "scripts" / "mfu_adapter.py")
     model = Tiny().eval()
     torch.onnx.export(model, torch.randn(1, 32), str(art / "base" / "model.onnx"),
                       input_names=["x"], output_names=["out"],
                       opset_version=17, do_constant_folding=True)
-    # strip the pre-made early-chain products: profile + analyze + the mfu
-    # report doc must be re-derived through the mfu path (the tests re-write
-    # the report themselves — the analyzer subagent's product)
-    for rel in ("base/profile/profile_summary.json", "base/bottleneck_report.json",
+    # strip the pre-made raw profile and report so the mfu handshake runs
+    for rel in ("base/profile/model/schedule_result.json",
                 "base/profile/mfu_bottleneck_report.md"):
         p = art / rel
         if p.is_file():
@@ -1862,12 +1402,11 @@ def _mfu_baseline_ws(tmp_path: Path) -> tuple[Path, dict]:
     return art, _chain_env(art)
 
 
-def test_baseline_chain_mfu_mode_awaits_analyzer_then_adapts(tmp_path: Path):
+def test_baseline_chain_mfu_mode_awaits_analyzer_then_reads_raw(tmp_path: Path):
     """mfu handshake (the only profiling path, v7 §3.2): with no raw products
     the chain WAITS for the mfu-analyzer subagent (running line carrying the
     dispatch parameters from contracts.json); once the raw products land, the
-    re-invoked chain adapts them and proceeds to executed with makespan ==
-    the raw parallel_cycles."""
+    re-invoked chain validates them directly and proceeds to executed."""
     art, env = _mfu_baseline_ws(tmp_path)
     base_cmd = ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
                 "--seed", "0", "--device", "0"]
@@ -1882,7 +1421,7 @@ def test_baseline_chain_mfu_mode_awaits_analyzer_then_adapts(tmp_path: Path):
     assert "precision=INT8" in payload["error"]
     assert "core_num=1" in payload["error"]
     # no fallback profiling happened while waiting
-    assert not (art / "base" / "profile" / "profile_summary.json").exists()
+    assert not list((art / "base" / "profile").glob("*/schedule_result.json"))
 
     # the mfu-analyzer's products: raw benchmark output + sentinel report
     # (the benchmark CLI spells its knobs --chip/--precision/--core-num)
@@ -1896,17 +1435,11 @@ def test_baseline_chain_mfu_mode_awaits_analyzer_then_adapts(tmp_path: Path):
     (art / "base" / "profile" / "mfu_bottleneck_report.md").write_text(
         "[subagent:mfu-analyzer v2 MBA7K2]\n\n## MFU 时延瓶颈分析报告\n",
         encoding="utf-8")
-    parallel = json.loads(proc.stdout)["parallel_cycles"]
-
     second = subprocess.run(base_cmd, capture_output=True, text=True,
                             timeout=120, env=env)
     payload2 = json.loads(second.stdout)
     assert payload2["status"] == "executed", payload2
     assert any(a.rstrip("/").endswith("base/profile") for a in payload2["generated_artifacts"])
-    # analyze.py re-derived the bottleneck report from the ADAPTED four-piece
-    report = json.loads((art / "base" / "bottleneck_report.json")
-                        .read_text(encoding="utf-8"))
-    assert report["makespan_cycles"] == parallel
     assert "profile: mfu (chip=6613" in \
         (art / "baseline_status.md").read_text(encoding="utf-8")
     # let the detached finalizer reach its terminal state before tmp cleanup
@@ -1930,13 +1463,11 @@ def test_baseline_chain_mfu_mode_report_without_raw_is_fatal_no_fallback(tmp_pat
     assert payload["status"] == "failed"
     assert "baseline step 2" in payload["error"]
     assert "no fallback profiling path" in payload["error"]
-    assert not (art / "base" / "profile" / "profile_summary.json").exists()
+    assert not list((art / "base" / "profile").glob("*/schedule_result.json"))
 
 
-def test_baseline_chain_mfu_adapter_failure_surfaces_in_error(tmp_path: Path):
-    """Raw products present but inconsistent: the adapter's fail-loud line
-    must travel into the chain's emit error (PROFILE_FAIL_DETAIL), so the
-    node's final output names the actual conversion gap on the real machine."""
+def test_baseline_chain_invalid_raw_parallel_cycles_surfaces_in_error(tmp_path: Path):
+    """The chain validates canonical parallel_cycles directly and fails loud."""
     art, env = _mfu_baseline_ws(tmp_path)
     proc = subprocess.run(
         [sys.executable, str(_SCRIPTS / "mfu_benchmark.py"),
@@ -1945,10 +1476,10 @@ def test_baseline_chain_mfu_adapter_failure_surfaces_in_error(tmp_path: Path):
          "-o", str(art / "base" / "profile"), "--timeout", "60"],
         capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stderr
-    raw_tg = next((art / "base" / "profile").glob("*/model_taskgraph.json"))
-    doc = json.loads(raw_tg.read_text(encoding="utf-8"))
-    del doc["operators"][0]["output_memory"]      # corrupt one raw field
-    raw_tg.write_text(json.dumps(doc), encoding="utf-8")
+    raw = next((art / "base" / "profile").glob("*/schedule_result.json"))
+    doc = json.loads(raw.read_text(encoding="utf-8"))
+    doc["parallel_cycles"] = "bad"
+    raw.write_text(json.dumps(doc), encoding="utf-8")
 
     chain = subprocess.run(
         ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
@@ -1957,9 +1488,8 @@ def test_baseline_chain_mfu_adapter_failure_surfaces_in_error(tmp_path: Path):
     payload = json.loads(chain.stdout)
     assert payload["status"] == "failed"
     assert "baseline step 2" in payload["error"]
-    assert "mfu_adapter failed" in payload["error"]
-    assert "output_memory" in payload["error"]
-    assert not (art / "base" / "profile" / "profile_summary.json").exists()
+    assert "raw mfu result invalid" in payload["error"]
+    assert "parallel_cycles" in payload["error"]
 
 
 def test_baseline_chain_device_argument_is_required_and_parks_when_locked(tmp_path: Path):
@@ -1990,8 +1520,7 @@ def test_baseline_chain_device_argument_is_required_and_parks_when_locked(tmp_pa
     (art / "devices" / "0.lock").write_text(json.dumps(
         {"vid": "r9-99", "pid": 424242, "acquired_at": "now",
          "backend": "cuda"}), encoding="utf-8")
-    # put the early chain products back so the run reaches step 4
-    shutil.copy(_SCRIPTS / "mfu_adapter.py", art / "scripts" / "mfu_adapter.py")
+    # the raw profile/report already exist so the run reaches step 4
     proc2 = subprocess.run(
         ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
          "--seed", "0", "--device", "0"],
@@ -2931,12 +2460,8 @@ def test_push_curves_w3_joint_three_charts_idempotent(tmp_path: Path):
         assert pushed_charts[1][ctype]["data"] == pushed_charts[0][ctype]["data"]
 
 
-def test_push_curves_recency_and_anchor_fallbacks(tmp_path: Path):
-    """Unit pins for the deterministic fallbacks: _recency falls back to the
-    curve file's mtime when the watchdog ts is absent or garbage, and
-    _baseline_makespan walks the frozen-authority chain (origin anchor ->
-    bottleneck report -> profile summary) and refuses to fabricate an anchor
-    when none is on disk."""
+def test_push_curves_recency_and_origin_anchor(tmp_path: Path):
+    """_recency falls back to mtime and baseline makespan has one authority."""
     from datetime import datetime
     curve = tmp_path / "metrics.jsonl"
     curve.write_text('{"epoch": 1, "metric": 0.5}\n', encoding="utf-8")
@@ -2950,12 +2475,6 @@ def test_push_curves_recency_and_anchor_fallbacks(tmp_path: Path):
     art = tmp_path / "art2"
     (art / "base" / "profile").mkdir(parents=True)
     assert push_curves._baseline_makespan(art) is None      # no fabrication
-    (art / "base" / "profile" / "profile_summary.json").write_text(
-        json.dumps({"makespan_cycles": 300}), encoding="utf-8")
-    assert push_curves._baseline_makespan(art) == 300.0
-    (art / "base" / "bottleneck_report.json").write_text(
-        json.dumps({"makespan_cycles": 350}), encoding="utf-8")
-    assert push_curves._baseline_makespan(art) == 350.0
     (art / "base" / "origin_anchor.json").write_text(
         json.dumps({"baseline_makespan_cycles": 712}), encoding="utf-8")
     assert push_curves._baseline_makespan(art) == 712.0     # frozen authority
@@ -3048,8 +2567,8 @@ _RECHECK_SH = _REPO / "workflows" / "prof-opt" / "agents" / "po_propose" / "scri
 
 def _recheck_workspace(tmp_path: Path) -> tuple[Path, dict]:
     """GELU->ReLU variant fixture on the ONE mfu path: base + variant
-    four-pieces produced through the real mfu_benchmark + adapter pair (the
-    same chain the node drives). The anchor's target is set to the VARIANT's
+    raw products produced through the real mfu_benchmark plus the analyzer's
+    single Markdown report. The anchor's target is set to the VARIANT's
     measured makespan so the boundary is exactly inclusive on the happy
     path. Returns (art, env)."""
     torch = pytest.importorskip("torch")
@@ -3058,8 +2577,7 @@ def _recheck_workspace(tmp_path: Path) -> tuple[Path, dict]:
     art = tmp_path / "art"
     (art / "scripts").mkdir(parents=True)
     for src in ("diff_check.py", "history_lib.py", "emit_result.py",
-                "round_state.py", "check_verdict.py", "mfu_benchmark.py",
-                "mfu_adapter.py"):
+                "round_state.py", "check_verdict.py", "mfu_benchmark.py"):
         shutil.copy(_SCRIPTS / src, art / "scripts" / src)
     (art / "base" / "profile").mkdir(parents=True)
 
@@ -3080,8 +2598,7 @@ def _recheck_workspace(tmp_path: Path) -> tuple[Path, dict]:
                           opset_version=17, do_constant_folding=True)
 
     def measure(model, out_dir: Path) -> int:
-        """The node's Step 3 chain: mfu_benchmark -> adapter; returns the
-        canonical parallel makespan."""
+        """Run the raw benchmark and write the analyzer's single report."""
         onnx_path = out_dir.parent / (out_dir.name + "_model.onnx")
         out_dir.mkdir(parents=True, exist_ok=True)
         export(model, onnx_path)
@@ -3091,9 +2608,8 @@ def _recheck_workspace(tmp_path: Path) -> tuple[Path, dict]:
              "-o", str(out_dir), "--timeout", "60"],
             capture_output=True, text=True, timeout=120)
         assert proc.returncode == 0, proc.stderr
-        subprocess.run([sys.executable, str(_SCRIPTS / "mfu_adapter.py"),
-                        "--profile-dir", str(out_dir)],
-                       capture_output=True, text=True, timeout=60, check=True)
+        (out_dir / "mfu_bottleneck_report.md").write_text(
+            _MFU_MD, encoding="utf-8")
         return json.loads(proc.stdout)["parallel_cycles"]
 
     torch.manual_seed(0)
@@ -3140,16 +2656,15 @@ def _recheck_workspace(tmp_path: Path) -> tuple[Path, dict]:
 
 def test_run_latency_recheck_mfu_fail_loud_matrix(tmp_path: Path):
     """v7: there is exactly ONE measurement source — a DONE variant without
-    the mfu four-piece is a hard error naming the variant and the remedy
-    (dispatch mfu-analyzer + adapter); no inline profiling path exists."""
+    the mfu report/raw result is a hard error naming the variant and remedy."""
     art, env = _recheck_workspace(tmp_path)
-    # wipe the variant's four-piece but keep its DONE marker
+    # wipe the variant profile but keep its DONE marker
     shutil.rmtree(art / "variants" / "r1-01" / "profile")
     proc = subprocess.run(["bash", str(_RECHECK_SH)],
                           capture_output=True, text=True, timeout=300, env=env)
     assert proc.returncode == 2
     assert "r1-01" in proc.stderr
-    assert "no inline profiling path" in proc.stderr
+    assert "mfu_bottleneck_report.md" in proc.stderr
     assert not (art / "variants" / "r1-01" / "verdict.json").exists()
 
 
@@ -3168,10 +2683,11 @@ def test_run_latency_recheck_gate_passes_at_inclusive_boundary(tmp_path: Path):
                          .read_text(encoding="utf-8"))
     assert verdict["outcome"] == "latency_pass"
     assert verdict["latency_gate"] == "pass"
-    # the gate number is the mfu four-piece's parallel makespan, verbatim
-    summary = json.loads((art / "variants" / "r1-01" / "profile" /
-                          "profile_summary.json").read_text(encoding="utf-8"))
-    assert verdict["makespan_cycles"] == summary["makespan_cycles"]
+    # the gate number is raw schedule_result.json parallel_cycles, verbatim
+    raw = next((art / "variants" / "r1-01" / "profile")
+               .glob("*/schedule_result.json"))
+    summary = json.loads(raw.read_text(encoding="utf-8"))
+    assert verdict["makespan_cycles"] == summary["parallel_cycles"]
     # the ONE predicate agrees (recheck and probe emit share it)
     check = subprocess.run(
         [sys.executable, str(art / "scripts" / "check_verdict.py"),
@@ -3301,9 +2817,9 @@ def test_extract_user_pkg_empty_marker_on_zero_imports(tmp_path: Path):
 
 _PREREQ_SH = (_REPO / "workflows" / "prof-opt" / "agents" / "po_propose" / "scripts"
               / "check_prerequisites.sh")
-_PREREQ_FILES = ("analyze.py", "predict_delta.py", "history_lib.py",
+_PREREQ_FILES = ("build_sig.py", "history_lib.py",
                  "experiment_ledger.py", "emit_result.py",
-                 "mfu_adapter.py", "mfu_benchmark.py", "round_state.py",
+                 "mfu_benchmark.py", "round_state.py",
                  "rules_pool.py", "check_verdict.py")
 
 
@@ -3329,9 +2845,9 @@ def test_check_prerequisites_fails_loud_when_entry_stage_incomplete(tmp_path: Pa
     (ws / "scripts").mkdir(parents=True)
     for name in _PREREQ_FILES[1:]:
         (ws / "scripts" / name).write_text("# deployed\n", encoding="utf-8")
-    proc = _run_prereq(ws)                    # analyze.py missing
+    proc = _run_prereq(ws)                    # build_sig.py missing
     assert proc.returncode == 2
-    assert "analyze.py not deployed" in proc.stderr
+    assert "build_sig.py not deployed" in proc.stderr
 
 
 def test_check_prerequisites_fails_loud_without_artifacts_env():

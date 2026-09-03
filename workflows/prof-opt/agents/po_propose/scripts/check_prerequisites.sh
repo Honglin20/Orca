@@ -12,8 +12,8 @@ set -euo pipefail
 ART="${ORCA_ARTIFACTS_DIR:?FATAL: ORCA_ARTIFACTS_DIR not set (check_prerequisites.sh)}"
 cd "$ART" || { echo "FATAL: workspace unreachable: $ART" >&2; exit 2; }
 
-for f in analyze.py predict_delta.py history_lib.py experiment_ledger.py \
-         emit_result.py mfu_adapter.py mfu_benchmark.py \
+for f in build_sig.py history_lib.py experiment_ledger.py \
+         emit_result.py mfu_benchmark.py \
          round_state.py rules_pool.py check_verdict.py; do
   [ -f "$ART/scripts/$f" ] || {
     echo "FATAL: scripts/$f not deployed — entry stage incomplete" >&2; exit 2; }

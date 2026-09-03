@@ -44,9 +44,8 @@ The caller will provide:
 1. **`<output_dir>`**: the workspace (`$ORCA_ARTIFACTS_DIR`). Read from it:
    `baseline/business_logic.md` (semantics anchor),
    `base/profile/mfu_bottleneck_report.md` (the ONLY bottleneck analysis
-   source — produced by the baseline stage) plus the mechanical report
-   `base/bottleneck_report.json` and the raw profile products under
-   `base/profile/` when you need them, `history.jsonl` (dedup + evidence),
+   source — produced by the baseline stage; it lists the raw files used, which
+   you may open only for evidence drill-down), `history.jsonl` (dedup + evidence),
    and the shadow source tree `shadow/` (the thing you propose edits to).
 2. **`<proposals_path>`**: the absolute output path —
    `<output_dir>/rounds/<RRR>/proposals.json` (the caller states the round
@@ -100,8 +99,9 @@ The caller will provide:
    the training entry, not in the shadow closure — and doubly forbidden: a
    "proposal" whose op_delta is empty predicts exactly 0 cycles and is
    rejected by the strictly-negative requirement.
-2. **Predicted delta strictly negative.** `predicted_delta_cycles` (from
-   the predictor, never hand-written) must be an int < 0. Whether the
+2. **Predicted delta strictly negative.** `predicted_delta_cycles` is your
+   evidence-backed estimate from the mfu report and the concrete source edit;
+   it must be an int < 0. Whether the
    predicted makespan reaches `<target_line>` is a REFERENCE disclosure in
    the rationale — never shave the prediction to fit, never drop an honest
    direction merely because its prediction sits above the line.
@@ -130,10 +130,11 @@ a direction there that preserves the minimal information core is a
 legitimate candidate even though the catalog does not contain it. For a
 catalog-external structure set `lever` to a short descriptive name (e.g.
 `novel:bilinear-score-path`) — the signature builder treats the lever as an
-opaque string. Everything else is identical: verify the export pattern
-against the actual graph, derive the per-site op delta, price it with the
-predictor, and pass the same admission gates. The information analysis's
-claims are hypotheses — the graph is the truth.
+opaque string. Everything else is identical: verify the proposed structure
+against the actual shadow source, derive the expected op delta, estimate its
+cycle effect from measured evidence, and pass the same admission gates. The
+information analysis's claims are hypotheses — the model source is the design
+truth; the exported graph is verified mechanically only after implementation.
 
 ## Method
 
@@ -141,30 +142,26 @@ claims are hypotheses — the graph is the truth.
    "top op == bottleneck"); cross-check against the prior variants'
    reports (`<prior_reports>`) — a direction a prior variant already
    measured into the ground is falsified evidence, not a fresh idea. Then
-   open the shadow source behind the affected onnx node names and count
-   the editable sites.
-2. Derive the per-site op delta and VERIFY it against the actual
-   `base/model.onnx` around those node names (export decomposition varies —
-   the graph is the truth, the lever tables are priors).
-3. Price it (never by hand). Name the affected taskgraph operator names —
-   the predictor derives each site's shape class from
-   `base/profile/taskgraph.json` itself and weights on-critical-path sites
-   1.0 / off-path 0.25:
-   ```bash
-   python3 "$ORCA_ARTIFACTS_DIR/scripts/predict_delta.py" \
-     --report "$ORCA_ARTIFACTS_DIR/base/bottleneck_report.json" \
-     --op-delta '<JSON>' \
-     --nodes '<JSON: the affected taskgraph operator names (the removed sites)>'
-   ```
-   Strictly negative required (the only hard gate); compare the predicted
-   makespan with `<target_line>` for the rationale's calibration note.
+   open the shadow model source related to the reported hotspot/root cause,
+   understand the module wiring, and count the editable sites.
+2. Derive the expected per-site op delta from the concrete source
+   transformation and the lever's export-pattern prior. Do NOT open
+   `base/model.onnx` to design or pre-verify the proposal: the implementer
+   exports the changed source, and `diff_check.py --layer graph` verifies the
+   declared op delta against the real base/variant ONNX graphs afterward.
+3. Estimate `predicted_delta_cycles` from the report's measured cycles,
+   proportions, root-cause reasoning, and the concrete number of edited sites.
+   This is an agent judgment, not a second mechanical analysis path: use a
+   strictly negative integer for an admitted proposal, state the assumptions
+   and arithmetic in `prediction_basis`, and compare the predicted makespan
+   with `<target_line>` for the rationale's calibration note.
    Either an unaffordable direction or a source structure that forbids the
    change lands in `exhausted_rationale` when it was the round's best
    direction.
 4. Build the canonical signature (never hand-assemble):
    ```bash
-   python3 "$ORCA_ARTIFACTS_DIR/scripts/build_sig.py" \
-     --lever '<lever>' --params '<params from the predictor>' \
+    python3 "$ORCA_ARTIFACTS_DIR/scripts/build_sig.py" \
+      --lever '<lever>' --params '<stable params from the concrete change spec>' \
      --modules '<JSON list of the affected modules>'
    ```
 5. Dedup (mechanical):
@@ -195,7 +192,7 @@ claims are hypotheses — the graph is the truth.
     "change_spec": "<precise per-site edit description>",
     "op_delta": {"Erf": -4, "Relu": 4},
     "predicted_delta_cycles": -3792,
-    "prediction_basis": "<predictor basis summary>",
+    "prediction_basis": "<measured-evidence estimate summary>",
     "edited_files": ["pkg/model.py"],
     "predicted_acc_impact": "medium",
     "accuracy_evidence": "<one line: rule id / history row / lever prior backing the impact call>",
@@ -229,4 +226,6 @@ Your Task return value: the sentinel line first, then ONE compact line
   else; edit nothing (the implementer subagent does the editing).
 - Exactly ONE proposal per round (or the documented empty + rationale
   shape). Never two.
-- No invented numbers: every cycle number comes from the predictor's stdout.
+- No invented numbers: every cycle number must be traceable to the mfu report
+  (or a raw source path explicitly listed by that report), with assumptions
+  and arithmetic disclosed in `prediction_basis`.

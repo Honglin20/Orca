@@ -8,17 +8,15 @@
 #                                 structure anchor for the write-back diff),
 #                                 then render + run the export template ->
 #                                 base/model.onnx
-#   2 profile (mfu ONLY)         : four profiling artifacts -> base/profile/.
+#   2 profile (mfu ONLY)         : raw evaluation products -> base/profile/.
 #                                 The mfu-analyzer SUBAGENT (v7: the ONE
 #                                 profiling path — it drives the user's
 #                                 in-network mfu_benchmark; no estimator, no
 #                                 environment sniffing, no fallback) produces
 #                                 the raw evaluation products under
 #                                 base/profile/<onnx_stem>/ (the chain never
-#                                 runs the evaluation itself), then
-#                                 scripts/mfu_adapter.py converts them. When
-#                                 the four-piece is absent:
-#                                     raw products present -> adapt (this step)
+#                                 runs the evaluation itself). When the raw
+#                                 canonical result is absent:
 #                                     report w/o raw       -> FATAL no-fallback
 #                                     neither              -> waiting (rc 3):
 #                                       the chain emits "running" carrying the
@@ -27,7 +25,8 @@
 #                                       — the profile trio verbatim from
 #                                       contracts.json), the agent dispatches
 #                                       mfu-analyzer, then re-invokes
-#   3 analyze                    : scripts/analyze.py -> base/bottleneck_report.json
+#   3 mfu report                 : validate the single analysis artifact
+#                                 base/profile/mfu_bottleneck_report.md
 #   4 full-train launch          : claim the AGENT-CHOSEN training device
 #                                 (required --device <idx>: the node ran
 #                                 device_alloc probe, read the raw occupancy
@@ -185,7 +184,7 @@ except Exception as exc:
 
 for f in contracts.json readiness/readiness.json train_device.json \
          templates/export_onnx.template.sh templates/run_full_finetune.template.sh \
-         templates/run_eval.template.sh scripts/render_run.sh scripts/analyze.py \
+         templates/run_eval.template.sh scripts/render_run.sh \
          scripts/metric_curve.py scripts/push_curves.py scripts/device_alloc.py; do
   [ -f "$f" ] || { echo "FATAL: upstream artifact missing: $ART/$f (contract stage incomplete)" >&2; exit 2; }
 done
@@ -315,17 +314,27 @@ step_export() {
   [ -s "$ART/base/model.onnx" ] || { echo "FATAL: export produced no base/model.onnx" >&2; return 1; }
 }
 
-step_profile() { # rc 0 = four-piece on disk; rc 3 = awaiting the analyzer's
+step_profile() { # rc 0 = canonical raw result on disk; rc 3 = awaiting the analyzer's
   # raw products (the agent dispatches mfu-analyzer, then re-invokes);
   # rc 1 = failed (PROFILE_FAIL_DETAIL carries the specific cause)
-  [ -s "$ART/base/profile/profile_summary.json" ] && { echo "[chain] step2 profile: product exists, skip" >&2; return 0; }
-  local adapter="$ART/scripts/mfu_adapter.py"
-  [ -f "$adapter" ] || { echo "FATAL: $adapter not deployed (entry stage incomplete) — the mfu raw products cannot be adapted" >&2; PROFILE_FAIL_DETAIL="mfu_adapter not deployed"; return 1; }
   if ls "$ART"/base/profile/*/schedule_result.json >/dev/null 2>&1; then
     local errout
-    errout="$("$PY" "$adapter" --profile-dir "$ART/base/profile" 2>&1)" || {
+    errout="$("$PY" - "$ART/base/profile" <<'PYEOF' 2>&1
+import json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+hits = sorted(root.glob("*/schedule_result.json"))
+if len(hits) != 1:
+    raise SystemExit(f"expected exactly one schedule_result.json under {root}, got {len(hits)}")
+doc = json.loads(hits[0].read_text(encoding="utf-8"))
+value = doc.get("parallel_cycles")
+if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    raise SystemExit(f"{hits[0]} carries invalid parallel_cycles: {value!r}")
+print(f"canonical mfu result: {hits[0]} parallel_cycles={value}")
+PYEOF
+)" || {
       echo "$errout" >&2
-      PROFILE_FAIL_DETAIL="mfu_adapter failed: $(printf '%s' "$errout" | tail -n 1)"
+      PROFILE_FAIL_DETAIL="raw mfu result invalid: $(printf '%s' "$errout" | tail -n 1)"
       return 1
     }
     echo "$errout" >&2
@@ -337,15 +346,13 @@ step_profile() { # rc 0 = four-piece on disk; rc 3 = awaiting the analyzer's
     echo "[chain] step2 profile: awaiting mfu-analyzer raw products (onnx=base/model.onnx profile_dir=base/profile report=base/profile/mfu_bottleneck_report.md chip=$NPU_CHIP precision=$NPU_PRECISION core_num=$NPU_CORE_NUM)" >&2
     return 3
   fi
-  for f in taskgraph.json ops.csv schedule.json profile_summary.json; do
-    [ -s "$ART/base/profile/$f" ] || { echo "FATAL: profiler did not produce $f" >&2; return 1; }
-  done
 }
 
-step_analyze() {
-  [ -s "$ART/base/bottleneck_report.json" ] && { echo "[chain] step3 analyze: product exists, skip" >&2; return 0; }
-  "$PY" "$ART/scripts/analyze.py" --profile-dir "$ART/base/profile" >&2 || return 1
-  [ -s "$ART/base/bottleneck_report.json" ] || { echo "FATAL: analyze produced no report" >&2; return 1; }
+step_profile_report() {
+  local report="$ART/base/profile/mfu_bottleneck_report.md"
+  [ -s "$report" ] || { echo "FATAL: mfu-analyzer produced no $report" >&2; return 1; }
+  [ "$(head -n 1 "$report")" = "[subagent:mfu-analyzer v2 MBA7K2]" ] || {
+    echo "FATAL: $report sentinel mismatch" >&2; return 1; }
 }
 
 # ── full-training launch (step 4; also the finalizer's crash re-launch) ──────
@@ -778,7 +785,7 @@ write_status() { # write_status <state-vector description...>
     echo "|---|---|---|---|"
     echo "| 1 | export + pristine snapshot | $1 | base/model.onnx + baseline/original_shadow/ |"
     echo "| 2 | profile (mfu only) | $2 | base/profile/ |"
-    echo "| 3 | analyze | $3 | base/bottleneck_report.json |"
+    echo "| 3 | mfu analysis report | $3 | base/profile/mfu_bottleneck_report.md |"
     echo "| 4 | full-train launch (non-blocking) | $4 | baseline/train.rendered.sh + train.pid |"
     echo "| 5 | finalizer launch | $5 | baseline/finalizer.pid + finalizer.log |"
     echo "| 6 | liveness confirmation | $6 | - |"
@@ -800,8 +807,7 @@ from pathlib import Path
 art = Path(".")
 generated = [rel for probe, rel in [
     ("base/model.onnx", "base/model.onnx"),
-    ("base/profile/profile_summary.json", "base/profile/"),
-    ("base/bottleneck_report.json", "base/bottleneck_report.json"),
+    ("base/profile", "base/profile/"),
     ("baseline/original_shadow", "baseline/original_shadow/"),
     ("baseline/train.rendered.sh", "baseline/train.rendered.sh"),
     ("baseline/train.pid", "baseline/train.pid"),
@@ -845,7 +851,7 @@ step_export || { fail_step=1; fail_err="shadow export failed"; }
       fail_err="profiling failed (root cause in the chain stderr of this invocation)"
     fi
   fi; }
-[ "$fail_step" -eq 0 ] && { S2=done; step_analyze || { fail_step=3; fail_err="bottleneck analysis failed"; }; }
+[ "$fail_step" -eq 0 ] && { S2=done; step_profile_report || { fail_step=3; fail_err="mfu analysis report validation failed"; }; }
 [ "$fail_step" -eq 0 ] && { S3=done
   rc4=0; step_train_launch || rc4=$?
   if [ "$rc4" -eq 4 ]; then

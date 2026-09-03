@@ -25,7 +25,7 @@ _CONTRACT = _AGENTS / "po_contract" / "scripts"
 _PO = _AGENTS / "_po_scripts"
 sys.path.insert(0, str(_PO))
 
-from predict_delta import build_change_sig  # noqa: E402
+from build_sig import build_change_sig  # noqa: E402
 
 
 def _run(cmd: list[str], env: dict | None = None) -> subprocess.CompletedProcess:
@@ -161,45 +161,27 @@ def test_shadow_pkgs_csv_resolution_order(tmp_path: Path):
 
 # ── po_baseline extraction ─────────────────────────────────────────────────────
 
-def test_freeze_origin_guard_three_states(tmp_path: Path):
+def test_freeze_origin_guard_reads_raw_schedule_result(tmp_path: Path):
     art = tmp_path / "art"
-    (art / "scripts").mkdir(parents=True)
-    (art / "base" / "profile").mkdir(parents=True)
-    record = tmp_path / "analyze_args.txt"
-    # stub analyze.py: record its argv so the guard's call/no-call is visible
-    (art / "scripts" / "analyze.py").write_text(
-        "import sys\n"
-        f"open({str(record)!r}, 'a', encoding='utf-8')"
-        ".write(' '.join(sys.argv[1:]) + chr(10))\n",
-        encoding="utf-8")
+    raw_dir = art / "base" / "profile" / "model"
+    raw_dir.mkdir(parents=True)
+    (raw_dir / "schedule_result.json").write_text(json.dumps({
+        "serial_cycles": 200,
+        "parallel_cycles": 100,
+    }), encoding="utf-8")
     env = {"ORCA_ARTIFACTS_DIR": str(art)}
     script = ["bash", str(_BASELINE / "freeze_origin.sh"), "0.5", "0.05"]
 
-    # state 1: profiling products not on disk yet (mfu awaiting) -> skip, no call
-    r = _run(script, env=env)
-    assert r.returncode == 0, r.stderr
-    assert not record.exists()
+    result = _run(script, env=env)
+    assert result.returncode == 0, result.stderr
+    anchor = json.loads((art / "base" / "origin_anchor.json")
+                        .read_text(encoding="utf-8"))
+    assert anchor["baseline_makespan_cycles"] == 100
+    assert anchor["target_cycles"] == 51
 
-    # state 2: products present, anchor missing -> analyze.py called once,
-    # positional args mapped in order
-    (art / "base" / "profile" / "profile_summary.json").write_text(
-        "{}", encoding="utf-8")
-    r = _run(script, env=env)
-    assert r.returncode == 0, r.stderr
-    assert record.read_text(encoding="utf-8").splitlines() == [
-        f"--profile-dir {art}/base/profile --freeze-origin "
-        f"--latency-reduction-min 0.5 --accuracy-budget 0.05"]
-
-    # state 3: anchor already frozen -> idempotent no-op, no second call
-    (art / "base" / "origin_anchor.json").write_text("{}", encoding="utf-8")
-    r = _run(script, env=env)
-    assert r.returncode == 0, r.stderr
-    assert len(record.read_text(encoding="utf-8").splitlines()) == 1
-
-    # usage guard: missing positional args fail loud
-    assert _run(["bash", str(_BASELINE / "freeze_origin.sh")],
-                env=env).returncode != 0
-
+    result = _run(script, env=env)
+    assert result.returncode == 0, result.stderr
+    assert _run(["bash", str(_BASELINE / "freeze_origin.sh")], env=env).returncode != 0
 
 # ── deployed (_po_scripts) extractions ────────────────────────────────────────
 

@@ -1,7 +1,7 @@
 """test_po_v5.py — retained early-era machinery tests (file kept for history).
 
 Script-level unit tests for the machinery v7 KEEPS: the origin anchor freeze
-(analyze --freeze-origin), the deployed-set version stamp, gate_node's
+from raw schedule_result.json, the deployed-set version stamp, gate_node's
 stamp-verify wiring (finish-failed disclosure on tamper) and decision
 pass-through, the accuracy rules file (check/apply/seed/merge — v7: the
 cross-model pool machinery is deleted; the project mirror is the one
@@ -23,9 +23,6 @@ import pytest
 _REPO = Path(__file__).resolve().parents[1]
 _SCRIPTS = _REPO / "workflows" / "prof-opt" / "agents" / "_po_scripts"
 sys.path.insert(0, str(_SCRIPTS))
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_po_scripts import _write_profile_fixture  # noqa: E402
 
 def _run_cli(args: list[str], env: dict | None = None,
              timeout: int = 60) -> subprocess.CompletedProcess:
@@ -73,77 +70,52 @@ def test_round_state_bad_command_rejected(tmp_path):
     assert proc.returncode != 0   # argparse choices fail loud
 
 
-# ── analyze --freeze-origin ───────────────────────────────────────────────────
+# ── freeze_origin.sh: raw schedule_result.json -> immutable anchor ─────────────
+
+_FREEZE_ORIGIN = (_REPO / "workflows" / "prof-opt" / "agents" /
+                  "po_baseline" / "scripts" / "freeze_origin.sh")
+
 
 def _freeze(tmp_path: Path, ratio: str, budget: str,
             ) -> subprocess.CompletedProcess:
-    profile_dir = tmp_path / "base" / "profile"
-    if not (profile_dir / "profile_summary.json").is_file():
-        _write_profile_fixture(profile_dir)   # fixture makespan = 310
-    return _run_cli([str(_SCRIPTS / "analyze.py"),
-                     "--profile-dir", str(profile_dir), "--freeze-origin",
-                     "--latency-reduction-min", ratio,
-                     "--accuracy-budget", budget])
+    raw_dir = tmp_path / "base" / "profile" / "model"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    (raw_dir / "schedule_result.json").write_text(json.dumps({
+        "serial_cycles": 400,
+        "parallel_cycles": 310,
+    }), encoding="utf-8")
+    env = os.environ.copy()
+    env["ORCA_ARTIFACTS_DIR"] = str(tmp_path)
+    return subprocess.run(["bash", str(_FREEZE_ORIGIN), ratio, budget],
+                          capture_output=True, text=True, env=env)
 
 
-def test_analyze_freeze_origin_first_write_formula(tmp_path):
+def test_freeze_origin_reads_raw_parallel_cycles(tmp_path):
     proc = _freeze(tmp_path, "0.5", "0.1")
     assert proc.returncode == 0, proc.stderr
     anchor = json.loads((tmp_path / "base" / "origin_anchor.json")
                         .read_text(encoding="utf-8"))
-    # fixture baseline 310 x (1 - 0.5) + 1 = 156 (<= target <=> strictly below)
     assert anchor == {"baseline_makespan_cycles": 310,
                       "latency_reduction_min": 0.5, "accuracy_budget": 0.1,
                       "target_cycles": 156, "frozen_at_round": 0}
-    assert "origin_anchor" in json.loads(proc.stdout)
 
 
-def test_analyze_freeze_origin_idempotent_noop(tmp_path):
+def test_freeze_origin_is_idempotent_and_rejects_drift(tmp_path):
     assert _freeze(tmp_path, "0.5", "0.1").returncode == 0
     before = (tmp_path / "base" / "origin_anchor.json").read_bytes()
-    proc = _freeze(tmp_path, "0.5", "0.1")
-    assert proc.returncode == 0, proc.stderr
-    assert (tmp_path / "base" / "origin_anchor.json").read_bytes() == before
-    assert "no-op" in json.loads(proc.stdout)["origin_anchor"]
-
-
-def test_analyze_freeze_origin_conflict_rc2(tmp_path):
     assert _freeze(tmp_path, "0.5", "0.1").returncode == 0
-    proc = _freeze(tmp_path, "0.4", "0.1")   # a different line
-    assert proc.returncode == 2
-    assert "IMMUTABLE" in proc.stderr
-    assert "fresh_start" in proc.stderr
+    assert (tmp_path / "base" / "origin_anchor.json").read_bytes() == before
+    conflict = _freeze(tmp_path, "0.4", "0.1")
+    assert conflict.returncode != 0
+    assert "fresh_start" in conflict.stderr
 
 
 @pytest.mark.parametrize("ratio,budget", [("0", "0.1"), ("1", "0.1"),
                                           ("1.5", "0.1"), ("0.5", "-1")])
-def test_analyze_freeze_origin_range_validation_rc2(tmp_path, ratio, budget):
+def test_freeze_origin_rejects_invalid_ranges(tmp_path, ratio, budget):
     proc = _freeze(tmp_path, ratio, budget)
-    assert proc.returncode == 2
+    assert proc.returncode != 0
     assert not (tmp_path / "base" / "origin_anchor.json").exists()
-
-
-def test_analyze_freeze_origin_requires_both_params(tmp_path):
-    profile_dir = tmp_path / "base" / "profile"
-    _write_profile_fixture(profile_dir)
-    proc = _run_cli([str(_SCRIPTS / "analyze.py"),
-                     "--profile-dir", str(profile_dir), "--freeze-origin",
-                     "--latency-reduction-min", "0.5"])
-    assert proc.returncode == 2
-
-
-def test_analyze_without_freeze_never_touches_anchor(tmp_path):
-    profile_dir = tmp_path / "base" / "profile"
-    _write_profile_fixture(profile_dir)
-    anchor = profile_dir.parent / "origin_anchor.json"
-    anchor.write_text('{"sentinel": "untouched"}', encoding="utf-8")
-    mtime_before = os.stat(anchor).st_mtime_ns
-    proc = _run_cli([str(_SCRIPTS / "analyze.py"),
-                     "--profile-dir", str(profile_dir)])
-    assert proc.returncode == 0, proc.stderr
-    assert anchor.read_text(encoding="utf-8") == '{"sentinel": "untouched"}'
-    assert os.stat(anchor).st_mtime_ns == mtime_before   # not rewritten
-
 
 # ── gate CLI: retired flags rejected ─────────────────────────────────────────
 
@@ -196,7 +168,7 @@ def test_deploy_verify_detects_tampering(tmp_path):
     subprocess.run(["bash", str(_DEPLOY_SH)], capture_output=True, timeout=60,
                    env=_deploy_env(art))
     # tamper with one deployed file
-    victim = art / "scripts" / "predict_delta.py"
+    victim = art / "scripts" / "build_sig.py"
     victim.write_text(victim.read_text(encoding="utf-8") + "\n# tampered\n",
                       encoding="utf-8")
     proc = subprocess.run(["bash", str(_DEPLOY_SH), "--verify"],

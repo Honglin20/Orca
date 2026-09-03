@@ -71,7 +71,7 @@ path / validation gate — the single source for YOUR validation):
 | `structure-proposer` | `[subagent:structure-proposer v4 SPO6M1]` | sentinel + one compact line (lever + predicted makespan vs line, or "no admissible candidate") | `rounds/<RRR>/proposals.json` | Step 1 mechanical validation (below) |
 | `variant-assessor` | `[subagent:variant-assessor v1 VAS4K9]` | sentinel + one line (document path) | `variants/<VID>/assessment.md` | Step 2 sentinel + six sections + `### 被牺牲信息与预期精度代价`; emit gate `check_propose_emit.py` re-asserts |
 | `variant-implementer` | `[subagent:variant-implementer v1 VIM9C6]` | sentinel + one compact line per proposal: `<vid>: DONE` or `<vid>: skipped(<path>) — <one-clause reason>` (terminal-skip paths: `structural_mismatch` / `variant_broken`) | `variants/<VID>/shadow/` + `declaration.json` + `onnx/model.onnx` + `DONE` (DONE only on the success path) | `diff_check.py` two layers + DONE sha (`write_done_marker.py`) + `append_impl_row.py` — you own the history row |
-| `mfu-analyzer` | `[subagent:mfu-analyzer v2 MBA7K2]` | sentinel + ≤10 compact lines (eval status + parallel cycles + root causes + report path) | raw products under `<profile_dir>/<onnx_stem>/` (read-only) + report at `<report_path>` | Step 3 raw-products check + `mfu_adapter.py` fail loud |
+| `mfu-analyzer` | `[subagent:mfu-analyzer v2 MBA7K2]` | sentinel + ≤10 compact lines (eval status + parallel cycles + root causes + report path) | raw products under `<profile_dir>/<onnx_stem>/` (read-only) + the single analysis artifact at `<report_path>` | Step 3 validates the report sentinel; latency reads raw `schedule_result.json` directly |
 | `accuracy-analyst` | `[subagent:accuracy-analyst v2 AAN4T7]` | sentinel + one compact line (new / merged / unchanged count) | `accuracy_rules.json` (full set) | `rules_pool.py apply` then `rules_pool.py check` |
 
 **Failure matrix, uniform across every subagent this node dispatches** — for
@@ -123,16 +123,8 @@ intermediate checklist is working memory, never part of the output).
 
 ### Step 1: Bottleneck evidence + EXACTLY ONE admitted proposal
 
-**Pre — refresh the mechanical report and verify the evidence base.**
-Run the mechanical report refresh (fail loud on non-zero; it never touches
-the frozen origin anchor):
-
-```bash
-python3 "$ORCA_ARTIFACTS_DIR/scripts/analyze.py" \
-  --profile-dir "$ORCA_ARTIFACTS_DIR/base/profile"
-```
-
-Then verify the FOUR baseline documents are on disk (the baseline stage's
+**Pre — verify the single profiling report and baseline evidence.**
+Verify the THREE baseline analysis documents are on disk (the baseline stage's
 emit gate guarantees them; their absence here means the baseline stage did
 not complete — fail loud, name what is missing):
 
@@ -146,12 +138,14 @@ not complete — fail loud, name what is missing):
   [ "$(head -n 1 "$ORCA_ARTIFACTS_DIR/base/profile/mfu_bottleneck_report.md")" = "[subagent:mfu-analyzer v2 MBA7K2]" ]
   ```
 
-- the mechanical ledger path `base/bottleneck_report.json` (just refreshed).
+The mfu report is the only bottleneck-analysis input. It lists the raw source
+files it analyzed; open those paths only when evidence drill-down is needed.
+Do not generate or consume derived profiling JSON.
 
 **Dispatch the proposer.** Collect first:
 
 - the reference line for calibration: the base makespan
-  (`base/profile/profile_summary.json` → `makespan_cycles`) and the frozen
+  (`base/origin_anchor.json` → `baseline_makespan_cycles`) and the frozen
   `target_cycles` (`base/origin_anchor.json`, read-only) — the proposal's
   predicted-vs-line margin is DISCLOSED, not gated;
 - the rerouting signal: the union of `failed_sigs` over EVERY
@@ -267,13 +261,10 @@ conformance record.
    and the `chip` / `precision` / `core_num` values from
    `contracts.json`'s `profile` block; validate (at least one raw-product
    `schedule_result.json`, report present, sentinel
-   `[subagent:mfu-analyzer v2 MBA7K2]` first line), then run the
-   deterministic adapter (quote its stderr verbatim on failure; never
-   hand-edit raw products):
-   ```bash
-   python3 "$ORCA_ARTIFACTS_DIR/scripts/mfu_adapter.py" \
-     --profile-dir "$ORCA_ARTIFACTS_DIR/variants/<VID>/profile"
-   ```
+   `[subagent:mfu-analyzer v2 MBA7K2]` first line). Do not run an adapter or
+   secondary analyzer and never hand-edit raw products. The latency gate reads
+   `parallel_cycles` directly from the profile's single raw
+   `schedule_result.json`.
 4. **Verdict** (the judgement is fully scripted — the frozen
    `target_cycles` is the only line; `check_verdict.py` is the single
    predicate):
@@ -397,7 +388,7 @@ Loop while the vid's verdict is a repairable failure:
      --field status=executed \
      --field 'error=' \
      --field repair_count=<N> \
-     --field 'generated_artifacts=["rounds/<RRR>/proposals.json", "rounds/<RRR>/verdicts.jsonl", "rounds/<RRR>/analysis.md", "rounds/<RRR>/direction.json", "variants/<VID>/assessment.md", "variants/<VID>/repair_trace.json", "variants/<VID>/profile/mfu_bottleneck_report.md", "base/accuracy_rules_snapshot.json", "base/bottleneck_report.json", "experiment_ledger.json", "history.jsonl"]'
+      --field 'generated_artifacts=["rounds/<RRR>/proposals.json", "rounds/<RRR>/verdicts.jsonl", "rounds/<RRR>/analysis.md", "rounds/<RRR>/direction.json", "variants/<VID>/assessment.md", "variants/<VID>/repair_trace.json", "variants/<VID>/profile/mfu_bottleneck_report.md", "base/accuracy_rules_snapshot.json", "experiment_ledger.json", "history.jsonl"]'
    ```
    List a path only when the file exists on disk (`direction.json` and
    `repair_trace.json` exist only on their paths; drop `verdicts.jsonl` /

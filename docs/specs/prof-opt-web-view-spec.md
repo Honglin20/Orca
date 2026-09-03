@@ -26,7 +26,7 @@
 | 面板 | 数据源（读盘面） | 展示 |
 |---|---|---|
 | Run 概览卡 | `base/origin_anchor.json` / `train_device.json` / `experiment_ledger.json` / `profile_mode.json` | 状态 / target vs best / 后端与卡数 / 在飞变体数 / profiling 模式 |
-| 基线面板 | `baseline/business_logic.md`、`base/information_analysis.md`、`base/profile/mfu_bottleneck_report.md`、`base/bottleneck_report.json`、`baseline/baseline_metrics.jsonl` | 三文档 + 基线曲线 + 瓶颈 Top-N 表 |
+| 基线面板 | `baseline/business_logic.md`、`base/information_analysis.md`、`base/profile/mfu_bottleneck_report.md`、`baseline/baseline_metrics.jsonl` | 三文档 + 基线曲线；瓶颈与分析源路径统一在 MFU Markdown 中展示 |
 | 变体面板 | `variants/<vid>/` 下：business_logic.md / information_analysis.md / conformance.md / profile/mfu_bottleneck_report.md / verdict.json / metrics/metrics.jsonl / train_status.json / eval/final_acc.json + history 行 | 卡片列表（vid/状态/改动摘要/makespan/精度/gap）+ 点开文档与曲线；淘汰变体保留 |
 | 图表区 | `push_curves.py` 推送（v6 §10） | top-10 line + 全量 pareto |
 | 轮次时间线 | `rounds/<NNN>/analysis.md` | 逐轮结论文档 |

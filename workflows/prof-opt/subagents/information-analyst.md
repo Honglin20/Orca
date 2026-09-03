@@ -24,9 +24,9 @@ The caller will provide:
 1. **`<output_dir>`**: the workflow workspace (`$ORCA_ARTIFACTS_DIR`) —
    read from it: the model source tree you analyze (`shadow/`),
    `baseline/business_logic.md` (the semantics anchor: task, I/O, module
-   roles), `base/bottleneck_report.json` + `base/profile/
-   mfu_bottleneck_report.md` (what is expensive — the constraints your
-   directions must dodge), `history.jsonl` (what has already been tried —
+   roles), `base/profile/mfu_bottleneck_report.md` (the only profiling
+   analysis; it lists raw source paths for optional evidence drill-down),
+   `history.jsonl` (what has already been tried —
    your directions must be NEW families, not repeats), and
    `accuracy_rules.json` when present (measured-harmful patterns to avoid).
 2. **`<doc_path>`**: the absolute path of the document you must write —

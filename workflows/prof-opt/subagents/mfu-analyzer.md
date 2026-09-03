@@ -59,8 +59,10 @@ python3 "$ORCA_ARTIFACTS_DIR/scripts/mfu_benchmark.py" <onnx_path> \
 - `gantt_chart_optimized.html` / `memory_usage_optimized.html` /
   `memory_allocation.html` — 可视化产物
 
-**这些原始产物全部留在 `<profile_dir>` 内不要移动**——下游的确定性适配器与
-分析器都要按路径读它们。
+**这些原始产物全部留在 `<profile_dir>` 内不要移动**。你的 Markdown 报告必须
+列出实际读取过的源文件路径；下游 agent 以报告为入口，只有需要证据下钻时才按
+报告中列出的路径打开原始文件。latency gate 直接读取原始
+`schedule_result.json.parallel_cycles`，不存在适配器或二次分析器。
 
 ## 三阶段流程
 
@@ -116,6 +118,14 @@ H5）。若连日志都没有（网络/提交层失败），在报告中如实�
 - 串行 MFU: <xx%>  并行 MFU: <xx%>
 - 内存占用: <xx> MB
 
+### 分析源文件
+- profile_dir: <绝对路径>
+- schedule_result: <实际读取的 schedule_result.json 绝对路径>
+- operator_latency: <实际读取的时延 CSV 绝对路径，未产生则写“无”>
+- task_details: <实际读取的 subgraph_0_tasks.json 绝对路径，未产生则写“无”>
+- taskgraph: <实际读取的 *_taskgraph.json 绝对路径，未产生则写“无”>
+- logs: <实际读取的日志路径列表，未读取则写“无”>
+
 ### 瓶颈根因
 （主位：1-3 个根因，按影响排序。每个根因一段：）
 - **根因 <一句话命名>**
@@ -159,6 +169,8 @@ structure-proposer 的事（structural-levers 是它的先验来源），本报�
   （哪些算子被处理了、fusion 情况等），如实写入报告
 - **H6 不改原始产物**：`<profile_dir>` 内的文件只读；你的唯一写盘动作 =
   `<report_path>`
+- **H7 报告列源路径**：`### 分析源文件` 必须列出实际读取的原始文件；不得写
+  未读取的路径，也不得只写文件类型不写具体路径
 
 ## Output
 

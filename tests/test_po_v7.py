@@ -16,8 +16,8 @@ Covers the admission list the spec names:
   - metric_curve: duplicate epoch last-wins + "no lines yet" vs "pattern
     matched nothing" distinction
   - check_baseline_docs three-document gate matrix lives in
-    test_po_scripts.py; check_propose_emit assessment/stamp gates and the
-    predict_delta weighting live in test_po_v6.py / test_po_scripts.py.
+    test_po_scripts.py; check_propose_emit assessment/stamp and negative
+    prediction gates live in test_po_v6.py / test_po_scripts.py.
 """
 from __future__ import annotations
 

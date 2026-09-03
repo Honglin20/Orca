@@ -1,6 +1,7 @@
 # prof-opt v7 SPEC —— mfu 唯一链路 + 判断力归还 + 校验全覆盖
 
-> 状态：待实现（2026-09-01 用户拍板，全部采纳推荐项）。
+> 状态：已实现；2026-09-03 收敛 profiling 产物契约：删除 adapter/analyzer/predictor
+> 辅助脚本，语义分析统一由 `mfu_bottleneck_report.md` 承载，时延门直接读取原始 JSON。
 > 本文是实现的**唯一契约**。与 v6 spec / 2026-08-31 两份 release note 冲突处，以本文为准
 > （两份 08-31 note 需在文首标注 superseded-by-v7）。
 > 分支：`puzzle-supernet`。
@@ -64,6 +65,10 @@ information_analysis.md 缺失→病根3+4；基线没做真实测量→病根1�
 - `agents/_po_scripts/placeholder_profiler.py`（整文件）
 - `subagents/bottleneck-analyst.md`（整文件）
 - `agents/_po_scripts/check_bottleneck.py`（整文件）
+- `agents/_po_scripts/mfu_adapter.py`（整文件）
+- `agents/_po_scripts/analyze.py`（整文件）
+- `agents/_po_scripts/predict_delta.py`（整文件）
+- `agents/_po_scripts/PROFILER_CONTRACT.md`（整文件）
 - `profile_mode.json` 及其全部读方（po_propose Step1、structure-proposer、
   check_propose_emit 的 mode 分支、run_baseline_chain.sh 的 NPU_CHIP 逻辑、
   po_flatten 的解析调用与 reuse 比对）
@@ -74,26 +79,31 @@ information_analysis.md 缺失→病根3+4；基线没做真实测量→病根1�
 ```
 base/model.onnx（step1 导出，不变）
   → 节点派发 mfu-analyzer（见 §4 派发协议）
-  → 原始产物落在 base/profile/<onnx_stem>/（analyzer 只读约定不变）
-  → scripts/mfu_adapter.py --profile-dir base/profile（不变，fail loud 语义保留）
-  → 四件套 taskgraph.json / ops.csv / schedule.json / profile_summary.json
-  → scripts/analyze.py --profile-dir base/profile（不变）
-  → base/bottleneck_report.json（机械底册：predict_delta 定价依据，非 proposer 证据）
+  → 原始产物落在 base/profile/<onnx_stem>/（至少含 schedule_result.json）
+  → mfu-analyzer 将分析结论写入 base/profile/mfu_bottleneck_report.md
+  → chain 直接校验唯一 schedule_result.json 的 parallel_cycles
+  → freeze_origin.sh 直接据此冻结 base/origin_anchor.json
 ```
 - chain 的 mfu 等待握手（rc 3 = awaiting analyzer raw products）**无条件保留**——不再有
   placeholder 分支；stdout running 消息含派发参数（onnx/profile_dir/report/chip/precision/
   core_num，值来自 contracts.json）。
-- `base/profile/mfu_bottleneck_report.md` = 瓶颈分析报告（proposer 的唯一瓶颈证据源）。
+- 不生成 taskgraph/ops/schedule/profile_summary 四件套或 `bottleneck_report.json`。
+- `base/profile/mfu_bottleneck_report.md` 是 proposer 的唯一瓶颈证据源；报告内列出本次
+  分析使用的原始文件路径，需要下钻时由 agent 按路径读取。
 
 ### 3.3 变体 profiling（po_propose Step3）
 - 每个变体无条件派发 mfu-analyzer（`variants/<VID>/onnx/model.onnx` →
-  `variants/<VID>/profile/`）+ mfu_adapter。原「ONLY when mode==mfu」条件删除。
+  `variants/<VID>/profile/`）。latency recheck 直接读取唯一
+  `variants/<VID>/profile/<onnx_stem>/schedule_result.json.parallel_cycles`；agent 只消费
+  `variants/<VID>/profile/mfu_bottleneck_report.md`，需要证据下钻时再读报告列出的源文件。
 
 ### 3.4 mfu-analyzer.md 重写（version 2）
 - frontmatter `version: 2`，哨兵行 `[subagent:mfu-analyzer v2 MBA7K2]`（哨兵码不变，
   版本号升级；所有引用方与测试同步更新）。
 - 报告模板重心反转：**「瓶颈根因」为主位**（1-3 个根因，区分表象与根因），算子级
   证据表降为「按显著性列行」（不固定 Top-5；说明列写「为什么它是/不是瓶颈」）。
+- 报告必须包含 `### 分析源文件`，逐项写出实际读取的原始文件路径；报告不得引用未读取
+  的路径，也不得要求下游依赖额外派生 JSON。
 - 删除：`MFU<30%` 硬阈值（改为「MFU 相对同类算子是否显著异常」的判断语言）、
   「增加 --core-num / 缩小 batch」等配置类建议（不是 model-source 结构修改，与 proposer
   硬约束 1 冲突）、「内存超 L1D 实际 cycles ≈ 测量值 × batch 缩放比」的心算教学、
@@ -148,25 +158,26 @@ base/model.onnx（step1 导出，不变）
 ## 5. propose：单变体收敛环 v7
 
 ### 5.1 Step1 瓶颈证据（简化）
-- 删除 placeholder 分支与 bottleneck-analyst 派发。Step1-pre 只做：
-  `analyze.py --profile-dir base/profile` 刷新机械底册（幂等）+ 校验
+- 删除 placeholder 分支与 bottleneck-analyst 派发。Step1-pre 只做校验：
   `base/profile/mfu_bottleneck_report.md` 存在且首行哨兵 = `[subagent:mfu-analyzer v2 MBA7K2]`
   （fail loud，缺失说明基线阶段未完成）。
 - proposer 输入 `<info_analysis>`、`<baseline_doc>` 等不再「when it exists」静默可选：
-  四份基线文档（business_logic / information_analysis / mfu 报告 + 机械底册路径）**必须
-  在场**（§4.3 门保证）；仍可缺席的只剩 `<prev_analysis>`（round 1）与 `<prior_reports>`
+  三份基线文档（business_logic / information_analysis / mfu 报告）**必须在场**（§4.3
+  门保证）；仍可缺席的只剩 `<prev_analysis>`（round 1）与 `<prior_reports>`
   （首轮无变体），缺席语义在 proposer.md 写明。
 
-### 5.2 预测降级（predict_delta.py）
+### 5.2 提案预测字段
 - **准入硬门只剩一条**：`predicted_delta_cycles` 为负整数。「预测达线
   （base+delta ≤ target）」从 gate 降为**参考披露**——写入 round analysis 的
   校准注记，`check_propose_emit` 不再因预测不达线而拒。
-- **关键路径加权**：predictor 消费 `base/bottleneck_report.json` 的 `critical_path`
-  逐站点名单（analyze.py 已产出）。受影响站点在关键路径上 → 权重 1.0；不在 → 权重 0.25
-  （启发式，stdout 披露 `{on_path_cycles, off_path_cycles_weighted}` 与所取权重）。
-- **shape class 确定性推导**：受影响站点的 shape class 由 predictor 从
-  `base/profile/taskgraph.json` 按 node name 自行推导；删除「LLM 手算 element count
-  落箱 + 惩罚性全量上界」的 `--sites` 外包模式（参数删除）。
+- `predicted_delta_cycles` 由 proposer 基于 `mfu_bottleneck_report.md` 作判断性估计；如需
+  查证，可读取报告 `### 分析源文件` 中列出的原始文件。不得依赖额外 predictor 脚本或
+  派生 profiling JSON。
+- structure-proposer 的设计对象是 `shadow/` 中的模型源码：先理解模块、连线和可编辑站点，
+  再声明预期 `op_delta`。proposal 阶段不得读取 `base/model.onnx` 作结构设计或预校验；
+  implementer 完成源码修改并导出后，由 `diff_check.py --layer graph` 机械比较 base/variant
+  ONNX，验证声明是否成立。
+- `build_sig.py` 只负责机械生成稳定 `change_sig`，不参与性能预测。
 - structural-levers 与 proposer 文档同步：`sota_reference` 允许 null + 一句「为何无先例」；
   `exhausted` 恒 false 死字段删除（`exhausted_rationale` 保留）。
 
@@ -392,15 +403,15 @@ base/_flat.py 招牌产物                            structural-levers 两节�
 | readiness.json + project_manifest | po_flatten | 全链 | check_flatten.sh（逐指标 direction 修复后） |
 | contracts.json + templates | po_contract | 全链 | check_contracts.sh（viable 复用检查 + admission ack） |
 | base/model.onnx | chain step1 | profiling/export | chain 产品存在检查 |
-| base/profile/ 四件套 + bottleneck_report.json | mfu_adapter + analyze.py | predictor / 报告 | chain 四件套存在检查 + adapter fail loud |
-| base/profile/mfu_bottleneck_report.md | mfu-analyzer | proposer / web | check_baseline_docs.sh（哨兵+节） |
+| base/profile/<onnx_stem>/schedule_result.json | mfu-analyzer 调用的评测工具 | freeze_origin / latency gate | chain/recheck 校验唯一文件 + parallel_cycles 非负整数 |
+| base/profile/mfu_bottleneck_report.md | mfu-analyzer | proposer / web | check_baseline_docs.sh（哨兵+节+分析源文件） |
 | baseline/business_logic.md | business-logic-analyst | assessor / proposer / web | check_baseline_docs.sh |
 | base/information_analysis.md | information-analyst | proposer / assessor / web | check_baseline_docs.sh |
 | base/origin_anchor.json | freeze_origin.sh | gate/verdict/report | 脚本自身（不可变校验） |
 | rounds/<RRR>/proposals.json | structure-proposer | 全环 | check_propose_emit + 节点 Step1 校验 |
 | variants/<VID>/assessment.md | variant-assessor | 软对齐 / web | check_propose_emit |
 | variants/<VID>/shadow + declaration + onnx + DONE | variant-implementer | 测量/训练 | diff_check + DONE sha + append_impl_row |
-| variants/<VID>/profile/ + 报告 | mfu-analyzer + adapter | verdict / 修复 | 节点 Step3（哨兵+schedule_result+adapter） |
+| variants/<VID>/profile/<onnx_stem>/schedule_result.json + mfu_bottleneck_report.md | mfu-analyzer | verdict / 修复 / web | 节点 Step3（哨兵+唯一 raw JSON+parallel_cycles） |
 | verdict.json / verdicts.jsonl | run_latency_recheck（经 check_verdict.py） | gate/probe/report | check_verdict.py 唯一谓词 |
 | repair_trace.json | recheck 脚本 | emit/校准 | check_propose_emit |
 | accuracy_rules.json | accuracy-analyst（apply 子命令） | proposer / 面板 | rules_pool check |
@@ -428,8 +439,8 @@ base/_flat.py 招牌产物                            structural-levers 两节�
      adopt/release 不回归；pid_lib unknown 语义披露。
    - check_baseline_docs：三文档缺一/哨兵错/缺节 各拒。
    - check_verdict.py：达线谓词 inclusive 边界 + 三处调用一致（recheck / probe emit / 协议文档引用）。
-   - predict_delta：关键路径加权（on 1.0 / off 0.25 披露）、shape class 从 taskgraph 推导、
-     负值要求。
+   - profiling 单出口：不生成 adapter/analyze 派生产物；freeze/recheck 直接读取唯一
+     schedule_result.json.parallel_cycles；提案只保留负值要求。
    - gate_decide idle 出环：连续 N 轮零提案 → report；不足 N → loop。
    - watchdog.py：duplicate epoch last-wins、streak 阈值按 E 推导、等锚保留最后已知值、
      SIGTERM 终态、final_check stderr 落日志。

@@ -4,10 +4,10 @@ An on-demand DICTIONARY of structure-level model changes, indexed by
 trigger op — consult the entries your selected bottleneck's trigger ops
 name; do NOT read this cover-to-cover every round. The evidence you
 actually reason from is the current run's mfu bottleneck report
-(`base/profile/mfu_bottleneck_report.md` — root causes first) plus the
-mechanical report (`base/bottleneck_report.json`: `hot_patterns`,
-`cost_table`, `critical_path`, `pipeline_breakdown`) and the
-business-logic document; this catalog tells you what kinds of structure
+(`base/profile/mfu_bottleneck_report.md` — root causes first) and the
+business-logic document. Raw source paths listed by the report may be opened
+for evidence drill-down; there is no secondary mechanical analysis report.
+This catalog tells you what kinds of structure
 changes exist, not which one to pick this round. Structural priors live
 HERE and only here — the mfu-analyzer's root-cause vocabulary (DMA 搬运 /
 小算子碎片 / 子图串行化 / 算力利用率) is diagnostic language, and each entry
@@ -37,28 +37,23 @@ recover). The proposal's `predicted_acc_impact` uses the same three values.
    with a meaningful share, AND the business-logic document
    (`baseline/business_logic.md`) confirms the surrounding semantics allow
    the change.
-3. Open the current shadow model source under `shadow/`, locate the module
-   sites behind the listed onnx node names, and count how many sites the
-   change would touch.
-4. Derive the op delta per site from the entry's export-pattern table, then
-   VERIFY the per-site pattern against the actual base onnx
-   (`base/model.onnx`) — export decomposition varies with framework
-   version; the actual graph is the truth. Op delta = (per-site removal +
-   per-site insertion) x site count.
-5. Feed the op delta + the affected taskgraph operator NAMES to the cycle
-   predictor (it derives each site's shape class and critical-path weight
-   itself). Only strictly negative predictions are admissible; when the
-   inserted op type is absent from the cost table, pass an explicit per-op
-   cost override derived from the closest same-class row and record that
-   derivation in `prediction_basis`.
+3. Open the current shadow model source under `shadow/`, locate the modules
+   whose computation implements the reported hotspot/root cause, understand
+   their wiring, and count how many editable sites the change would touch.
+4. Derive the expected op delta per site from the concrete source edit and
+   this entry's export-pattern prior. Op delta = (expected per-site removal +
+   insertion) x site count. It is a declaration to be checked after the edit,
+   not a reason for the proposer to inspect `base/model.onnx`.
+5. Estimate the cycle reduction from the mfu report's measured cycles,
+   proportions, and root-cause evidence. Only strictly negative predictions
+   are admissible; record every assumption and arithmetic step in
+   `prediction_basis`.
 
-**Count from the actual graph — pinned discipline**: modern exporters at
-opset 17 frequently FUSE a decomposition chain into ONE node
-(`LayerNormalization` and `Softmax` are the common fused forms; fused
-activation nodes such as `Gelu` may appear as well). Every entry below
-carries BOTH trigger forms — the decomposed chain AND the fused single
-operator — and the op delta ALWAYS counts the operators the actual exported
-graph shows.
+**Source-first discipline**: exporter output varies by framework/opset and may
+fuse a decomposition chain into one node. The tables below therefore remain
+priors for the expected op delta only. After implementation, the exported
+base/variant ONNX graphs are compared mechanically by `diff_check.py`; the
+proposer never uses ONNX as the model-design input.
 
 ## Index by trigger op
 

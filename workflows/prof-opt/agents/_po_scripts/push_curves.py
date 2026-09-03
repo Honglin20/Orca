@@ -223,16 +223,11 @@ def collect(artifacts: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]
 
 
 def _baseline_makespan(artifacts: Path) -> float | None:
-    """The pareto x-axis denominator: the frozen origin anchor first, then the
-    profiled bottleneck reports (the same chain of authorities the gates read,
-    most-frozen first)."""
-    for rel, key in (("base/origin_anchor.json", "baseline_makespan_cycles"),
-                     ("base/bottleneck_report.json", "makespan_cycles"),
-                     ("base/profile/profile_summary.json", "makespan_cycles")):
-        doc = _read_json(artifacts / rel)
-        value = doc.get(key) if doc else None
-        if isinstance(value, (int, float)) and value > 0:
-            return float(value)
+    """The pareto x-axis denominator is the frozen baseline anchor."""
+    doc = _read_json(artifacts / "base" / "origin_anchor.json")
+    value = doc.get("baseline_makespan_cycles") if doc else None
+    if isinstance(value, (int, float)) and value > 0:
+        return float(value)
     return None
 
 

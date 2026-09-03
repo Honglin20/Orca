@@ -96,7 +96,7 @@ terminal row in ANY version makes the vid judged).
 |---|---|---|---|
 | 1 | `project_manifest.md` OR `shadow/` OR `BASELINE.lock` missing | failed | flatten |
 | 2 | `contracts.json` missing, or its recorded viability flag is false | failed | contract |
-| 3 | the baseline early chain is incomplete (`base/bottleneck_report.json` or `baseline/train.rendered.sh` missing), OR `baseline_status.md` records the chain as failed, OR `baseline/train_final.json` exists with `status: failed`, OR the finalizer is dead (attribution-checked `baseline/finalizer.pid` names no live pid) with NO `train_final.json` on disk (an externally killed guardian) | failed | baseline |
+| 3 | the baseline early chain is incomplete (`base/profile/mfu_bottleneck_report.md` or `baseline/train.rendered.sh` missing), OR `baseline_status.md` records the chain as failed, OR `baseline/train_final.json` exists with `status: failed`, OR the finalizer is dead (attribution-checked `baseline/finalizer.pid` names no live pid) with NO `train_final.json` on disk (an externally killed guardian) | failed | baseline |
 | 4 | `rounds/` has no numeric directory | failed | propose |
 | 5 | any vid has a `success` row (after Step 0's harvest every in-flight training is terminal) | success | probe |
 | 6 | no success AND some vid's latest row is `latency_pass` while its training left NO terminal record (no terminal row, `train_status.json` missing or non-terminal, watchdog dead/absent — a torn launch, not a wait) | failed | probe |
@@ -143,9 +143,8 @@ terminal record — torn launch").
   `stage`); `done` → read `baseline_full_acc` from the file (never from
   anywhere else). `makespan` = `base/origin_anchor.json`'s
   `baseline_makespan_cycles` — the frozen ORIGINAL baseline; when the
-  anchor file is absent (pre-baseline terminal) fall back to the current
-  `base/profile/profile_summary.json` with an explicit disclosure that the
-  value is un-anchored.
+  anchor file is absent (pre-baseline terminal), use null and disclose that
+  the baseline profiling anchor was never frozen.
 - `final` (all from the WINNER's records; zeroed when there is no winner):
   `acc` from `variants/<vid>/eval/final_acc.json`'s `final_acc` (0 when
   absent); `makespan` from the winner's history snapshot

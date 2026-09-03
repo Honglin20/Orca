@@ -14,7 +14,7 @@ entry: po_flatten
 # `$ORCA_ARTIFACTS_DIR`（入口注入）：`project_root` 非空绝对路径 →
 # `<project_root>/artifacts/prof-opt/`（project-scoped，跨 run 复用 + 多 wf 隔离）。
 #
-# 时延量纲：全链统一整数 cycles（profiling 四件套原生量纲）。
+# 时延量纲：全链统一整数 cycles（直接读取原始 schedule_result.json）。
 # profiling 配置（profile_chip / profile_precision / profile_core_num）是显式
 # inputs，由 po_contract 记入 contracts.json（值级指纹的一部分）——变更需
 # fresh_start=true（与达标线/精度预算同轨，origin 锚不可变）。
@@ -175,8 +175,9 @@ nodes:
 
   # ── Agent 3: po_baseline（基线链 + 完整训练非阻塞 + finalizer 守护）─────────
   #   节点内完成：①早期链（pristine 快照 + 影子导出 + mfu 唯一 profiling 链：
-  #   派发 mfu-analyzer 调用户内网评测工具 → mfu_adapter 四件套 → analyze
-  #   机械底册；无 placeholder 分支，rc 3 = 等待 analyzer 原始产物）②完整训练
+  #   派发 mfu-analyzer 调用户内网评测工具 → 原始 schedule_result.json 用于
+  #   机械 latency gate + 单一 mfu_bottleneck_report.md 用于分析；无 placeholder
+  #   分支，rc 3 = 等待 analyzer 原始产物）②完整训练
   #   launch（--device <idx>：节点先 device_alloc probe 读占用原文选卡，
   #   chain 内 claim --idx；满卡 = stdout running 节点 park，下一轮重 probe）
   #   ③finalizer 守护 launch（逐 epoch 增量曲线 + live 推送 + 双锚终检 +
@@ -208,11 +209,11 @@ nodes:
 
   # ── Agent 4: po_propose（单变体收敛环；回边重入目标）──────────────────────
   #   Step0 对戳+轮号（deploy --verify + round_state working；reuse guard 语义
-  #   不变）→ Step1 瓶颈证据（analyze.py 刷新机械底册 + 校验
-  #   base/profile/mfu_bottleneck_report.md 哨兵 v2，四份基线文档必须在场）+
+  #   不变）→ Step1 瓶颈证据（只读并校验
+  #   base/profile/mfu_bottleneck_report.md 哨兵 v2，三份基线文档必须在场）+
   #   structure-proposer 每轮恰 1 提案（准入硬门仅 predicted_delta_cycles
-  #   负整数；预测达线降为参考披露；predictor 关键路径加权 + shape class
-  #   自推导）→ Step2 variant-assessor 单 subagent 软对齐（assessment.md 六节
+  #   负整数；预测达线降为参考披露；预计 cycles 由 agent 基于 mfu 报告判断）→
+  #   Step2 variant-assessor 单 subagent 软对齐（assessment.md 六节
   #   门；stamp 键 = vid|sig|sha256(declaration)；conformance.md 已删）→
   #   Step3 实现 + 每变体无条件 mfu-analyzer 实测 → Step4 修复内环 ≤5
   #   （structural/variant_broken 联合 ≤2）→ Step5 rules 增量刷新

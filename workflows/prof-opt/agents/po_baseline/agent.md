@@ -15,11 +15,11 @@ this node different from a normal script driver:
    (incremental curve, live chart pushes, final check, both accuracy
    anchors, terminal marker).
 2. **mfu is the only profiling path**: the chain WAITS at its step 2 for
-   the `mfu-analyzer` subagent's raw products (the subagent drives the
-   user's in-network evaluation tool with the chip/precision/core_num
-   recorded in `contracts.json`), adapts them through the deterministic
-   `mfu_adapter.py`, and NEVER falls back to any estimator — you own the
-   analyzer dispatch across that boundary.
+   the `mfu-analyzer` subagent's raw products and single analysis document
+   `base/profile/mfu_bottleneck_report.md` (the subagent drives the user's
+   in-network evaluation tool with the chip/precision/core_num recorded in
+   `contracts.json`). There is no adapter, secondary analyzer, estimator, or
+   fallback path — you own the analyzer dispatch across that boundary.
 3. **You pick the training card**: before invoking the chain, run
    `device_alloc.py probe`, READ the backend CLI's raw occupancy output
    yourself (it is passed through verbatim — the judgement which card is
@@ -136,8 +136,8 @@ Verify the upstream contract stage completed — all of: `contracts.json`,
 backend + count resolved once at the entry node),
 `templates/export_onnx.template.sh`,
 `templates/run_full_finetune.template.sh`, `templates/run_eval.template.sh`,
-`scripts/render_run.sh`, `scripts/analyze.py` (the chain re-checks these and
-fails loud itself; catching it here gives a cleaner error). Anything
+and `scripts/render_run.sh` (the chain re-checks these and fails loud itself;
+catching it here gives a cleaner error). Anything
 missing → emit `status="failed"` with
 `error="baseline prerequisites missing: <list> (contract stage did not complete)"`
 and stop.
@@ -209,8 +209,7 @@ logs go to stderr and `baseline/finalizer.log` / `baseline/train.attempt<N>.log`
 dispatch it when the chain reports the awaiting state (its `running` line
 carries the full dispatch parameter set, including the chip / precision /
 core_num from `contracts.json`), or proactively when `base/model.onnx`
-exists, `base/profile/profile_summary.json` is absent, and no
-`base/profile/*/schedule_result.json` exists yet. After each dispatch,
+exists and no `base/profile/*/schedule_result.json` exists yet. After each dispatch,
 validate mechanically (product presence only — the report's SENTINEL is
 `check_baseline_docs.sh`'s business, never re-typed here):
 
@@ -219,14 +218,12 @@ ls "$ORCA_ARTIFACTS_DIR"/base/profile/*/schedule_result.json >/dev/null 2>&1
 [ -s "$ORCA_ARTIFACTS_DIR/base/profile/mfu_bottleneck_report.md" ]
 ```
 
-Both must hold (at least one raw-product dir — the adapter itself
-enforces exactly one and fails loud on ambiguity — and the report
-present). Any miss → failure matrix (re-dispatch once; second failure →
+Both must hold: exactly one raw-product `schedule_result.json` and the report
+present. Any miss → failure matrix (re-dispatch once; second failure →
 fallback emitter with `status=failed`, `error` naming `mfu-analyzer` and
-quoting what is missing). On success re-invoke the chain: it runs
-`scripts/mfu_adapter.py` over the raw products (the adapter fails loud if a
-field is missing or inconsistent — quote its stderr in `error` verbatim;
-never "fix" the raw products by hand).
+quoting what is missing). On success re-invoke the chain. It validates the raw
+JSON directly and validates the report sentinel; never "fix" raw products or
+create derived profiling files by hand.
 
 **The other two analysts** — as soon as `baseline/train.pid` exists (the
 chain confirms the training launched before its liveness step — a

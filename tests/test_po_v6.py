@@ -59,6 +59,9 @@ _ALLOC_PY = _SCRIPTS / "device_alloc.py"
 _LEDGER_AGG = _SCRIPTS / "ledger_aggregate.py"
 _LEDGER_PY = _SCRIPTS / "experiment_ledger.py"
 _DEPLOY_SH = _SCRIPTS / "deploy_scripts.sh"
+_MFU_REPORT = ("[subagent:mfu-analyzer v2 MBA7K2]\n"
+               "## MFU latency bottleneck report\n"
+               "### Source files\n- model/schedule_result.json\n")
 
 
 def _run_cli(args: list[str], env: dict | None = None,
@@ -76,6 +79,16 @@ def _write_anchor(artifacts: Path, *, target: int = 501,
         "latency_reduction_min": 0.5, "accuracy_budget": budget,
         "target_cycles": target, "frozen_at_round": 0}), encoding="utf-8")
     return anchor
+
+
+def _write_raw_profile(profile_dir: Path, makespan: int) -> None:
+    raw_dir = profile_dir / "model"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    (raw_dir / "schedule_result.json").write_text(json.dumps({
+        "parallel_cycles": makespan,
+    }), encoding="utf-8")
+    (profile_dir / "mfu_bottleneck_report.md").write_text(
+        _MFU_REPORT, encoding="utf-8")
 
 
 def _write_train_device(artifacts: Path, backend: str = "cuda",
@@ -540,10 +553,7 @@ def _recheck_ws(tmp_path: Path, *, target: int = 500) -> Path:
         shutil.copy(_SCRIPTS / src, art / "scripts" / src)
     (art / "contracts.json").write_text(json.dumps(
         {"interpreter": {"sys_executable": sys.executable}}), encoding="utf-8")
-    (art / "base" / "profile").mkdir(parents=True)
-    (art / "base" / "profile" / "profile_summary.json").write_text(json.dumps(
-        {"schema_version": 1, "onnx": "smoke.onnx",
-         "makespan_cycles": 1000, "op_count": 2}), encoding="utf-8")
+    _write_raw_profile(art / "base" / "profile", 1000)
     _write_anchor(art, target=target)
     graph = helper.make_graph(
         [helper.make_node("MatMul", ["x", "w"], ["h"], name="mm"),
@@ -567,10 +577,7 @@ def _recheck_variant(art: Path, vid: str, makespan: int) -> None:
     vd = art / "variants" / vid
     (vd / "onnx").mkdir(parents=True)
     shutil.copy(art / "base" / "model.onnx", vd / "onnx" / "model.onnx")
-    (vd / "profile").mkdir(parents=True)
-    (vd / "profile" / "profile_summary.json").write_text(json.dumps(
-        {"schema_version": 1, "onnx": "smoke.onnx",
-         "makespan_cycles": makespan, "op_count": 2}), encoding="utf-8")
+    _write_raw_profile(vd / "profile", makespan)
     (vd / "shadow" / "pkg").mkdir(parents=True)
     shutil.copy(art / "shadow" / "pkg" / "model.py",
                 vd / "shadow" / "pkg" / "model.py")
@@ -950,9 +957,7 @@ def _emit_ws(tmp_path: Path, *, outcome: str = "latency_pass",
     (art / "scripts").mkdir(parents=True)
     for src in ("history_lib.py", "round_state.py"):
         shutil.copy(_SCRIPTS / src, art / "scripts" / src)
-    (art / "base" / "profile").mkdir(parents=True)
-    (art / "base" / "profile" / "profile_summary.json").write_text(json.dumps(
-        {"makespan_cycles": 1000, "op_count": 2}), encoding="utf-8")
+    _write_raw_profile(art / "base" / "profile", 1000)
     _write_anchor(art, target=500)
 
     rd = art / "rounds" / "001"
@@ -2124,9 +2129,7 @@ def test_scenario_single_variant_convergence_loop(tmp_path):
     vd = art / "variants" / "r1-01"
 
     def _remeasure(makespan: int) -> dict:
-        (vd / "profile" / "profile_summary.json").write_text(json.dumps(
-            {"schema_version": 1, "onnx": "smoke.onnx",
-             "makespan_cycles": makespan, "op_count": 2}), encoding="utf-8")
+        _write_raw_profile(vd / "profile", makespan)
         verdict = vd / "verdict.json"
         if verdict.is_file():
             verdict.unlink()
