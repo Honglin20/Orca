@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-09-03] docs(prof-opt): 精简六个节点 agent description（commit `389242f`）
+
+所有 description 收敛为一两句话，只描述节点主要目的，不再展开执行过程和失败细节；`tars validate` 通过。详见 [release note](../releases/2026-09-03-prof-opt-agent-description-simplification.md)。
+
 ## [2026-09-03] refactor(prof-opt): profiling 单一 Markdown 出口 + latency 直读原始 JSON（commit `2c4b3e4`）
 
 删除 `analyze.py` / `mfu_adapter.py` / `predict_delta.py` 与派生 profiling 四件套，agent 统一消费 `mfu_bottleneck_report.md`，latency gate 直接读取唯一 `schedule_result.json.parallel_cycles`；structure-proposer 改为基于 `shadow/` 源码设计，ONNX 仅在实现后机械校验。详见 [release note](../releases/2026-09-03-prof-opt-profile-artifact-simplification.md)。

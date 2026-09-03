@@ -4,11 +4,10 @@
 
 ---
 
-## 当前任务：无（prof-opt profiling 单出口收敛已完成，2026-09-03 归档）
+## 当前任务：无（prof-opt agent description 精简已完成，2026-09-03 归档）
 
-上一任务：删除 adapter/analyzer/predictor 派生链，统一 `mfu_bottleneck_report.md`，
-latency gate 直读原始 `schedule_result.json.parallel_cycles`，structure-proposer 改为源码优先。
-见 CHANGELOG 索引 + `docs/releases/2026-09-03-prof-opt-profile-artifact-simplification.md`。
+上一任务：六个顶层 agent 的 description 全部缩短为两句话，仅保留节点主要目的。
+见 CHANGELOG 索引 + `docs/releases/2026-09-03-prof-opt-agent-description-simplification.md`。
 
 ## 真机清单（归用户）
 
