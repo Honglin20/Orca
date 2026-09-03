@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-09-03] refactor(prof-opt): profiling 单一 Markdown 出口 + latency 直读原始 JSON（commit `2c4b3e4`）
+
+删除 `analyze.py` / `mfu_adapter.py` / `predict_delta.py` 与派生 profiling 四件套，agent 统一消费 `mfu_bottleneck_report.md`，latency gate 直接读取唯一 `schedule_result.json.parallel_cycles`；structure-proposer 改为基于 `shadow/` 源码设计，ONNX 仅在实现后机械校验。详见 [release note](../releases/2026-09-03-prof-opt-profile-artifact-simplification.md)。
+
 ## [2026-09-02] feat(prof-opt): v7 重设计——mfu 唯一链路 + 判断力归还 + 校验全覆盖（commit `1034401..dc6ab97`，16 commits）
 
 v6 真机首跑四病根根治：删 placeholder 估算与模式嗅探（用户拍板零降级，mfu-analyzer 调内网工具唯一链路）；设备分配改 agent 看原文选卡 + `claim --idx`；双 analyst 合并 variant-assessor + information-analyst 产出方恢复；§12 删除清单 22 项 + §13 产物三元组对照表 19 门逐行三查（476 passed，tars validate 0 warning，三层审查闭环）。真机 E2E 归用户。详见 [release note](../releases/2026-09-02-prof-opt-v7.md)。

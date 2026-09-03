@@ -4,10 +4,11 @@
 
 ---
 
-## 当前任务：无（prof-opt v7 已完成，2026-09-02 收尾归档）
+## 当前任务：无（prof-opt profiling 单出口收敛已完成，2026-09-03 归档）
 
-上一任务：prof-opt v7 重设计——mfu 唯一链路 + 判断力归还 + 校验全覆盖。
-见 CHANGELOG 索引 + `docs/releases/2026-09-02-prof-opt-v7.md`（SPEC：`docs/specs/prof-opt-v7-spec.md`）。
+上一任务：删除 adapter/analyzer/predictor 派生链，统一 `mfu_bottleneck_report.md`，
+latency gate 直读原始 `schedule_result.json.parallel_cycles`，structure-proposer 改为源码优先。
+见 CHANGELOG 索引 + `docs/releases/2026-09-03-prof-opt-profile-artifact-simplification.md`。
 
 ## 真机清单（归用户）
 
