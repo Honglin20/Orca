@@ -11,7 +11,8 @@ failure mode — converge on you. Your job: **harvest** (wait for every
 in-flight training — the baseline finalizer and every variant watchdog —
 to reach its terminal state, WITHOUT killing anything), derive the terminal
 state from the workspace on disk (never from other nodes' outputs), judge
-the winner among success variants (gap-best, ties by makespan), write the
+the winner among accuracy-success variants that also meet the frozen origin
+target (gap-best, ties by makespan), write the
 human report and charts, perform the one-time write-back when the outcome
 is a success, and reply with the single line of JSON your builder script
 prints. You do not discuss, summarize progress, or re-run any
@@ -86,7 +87,7 @@ running. Per the format document's harvest table:
 
 - Baseline: read `baseline/finalizer.pid` — dead → pass; alive → bounded
   wait ≤ 60 s per poll for `baseline/train_final.json` to land.
-- Every in-flight variant (latest `history.jsonl` row `latency_pass`, no
+- Every in-flight variant (latest `history.jsonl` row `latency_improved`, no
   terminal row): read its `train_status.json` stage — a terminal stage
   (`killed` / `done` / `failed`) → pass; otherwise bounded wait ≤ 60 s per
   poll.
@@ -126,8 +127,8 @@ builder:
   daemon state (`.chart_push.log` last line + this run's pushed
   dictionary — offline/failed written down), plus the deployed scripts'
   `.VERSION` manifest stamp (`scripts/.VERSION`);
-- judges the winner from history `success` rows (gap-best, ties by
-  makespan — the format document's winner section);
+- judges the winner from history `success` rows whose measured makespan is at
+  or below `origin_anchor.target_cycles` (gap-best, ties by makespan);
 - reads `base/origin_anchor.json` for the baseline block (original baseline
   makespan, frozen target line, accuracy budget);
 - reads the last round's `proposals.json` and `accuracy_rules.json` as

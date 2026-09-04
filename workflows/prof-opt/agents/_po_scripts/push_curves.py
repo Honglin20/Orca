@@ -12,14 +12,14 @@ label+title on every push -> the front end replaces the previous chart):
   * pareto ``prof-opt/pareto``  — every variant as one point (§10.2): x = the
     latency reduction vs the baseline makespan in % (negative = slower), y =
     the final gap (or the latest metric while no gap exists yet), one
-    status-colored point per variant; a latency_pass variant that has not
+    status-colored point per variant; a latency_improved variant that has not
     started training keeps y=null (disclosed in the caption).
   * table  ``prof-opt/docs``    — the analysis-docs manifest (§10.4, ``--docs``):
     rows of vid / doc / status / path relative to the artifacts root (+
     updated_at). Paths only, NEVER the document bodies; the whitelist is the
     run's own artifacts tree (every listed path is a constructed constant,
     never a discovered absolute path). Trigger points: the proposal node's
-    latency_pass emit (wired) and the report node's final pass (wired with
+    latency_improved emit (wired) and the report node's final pass (wired with
     the report node's v6 finalization).
 
 Fail-soft by contract — this sidecar must never stall or fail a worker:
@@ -41,7 +41,7 @@ Usage:
 ``--title`` is a TITLE SUFFIX (default empty) applied to every chart; the
 report's finalize push passes ``(final)`` so the terminal charts are visibly
 distinct from the live ones. ``--docs`` additionally pushes the analysis-docs
-manifest (§10.4 trigger: propose latency_pass emit / report final).
+manifest (§10.4 trigger: propose latency_improved emit / report final).
 """
 from __future__ import annotations
 
@@ -74,7 +74,7 @@ _TERMINAL_OUTCOMES = {"success", "accuracy_fail", "probe_insufficient",
 _STATUS_COLORS = {
     "success": "#10b981",
     "in-flight": "#3b82f6",
-    "latency_pass": "#94a3b8",       # 达线未训占位 (y=null)
+    "latency_improved": "#94a3b8",   # 改善未训占位 (y=null)
     "accuracy_fail": "#ef4444",
     "latency_fail": "#f97316",
     "probe_insufficient": "#a855f7",
@@ -148,8 +148,8 @@ def _variant_state(vdir: Path) -> dict[str, Any]:
                 or outcome in _TERMINAL_OUTCOMES)
     if terminal:
         status = outcome or str(stage or "")
-    elif outcome == "latency_pass" and not stage:
-        status = "latency_pass"          # 达线未训: admitted, training not started
+    elif outcome == "latency_improved" and not stage:
+        status = "latency_improved"      # 改善未训: admitted, training not started
     else:
         status = "in-flight"
     gap = shard.get("gap", train_status.get("gap"))
@@ -302,8 +302,16 @@ def collect_docs(artifacts: Path) -> list[dict[str, Any]]:
         for rdir in sorted((d for d in rounds_dir.iterdir() if d.is_dir()
                             and d.name.isdigit()), key=lambda d: int(d.name)):
             if (r := row("round", "analysis.md", f"rounds/{rdir.name}/analysis.md",
-                         "final")):
+                          "final")):
                 rows.append(r)
+            for name in ("architecture_decision.md",):
+                if (r := row("round", name, f"rounds/{rdir.name}/{name}",
+                             "final")):
+                    rows.append(r)
+            for name in ("semantic.md", "hardware.md", "sota.md"):
+                if (r := row("round", name,
+                             f"rounds/{rdir.name}/candidates/{name}", "candidate")):
+                    rows.append(r)
     if (r := row(*_RULES_ROW, "snapshot")):              # 规则组（S-9 快照源）
         rows.append(r)
     return rows
@@ -356,7 +364,7 @@ def main() -> int:
                          "default: no suffix")
     ap.add_argument("--docs", action="store_true",
                     help="also push the analysis-docs manifest table "
-                         "(§10.4 trigger: propose latency_pass emit / report "
+                         "(§10.4 trigger: propose latency_improved emit / report "
                          "final)")
     ns = ap.parse_args()
 

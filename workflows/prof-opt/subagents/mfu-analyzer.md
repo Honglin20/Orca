@@ -148,7 +148,7 @@ H5）。若连日志都没有（网络/提交层失败），在报告中如实�
 ## 根因类型词汇表（诊断词汇，不是结构药方）
 
 四类常见根因，用于**命名和归因**你看到的异常；结构上怎么改是
-structure-proposer 的事（structural-levers 是它的先验来源），本报告不开发
+architecture proposers 的事（硬件 reference 是事前先验），本报告不开发
 结构方案、不给「调大核数/缩 batch」之类的配置建议：
 
 1. **DMA 搬运**：`delay_cycles` 占比高、算子间数据传输等待长——瓶颈在

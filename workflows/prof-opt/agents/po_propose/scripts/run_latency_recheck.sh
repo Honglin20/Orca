@@ -4,16 +4,15 @@
 # Runs INSIDE the po_propose node (the implement → recheck → repair loop's
 # measurement step). For each variants/<vid>/ with a DONE marker and no
 # verdict.json:
-#   1. two-layer declaration check (file / graph) against the CURRENT base
-#      (base shadow, base onnx);
+#   1. file-layer declaration check against the CURRENT incumbent shadow;
 #   2. profile the variant onnx — the raw schedule_result.json and the single
 #      mfu_bottleneck_report.md are already under variants/<vid>/profile/
 #      (v7: mfu is the ONE profiling path). The gate reads parallel_cycles
 #      directly from the raw JSON; no derived profiling files exist.
 #   3. latency gate via scripts/check_verdict.py —makespan (v7 §6.2: the
 #      ONE latency-line predicate; this script and the probe emit gate call
-#      it, neither re-implements the comparison). pass <=> makespan <=
-#      target_cycles, the frozen origin anchor's line (inclusive boundary).
+#      it, neither re-implements the comparison). pass means the variant is
+#      strictly faster than the current incumbent; origin target is disclosure.
 #
 # Writes variants/<vid>/verdict.json, appends rounds/<RRR>/verdicts.jsonl and
 # the L0 history row through the typed history builder. Reconciliation pass:
@@ -44,7 +43,7 @@
 # Per-variant eliminations (structural_mismatch / unsupported_op /
 # latency_fail) are legitimate verdicts, not script failures.
 # stdout: single-line JSON (consumed by the po_propose node as an info line —
-# latency_pass_count feeds its output). Logs to stderr.
+# latency_improved_count feeds its output). Logs to stderr.
 # rc 0 = executed; rc 2 = hard error (missing artifacts / infrastructure).
 set -euo pipefail
 
@@ -57,8 +56,7 @@ while [ $# -gt 0 ]; do
 done
 
 # ── pinned interpreter (from contracts.json) ─────────────────────────────────
-# diff_check's graph layer needs onnx — only the interpreter pinned in
-# contracts.json is guaranteed to have it. python3 below is bootstrap-only.
+# Use the interpreter pinned in contracts.json. python3 is bootstrap-only.
 read_contract() { # read_contract <python-expr over c> -> value
   python3 - "$ART/contracts.json" "$1" <<'PYEOF'
 import json, sys
@@ -179,9 +177,10 @@ if trace.is_file():
         raise SystemExit(2)
 attempt = {"round": v["round"],
            "measured_makespan_cycles": v["makespan_cycles"],
+           "incumbent_makespan_cycles": v["base_makespan_cycles"],
            "target_cycles": v["target_cycles"],
-           "gap_cycles": v["makespan_cycles"] - v["target_cycles"],
-           "reason": "makespan > target_cycles (unified latency gate)"}
+           "gap_cycles": v["makespan_cycles"] - v["base_makespan_cycles"],
+           "reason": "makespan did not improve current incumbent"}
 attempts = doc.setdefault("attempts", [])
 attempts.append(attempt)   # never value-deduplicated: see header comment
 doc["vid"] = vid
@@ -224,8 +223,7 @@ for vdir in "$ART"/variants/*/; do
   [ -f "$decl" ] || { echo "FATAL: $vid has DONE but no declaration.json" >&2; exit 2; }
 
   edited="$("$PY" -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps(d["edited_files"]))' "$decl")"
-  opdelta="$("$PY" -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps(d["op_delta"]))' "$decl")"
-  predicted="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["predicted_delta_cycles"])' "$decl")"
+  predicted="$("$PY" -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get("predicted_delta_cycles")))' "$decl")"
 
   # ---- layer 1: file ----
   mismatch_layers="[]"
@@ -239,25 +237,8 @@ for vdir in "$ART"/variants/*/; do
     mismatch_layers="$(append_layer_note "$mismatch_layers" "$note")"
   fi
 
-  # ---- layer 2: graph ----
-  vonnx="$vdir/onnx/model.onnx"
-  graph_rc=0
-  if [ ! -f "$vonnx" ]; then
-    mismatch_layers="$(append_layer_note "$mismatch_layers" "graph: variant onnx missing")"
-    graph_rc=1
-  else
-    graph_out="$("$PY" "$SCRIPTS/diff_check.py" --layer graph \
-        --base-onnx "$ART/base/model.onnx" --variant-onnx "$vonnx" \
-        --op-delta "$opdelta")" || graph_rc=$?
-    [ "$graph_rc" -lt 2 ] || { echo "FATAL: graph layer hard error for $vid" >&2; exit 2; }
-    if [ "$graph_rc" -eq 1 ]; then
-      note="$("$PY" -c 'import json,sys; v=json.loads(sys.stdin.read()); print("graph: ops " + ",".join(v["mismatched_ops"]))' <<<"$graph_out")"
-      mismatch_layers="$(append_layer_note "$mismatch_layers" "$note")"
-    fi
-  fi
-
   structural="pass"
-  if [ "$file_rc" -ne 0 ] || [ "$graph_rc" -ne 0 ]; then
+  if [ "$file_rc" -ne 0 ]; then
     structural="fail"
   fi
 
@@ -265,7 +246,8 @@ for vdir in "$ART"/variants/*/; do
     verdict="$("$PY" - "$vid" "$ROUND" "$mismatch_layers" "$predicted" \
         "$TARGET_CYCLES" <<'PYEOF'
 import json, sys
-vid, rnd, layers, predicted = sys.argv[1], int(sys.argv[2]), sys.argv[3], int(sys.argv[4])
+vid, rnd, layers = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+predicted = json.loads(sys.argv[4])
 target = int(sys.argv[5])
 print(json.dumps({"vid": vid, "round": rnd, "structural_check": "fail",
                   "mismatch_layers": json.loads(layers), "makespan_cycles": None,
@@ -304,11 +286,13 @@ PYEOF
       "$TARGET_CYCLES" "$gate" <<'PYEOF'
 import json, sys
 vid, rnd = sys.argv[1], int(sys.argv[2])
-base, var, pred, target = (int(sys.argv[3]), int(sys.argv[4]),
-                           int(sys.argv[5]), int(sys.argv[6]))
+base, var, target = int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[6])
+pred = json.loads(sys.argv[5])
 gate = sys.argv[7]
-ratio = (base - var) / (-pred) if pred < 0 else None
-outcome = "latency_pass" if gate == "pass" else "latency_fail"
+ratio = ((base - var) / (-pred)
+         if isinstance(pred, int) and not isinstance(pred, bool) and pred < 0
+         else None)
+outcome = "latency_improved" if gate == "pass" else "latency_fail"
 print(json.dumps({"vid": vid, "round": rnd, "structural_check": "pass",
                   "makespan_cycles": var, "base_makespan_cycles": base,
                   "target_cycles": target,
@@ -327,8 +311,8 @@ PYEOF
   fi
   write_verdict "$vid" "$verdict"
   NEW_COUNT=$((NEW_COUNT + 1)); record_outcome_count "$outcome"
-  if [ "$outcome" = "latency_pass" ]; then PASS_COUNT=$((PASS_COUNT + 1)); fi
-  echo "verdict $vid: $outcome (makespan $var_ms vs target $TARGET_CYCLES)" >&2
+  if [ "$outcome" = "latency_improved" ]; then PASS_COUNT=$((PASS_COUNT + 1)); fi
+  echo "verdict $vid: $outcome (makespan $var_ms vs incumbent $BASE_MS; target $TARGET_CYCLES)" >&2
 done
 
 # ── reconciliation: verdict.json present but history row missing ──────────────
@@ -375,7 +359,7 @@ fi
 "$PY" "$SCRIPTS/emit_result.py" \
   --field "status=executed" \
   --field "verdicts_count=$NEW_COUNT" \
-  --field "latency_pass_count=$PASS_COUNT" \
+  --field "latency_improved_count=$PASS_COUNT" \
   --field "target_cycles=$TARGET_CYCLES" \
   --field "verdicts_path=$VERDICTS" \
   --field "summary=$SUMMARY" \

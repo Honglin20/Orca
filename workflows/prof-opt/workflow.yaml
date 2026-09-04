@@ -84,7 +84,8 @@ inputs:
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 节点形态：7 节点 = 6 个 agent + 1 个 script（po_gate）。agent 内确定性逻辑
-# 执行工作区 scripts/ 并 emit 单行 JSON；纯决策 gate 直接走 script 节点。
+# 执行工作区 scripts/ 并 emit 单行 JSON；gate 先做确定性 incumbent 晋升，
+# 再由纯读决策脚本计算路由。
 #
 # 单变体收敛环：po_propose 节点内一轮 = 一个变体（提案 → variant-assessor
 # 软对齐评估 → 实现 → 实测 → 原地修复 ≤5），达线即交 po_probe；不达线淘汰
@@ -207,19 +208,11 @@ nodes:
         to: po_propose
       - to: po_report
 
-  # ── Agent 4: po_propose（单变体收敛环；回边重入目标）──────────────────────
-  #   Step0 对戳+轮号（deploy --verify + round_state working；reuse guard 语义
-  #   不变）→ Step1 瓶颈证据（只读并校验
-  #   base/profile/mfu_bottleneck_report.md 哨兵 v2，三份基线文档必须在场）+
-  #   structure-proposer 每轮恰 1 提案（准入硬门仅 predicted_delta_cycles
-  #   负整数；预测达线降为参考披露；预计 cycles 由 agent 基于 mfu 报告判断）→
-  #   Step2 variant-assessor 单 subagent 软对齐（assessment.md 六节
-  #   门；stamp 键 = vid|sig|sha256(declaration)；conformance.md 已删）→
-  #   Step3 实现 + 每变体无条件 mfu-analyzer 实测 → Step4 修复内环 ≤5
-  #   （structural/variant_broken 联合 ≤2）→ Step5 rules 增量刷新
-  #   （accuracy-analyst 出三判断值，rules_pool apply 机械推导置信度）→
-  #   Step6 轮分析落盘（软对齐结论并入 analysis.md）+ 达线 ledger 分片播种 +
-  #   文档清单推送 + emit。派发契约全内联于 agent.md，禁读 subagents_root。
+  # ── Agent 4: po_propose（多架构候选 → selector 融合 → 单变体验证）───────
+  #   三个 architecture proposer 并行生成业务/硬件/SOTA 候选，selector 融合为
+  #   唯一架构；只有 selector 产物进入 assessor/implementer/mfu。预测仅披露，
+  #   实测严格优于 incumbent 才进入 probe；origin target 保持冻结。op_delta
+  #   不再是契约字段，parent_vid + source snapshot 记录谱系。
   #   executed → po_probe；catch-all → po_report。
   # ───────────────────────────────────────────────────────────────────────────
   - name: po_propose
@@ -243,8 +236,8 @@ nodes:
       - to: po_report
 
   # ── Agent 5: po_probe（资源分配 + 启动即放行）──────────────────────────────
-  #   节点入口先跑 deploy --verify → Step0 训练集推导（最新行 latency_pass 且
-  #   未终态的 vid）+ check_verdict.py 唯一达线谓词（不符 = 盘面撕裂 fail
+  #   节点入口先跑 deploy --verify → Step0 训练集推导（最新行 latency_improved 且
+  #   未终态的 vid）+ check_verdict.py 唯一改善谓词（不符 = 盘面撕裂 fail
   #   loud，不重测）→ Step1 选卡（device_alloc probe 读后端 CLI 占用原文 →
   #   agent 判断空闲卡 → claim --idx；已锁/满卡 = 保持节点等待，status 消息含
   #   do not call orca next，每 turn 重 probe 一次）→ Step2 渲染 full_train_
@@ -277,14 +270,16 @@ nodes:
         to: po_gate
       - to: po_report
 
-  # ── Script 6: po_gate（纯读现算决策，零写盘）──────────────────────────────
+  # ── Script 6: po_gate（确定性晋升 + 纯读现算决策）────────────────────────
   #   决策前先验部署件版本戳（不符输出 finish-failed 披露 payload，经
-  #   catch-all 进 po_report）→ 读盘面（history 终态行 + round_state current
+  #   catch-all 进 po_report）→ 将已完成训练且严格更快的 accuracy-success
+  #   变体晋升为当前 base，并写 incumbent_promotion.json → 读盘面（history 终态行 + round_state current
   #   + 各轮 proposals.json + origin 锚——不读任何上游节点 output）→ 确定性
-  #   脚本出 decision（顺序 first-match-wins）：report（任一 vid 有 success
-  #   行——出环不打断存量，在飞训练不杀不撤，由 report 终态收割；或
+  #   脚本出 decision（顺序 first-match-wins）：report（任一 accuracy-success
+  #   vid 同时达到 origin target；出环不打断存量，由 report 终态收割；或
   #   round ≥ max_rounds 轮数硬帽，永不回边；或从最新轮往回连续
-  #   idle_round_cap 轮零提案——idle_exhausted，防搜索空间耗尽后空转）/
+  #   idle_round_cap 轮零提案——idle_exhausted，防搜索空间耗尽后空转；若本次
+  #   gate 刚晋升新 incumbent，则旧 base 的 idle streak 重置）/
   #   loop（其余一切——唯一回边出口）。loop → 回边 po_propose（DAG 显式
   #   容环）。
   # ───────────────────────────────────────────────────────────────────────────
@@ -309,8 +304,8 @@ nodes:
   #   kill + "aborted at terminal" 披露）；全部终态后统一判定。零跨节点
   #   output 引用：读工作区盘面（history/rounds/contracts/baseline/variants/
   #   train_device/origin 锚/accuracy_rules）判终态与失败归因 → winner =
-  #   success 变体中 gap 最优（并列 makespan 最优），无 success 则
-  #   no-promotion 披露 → 卡释放兜底（每把 devices/*.lock 查 owner pid，已死
+  #   达到 origin target 的 success 变体中 gap 最优（并列 makespan 最优），
+  #   无最终达标变体则披露 incumbent 进展 → 卡释放兜底（每把 devices/*.lock 查 owner pid，已死
   #   → release；无法判定 → 披露 liveness unverifiable）→ prof_opt_report.md
   #   + 静态图 + finalize chart（live 终稿 "(final)" 推送 + 分析文档清单
   #   --docs）→ 报告首段固定披露三行（profiling 来源 = mfu 实测 via 用户内网
@@ -327,17 +322,17 @@ nodes:
       type: object
       required: [status, stage, reason, winner, baseline, final, rounds_completed, proposals_total, history_path, write_back, charts_summary, artifacts, error]
       properties:
-        status: {type: string, enum: [success, failed], description: "终态：success=存在 success 变体（完整训练 + 最终 eval 预算内，gap 最优者胜出）；failed=任一阶段失败/无 success 变体"}
+        status: {type: string, enum: [success, failed], description: "终态：success=存在完整训练精度通过且达到冻结 origin target 的变体；failed=任一阶段失败或无最终达标变体"}
         stage: {type: string, enum: [flatten, contract, baseline, propose, probe, gate, report], description: "终态来源阶段"}
         reason: {type: string, description: "终态判定理由（含终态收割、winner 判定与 rules merge 结局披露）"}
         winner:
-          description: "胜出变体（success 变体中 gap 最优，并列取 makespan 最优）；无 success 则 null"
+          description: "胜出变体（精度 success 且达到冻结 origin target，gap 最优，并列取 makespan 最优）；否则 null"
           type: ["object", "null"]
           required: [vid, change_sig, lineage]
           properties:
             vid: {type: string}
             change_sig: {type: string}
-            lineage: {type: array, items: {type: string}, description: "vid 链（基座不前进：parent_vid 恒 null，链通常只含 winner 自身）"}
+            lineage: {type: array, items: {type: string}, description: "从 origin baseline 到 winner 的晋升 vid 链"}
         baseline:
           type: object
           required: [makespan, ref_acc]

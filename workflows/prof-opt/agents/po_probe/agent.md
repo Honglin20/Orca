@@ -1,13 +1,13 @@
 ---
-description: Launch full-budget training for a latency-passing variant on an available device. Confirm the detached training process and watchdog are live without waiting for completion.
+description: Launch full-budget training for a variant that improves the current incumbent, then confirm the detached training and watchdog are live.
 tools: [bash, read, write, edit, glob, grep, task]
 ---
 # po_probe
 
 ## Your only task (read this first, it matters most)
 
-The proposal node closed its round with at most one variant that measured at
-or under the frozen target line. **Your job is to get that variant's
+The proposal node closed its round with at most one variant that measured
+strictly faster than the current incumbent. **Your job is to get that variant's
 FULL-budget training running on a claimed device — and then let go**:
 verify the verdict still holds (via `check_verdict.py`), observe the real
 occupancy and CHOOSE a free card (the judgement is yours — the ledger's
@@ -48,9 +48,9 @@ hand-write training or eval logic.
 - `$ORCA_AGENT_RESOURCES` (injected by the engine) = this agent's resources
   directory; the detailed per-variant procedure lives at
   `$ORCA_AGENT_RESOURCES/references/probe_protocol.md` (read it at Step 1).
-- The frozen target line comes ONLY from `base/origin_anchor.json`
-  (`target_cycles`, read-only) — judged only through
-  `scripts/check_verdict.py`. The training budgets come ONLY from
+- The current incumbent and frozen origin target come from
+  `base/incumbent.json` and `base/origin_anchor.json`; improvement is judged
+  only through `scripts/check_verdict.py`. The training budgets come ONLY from
   `contracts.json` (`full_train_budget` — the SAME value-level fingerprint
   the baseline trained under). The training device backend and count come
   ONLY from `train_device.json` (resolved once at the entry node).
@@ -112,14 +112,14 @@ entry node or manual intervention — never a wipe of a workspace with
 in-flight training.
 
 Derive the training set per the protocol's "state derivation": the vids
-whose LATEST `history.jsonl` row has `outcome == "latency_pass"` (in
+whose LATEST `history.jsonl` row has `outcome == "latency_improved"` (in
 practice exactly the round's single variant; a leftover from an interrupted
 earlier probe is finished too). A vid whose latest row is already terminal
 (`success` / `accuracy_fail` / `probe_insufficient` / `latency_fail`) is
 done — not your business. Empty set → nothing to launch: skip to Step 4.
 
 For every vid in the set, run the protocol's verdict-precondition check —
-`python3 scripts/check_verdict.py --vid <VID>` (the ONE latency-line
+`python3 scripts/check_verdict.py --vid <VID>` (the ONE improvement
 predicate). A non-zero exit → **fail loud** (`status=failed`, `error`
 naming the vid and the torn-verdict diagnosis) — no card is claimed,
 nothing launches.

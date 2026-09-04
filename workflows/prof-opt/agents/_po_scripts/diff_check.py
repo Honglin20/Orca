@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""diff_check.py — two-layer declaration-vs-reality check.
+"""diff_check.py — declaration-vs-reality utility.
 
 The reference frame is ALWAYS the CURRENT base (base shadow / base onnx) —
 never the original round-1 state, because rounds stack onto an advancing
@@ -7,8 +7,8 @@ base. A variant declaration is judged layer by layer:
 
     --layer file    variant shadow vs base shadow diff file set
                     (minus __pycache__//*.pyc) == declaration.edited_files
-    --layer graph   op_type count multiset (variant onnx - base onnx)
-                    == declaration.op_delta
+    --layer graph   legacy diagnostic only; the active prof-opt proposal path
+                    uses file-layer source diffs and does not gate on it
 
 Exit codes: 0 = match, 1 = mismatch (a legitimate deterministic verdict,
 printed as JSON on stdout), >=2 = hard error (missing file / bad JSON).

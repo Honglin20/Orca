@@ -9,7 +9,7 @@ round_state working = current + 1, the gate decision order (success ->
 report / round cap -> report / idle streak -> report / loop, with
 in_flight), history append_terminal row semantics + the (vid, change_sig)
 dedup key with probe_insufficient permanently consumed, the latency
-recheck boundary (makespan == target passes), the ledger aggregator's
+  recheck boundary (strictly below incumbent passes), the ledger aggregator's
 purity (same shard set -> same output, full rebuildability), and the
 deployed-set stamp roundtrip.
 
@@ -394,12 +394,12 @@ def _gate_ws(tmp_path: Path, rounds: list[int],
 
 def test_gate_success_row_routes_report_even_at_cap(tmp_path):
     rows = [
-        {"vid": "r1-01", "round": 1, "outcome": "latency_pass",
+        {"vid": "r1-01", "round": 1, "outcome": "latency_improved",
          "makespan_cycles": 450},
         {"vid": "r1-01", "round": 1, "outcome": "success",
          "makespan_cycles": 450, "gap": 0.02, "stopped_at_epoch": 10,
          "final_acc": 0.91},
-        {"vid": "r2-01", "round": 2, "outcome": "latency_pass",
+        {"vid": "r2-01", "round": 2, "outcome": "latency_improved",
          "makespan_cycles": 460},
     ]
     art = _gate_ws(tmp_path, rounds=[1, 2], history_rows=rows)
@@ -409,7 +409,8 @@ def test_gate_success_row_routes_report_even_at_cap(tmp_path):
     assert out["in_flight"] == ["r2-01"]   # passed but not terminal
     assert out["round"] == 2 and out["target_cycles"] == 501
     assert set(out) == {"decision", "round", "target_cycles",
-                        "success_vids", "in_flight", "idle_rounds", "reason"}
+                        "success_vids", "in_flight", "idle_rounds",
+                        "incumbent_promoted", "reason"}
 
 
 def test_gate_round_cap_routes_report_without_success(tmp_path):
@@ -427,9 +428,9 @@ def test_gate_round_cap_routes_report_without_success(tmp_path):
 
 def test_gate_loops_and_terminal_rows_clear_in_flight(tmp_path):
     rows = [
-        {"vid": "r1-01", "round": 1, "outcome": "latency_pass",
+        {"vid": "r1-01", "round": 1, "outcome": "latency_improved",
          "makespan_cycles": 450},
-        {"vid": "r1-02", "round": 1, "outcome": "latency_pass",
+        {"vid": "r1-02", "round": 1, "outcome": "latency_improved",
          "makespan_cycles": 460},
         {"vid": "r1-02", "round": 1, "outcome": "accuracy_fail",
          "gap": 0.5, "stopped_at_epoch": 6},
@@ -442,9 +443,10 @@ def test_gate_loops_and_terminal_rows_clear_in_flight(tmp_path):
 
 def test_gate_terminal_rows_cover_all_four_v6_outcomes(tmp_path):
     outcomes = ["success", "accuracy_fail", "probe_insufficient", "latency_fail"]
-    rows = [{"vid": f"r{i}-01", "round": 1, "outcome": "latency_pass"}
+    rows = [{"vid": f"r{i}-01", "round": 1, "outcome": "latency_improved"}
             for i in range(4)]
-    rows += [{"vid": f"r{i}-01", "round": 1, "outcome": o}
+    rows += [{"vid": f"r{i}-01", "round": 1, "outcome": o,
+              **({"makespan_cycles": 450} if o == "success" else {})}
              for i, o in enumerate(outcomes)]
     art = _gate_ws(tmp_path, rounds=[1], history_rows=rows)
     out = decide(art, max_rounds=100)
@@ -474,7 +476,8 @@ def test_append_terminal_success_row_semantics(tmp_path):
     _impl(hist, "r1-01", "activation:gelu->relu:m")
     history_lib.append_latency(hist, "r1-01", structural_check="pass",
                                makespan_cycles=450, latency_gate="pass",
-                               pred_actual_ratio=1.0, outcome="latency_pass")
+                               pred_actual_ratio=1.0,
+                               outcome="latency_improved")
     row = history_lib.append_terminal(
         hist, "r1-01", outcome="success", gap=0.02,
         stopped_at_epoch=10, final_acc=0.91)
@@ -538,7 +541,7 @@ def test_append_terminal_keeps_the_vid_change_sig_dedup_key(tmp_path):
     assert history_lib.dedup_state(hist2, "act:swap:m", 1)["blocked"] is False
 
 
-# ── run_latency_recheck: the unified gate boundary (== target passes) ─────────
+# ── run_latency_recheck: strict current-incumbent improvement boundary ────────
 
 def _recheck_ws(tmp_path: Path, *, target: int = 500) -> Path:
     """mfu-mode fixture: the recheck consumes each variant's four-piece
@@ -594,30 +597,31 @@ def _run_recheck(art: Path) -> subprocess.CompletedProcess:
     return _run_cli([_BASH, str(_RECHECK_SH)], env=env, timeout=300)
 
 
-def test_recheck_unified_gate_boundary_equal_passes(tmp_path):
+def test_recheck_gate_uses_strict_incumbent_boundary(tmp_path):
     art = _recheck_ws(tmp_path, target=500)
-    _recheck_variant(art, "r1-01", 500)   # exactly ON the line
-    _recheck_variant(art, "r1-02", 501)   # one cycle above
+    _recheck_variant(art, "r1-01", 999)   # one cycle faster than incumbent
+    _recheck_variant(art, "r1-02", 1000)  # equality is not improvement
     proc = _run_recheck(art)
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout)
     assert out["status"] == "executed"
     assert out["target_cycles"] == 500
-    assert out["latency_pass_count"] == 1
-    assert out["summary"] == "2 verdicts [latency_pass=1 latency_fail=1]"
+    assert out["latency_improved_count"] == 1
+    assert out["summary"] == "2 verdicts [latency_improved=1 latency_fail=1]"
 
-    boundary = json.loads((art / "variants" / "r1-01" / "verdict.json")
+    improved = json.loads((art / "variants" / "r1-01" / "verdict.json")
                           .read_text(encoding="utf-8"))
-    assert boundary["outcome"] == "latency_pass"
-    assert boundary["latency_gate"] == "pass"
-    assert boundary["target_cycles"] == 500
-    above = json.loads((art / "variants" / "r1-02" / "verdict.json")
+    assert improved["outcome"] == "latency_improved"
+    assert improved["latency_gate"] == "pass"
+    assert improved["target_cycles"] == 500
+    assert improved["makespan_cycles"] > improved["target_cycles"]
+    equal = json.loads((art / "variants" / "r1-02" / "verdict.json")
                        .read_text(encoding="utf-8"))
-    assert above["outcome"] == "latency_fail" and above["latency_gate"] == "fail"
+    assert equal["outcome"] == "latency_fail" and equal["latency_gate"] == "fail"
     # best.json / mode no longer feed the gate: no mode field is emitted
-    assert "gate_mode" not in out and "gate_mode" not in boundary
+    assert "gate_mode" not in out and "gate_mode" not in improved
     latest = history_lib.read_latest(art / "history.jsonl")
-    assert latest["r1-01"]["outcome"] == "latency_pass"
+    assert latest["r1-01"]["outcome"] == "latency_improved"
     assert latest["r1-02"]["outcome"] == "latency_fail"
 
 
@@ -827,6 +831,50 @@ def test_deploy_covers_new_scripts_and_gate_node_roundtrip(tmp_path):
     payload = json.loads(gate.stdout)
     assert payload["decision"] == "loop" and payload["error"] == ""
     assert payload["target_cycles"] == 501 and payload["success_vids"] == []
+    assert payload["incumbent_promotion"]["promoted"] is False
+    assert payload["incumbent_promotion_path"] == "incumbent_promotion.json"
+
+    # Promotion runs before routing and fails loud instead of silently letting
+    # gate_decide report a target-met row whose variant artifacts are missing.
+    (art / "history.jsonl").write_text(json.dumps(
+        {"vid": "r1-01", "round": 1, "outcome": "success",
+         "makespan_cycles": 400}) + "\n", encoding="utf-8")
+    broken = _run_cli([_BASH, str(_SCRIPTS / "gate_node.sh"),
+                       "--max-rounds", "5"], env=env)
+    assert broken.returncode == 0, broken.stderr
+    broken_payload = json.loads(broken.stdout)
+    assert broken_payload["decision"] == "finish-failed"
+    assert broken_payload["reason"] == "incumbent promotion failed"
+    assert "cannot promote r1-01" in broken_payload["error"]
+
+    # A completed non-target success promotes first; the three empty rounds
+    # were searched against the old base and therefore cannot trigger idle exit.
+    variant = art / "variants" / "r1-01"
+    (variant / "shadow").mkdir(parents=True)
+    (variant / "onnx").mkdir()
+    (variant / "profile").mkdir()
+    (variant / "shadow" / "model.py").write_text("new", encoding="utf-8")
+    (variant / "onnx" / "model.onnx").write_bytes(b"onnx")
+    (variant / "profile" / "schedule_result.json").write_text("{}", encoding="utf-8")
+    (art / "history.jsonl").write_text(json.dumps(
+        {"vid": "r1-01", "round": 1, "outcome": "success",
+         "makespan_cycles": 700, "change_sig": "sig-1",
+         "parent_vid": None}) + "\n", encoding="utf-8")
+    for round_no in (1, 2, 3):
+        round_dir = art / "rounds" / f"{round_no:03d}"
+        round_dir.mkdir(parents=True, exist_ok=True)
+        (round_dir / "proposals.json").write_text(json.dumps({
+            "round": round_no, "proposals": [],
+            "exhausted_rationale": ["old base exhausted"],
+        }), encoding="utf-8")
+    reset = _run_cli([_BASH, str(_SCRIPTS / "gate_node.sh"),
+                      "--max-rounds", "5", "--idle-round-cap", "3"], env=env)
+    assert reset.returncode == 0, reset.stderr
+    reset_payload = json.loads(reset.stdout)
+    assert reset_payload["decision"] == "loop"
+    assert reset_payload["incumbent_promoted"] is True
+    assert reset_payload["incumbent_promotion"]["promoted"] is True
+    assert "prior zero-proposal rounds describe the old base" in reset_payload["reason"]
 
 
 # ── P1: repair_trace budget boundary (4 admissible / 5 blocked / 6 rejected) ───
@@ -846,23 +894,23 @@ def _seed_repair_trace(art: Path, vid: str, count: int) -> None:
 
 def test_repair_trace_four_attempts_still_admits_fifth_measurement(tmp_path):
     art = _recheck_ws(tmp_path, target=500)
-    _recheck_variant(art, "r1-01", 600)          # above the line -> latency_fail
+    _recheck_variant(art, "r1-01", 1100)         # slower than incumbent
     _seed_repair_trace(art, "r1-01", 4)
     (art / "variants" / "r1-01" / "verdict.json").unlink(missing_ok=True)
     proc = _run_recheck(art)
     assert proc.returncode == 0, proc.stderr
-    assert json.loads(proc.stdout)["latency_pass_count"] == 0
+    assert json.loads(proc.stdout)["latency_improved_count"] == 0
     trace = json.loads((art / "variants" / "r1-01" / "repair_trace.json")
                        .read_text(encoding="utf-8"))
     assert trace["repair_count"] == 5 and len(trace["attempts"]) == 5
-    assert trace["attempts"][-1]["measured_makespan_cycles"] == 600
+    assert trace["attempts"][-1]["measured_makespan_cycles"] == 1100
     assert trace["attempts"][-1]["gap_cycles"] == 100
     assert trace["attempts"][-1]["target_cycles"] == 500
 
 
 def test_repair_trace_fifth_failure_is_terminal_sixth_fails_loud(tmp_path):
     art = _recheck_ws(tmp_path, target=500)
-    _recheck_variant(art, "r1-01", 600)
+    _recheck_variant(art, "r1-01", 1100)
     _seed_repair_trace(art, "r1-01", 5)          # the budget is already spent
     proc = _run_recheck(art)
     assert proc.returncode == 2                  # §5.2/§14: script backstop
@@ -878,7 +926,7 @@ def test_repair_trace_fifth_failure_is_terminal_sixth_fails_loud(tmp_path):
     # deleted), so a no-op repair must never freeze the counter — an
     # unbounded repair loop is exactly what the budget exists to stop
     art2 = _recheck_ws(tmp_path / "b", target=500)
-    _recheck_variant(art2, "r1-01", 600)
+    _recheck_variant(art2, "r1-01", 1100)
     first = _run_recheck(art2)
     assert first.returncode == 0, first.stderr
     trace_path = art2 / "variants" / "r1-01" / "repair_trace.json"
@@ -894,7 +942,7 @@ def test_repair_trace_unparseable_and_nonlatency_failures_fail_loud(tmp_path):
     # a hand-corrupted ledger is a hard error at BOTH the guard and the
     # recorder — never a silently reset budget
     art = _recheck_ws(tmp_path, target=500)
-    _recheck_variant(art, "r1-01", 600)
+    _recheck_variant(art, "r1-01", 1100)
     (art / "variants" / "r1-01" / "repair_trace.json").write_text(
         "{torn", encoding="utf-8")
     proc = _run_recheck(art)
@@ -948,7 +996,7 @@ def _stamp_for(art: Path, vid: str, sig: str) -> str:
     return f"{vid}|{sig}|{hashlib.sha256(decl.read_bytes()).hexdigest()}"
 
 
-def _emit_ws(tmp_path: Path, *, outcome: str = "latency_pass",
+def _emit_ws(tmp_path: Path, *, outcome: str = "latency_improved",
              delta: int = -600) -> Path:
     """A green single-variant round: one admitted proposal, the variant's
     assessment.md + the v7 analysis stamp, the history rows, and the round
@@ -962,6 +1010,18 @@ def _emit_ws(tmp_path: Path, *, outcome: str = "latency_pass",
 
     rd = art / "rounds" / "001"
     rd.mkdir(parents=True)
+    (art / "shadow" / "pkg").mkdir(parents=True)
+    (art / "shadow" / "pkg" / "model.py").write_text("model", encoding="utf-8")
+    candidates = rd / "candidates"
+    candidates.mkdir()
+    for name, sentinel in {
+        "semantic.md": "[subagent:semantic-architecture-proposer v1 SAP1A1]",
+        "hardware.md": "[subagent:hardware-architecture-proposer v1 HAP1B1]",
+        "sota.md": "[subagent:sota-architecture-proposer v1 SOTA1C1]",
+    }.items():
+        (candidates / name).write_text(sentinel + "\ncontent\n", encoding="utf-8")
+    (rd / "architecture_decision.md").write_text(
+        "[subagent:architecture-selector v1 ASC1D1]\ncontent\n", encoding="utf-8")
     (rd / "proposals.json").write_text(json.dumps({
         "round": 1, "filtered_count": 0,
         "exhausted_rationale": [],
@@ -969,7 +1029,8 @@ def _emit_ws(tmp_path: Path, *, outcome: str = "latency_pass",
                        "change_sig": "sig:r1-01", "target_modules": ["m"],
                        "target_pattern_id": "low-mfu-matmul",
                        "rationale": "why", "change_spec": "edit",
-                       "op_delta": {"Erf": -4, "Relu": 4},
+                       "parent_vid": None,
+                       "base_at_proposal": {"vid": None, "makespan_cycles": 1000},
                        "predicted_delta_cycles": delta,
                        "prediction_basis": "predictor",
                        "edited_files": ["pkg/model.py"],
@@ -995,11 +1056,11 @@ def _emit_ws(tmp_path: Path, *, outcome: str = "latency_pass",
 
     hist = art / "history.jsonl"
     _impl(hist, "r1-01", "sig:r1-01")
-    if outcome == "latency_pass":
+    if outcome == "latency_improved":
         history_lib.append_latency(hist, "r1-01", structural_check="pass",
                                    makespan_cycles=400, latency_gate="pass",
                                    pred_actual_ratio=None,
-                                   outcome="latency_pass")
+                                   outcome="latency_improved")
     else:
         history_lib.append_latency(hist, "r1-01", structural_check="pass",
                                    makespan_cycles=800, latency_gate="fail",
@@ -1016,13 +1077,26 @@ def _check_emit(art: Path) -> subprocess.CompletedProcess:
 
 
 def test_emit_gate_green_on_both_ending_paths(tmp_path):
-    """The success path (latency_pass) and the honest elimination path
+    """The improvement path and the honest elimination path
     (latency_fail after repair exhaustion) both pass the v7 gate."""
-    for outcome in ("latency_pass", "latency_fail"):
+    for outcome in ("latency_improved", "latency_fail"):
         art = _emit_ws(tmp_path / outcome, outcome=outcome)
         proc = _check_emit(art)
         assert proc.returncode == 0, (outcome, proc.stderr)
         assert json.loads(proc.stdout)["ok"] is True
+
+
+def test_emit_gate_requires_all_architecture_documents(tmp_path):
+    for relative in (
+            "rounds/001/candidates/semantic.md",
+            "rounds/001/candidates/hardware.md",
+            "rounds/001/candidates/sota.md",
+            "rounds/001/architecture_decision.md"):
+        art = _emit_ws(tmp_path / relative.replace("/", "-"))
+        (art / relative).unlink()
+        proc = _check_emit(art)
+        assert proc.returncode == 1, relative
+        assert Path(relative).name in proc.stderr
 
 
 def test_emit_gate_rejects_multi_proposal_and_zero_delta(tmp_path):
@@ -1036,17 +1110,14 @@ def test_emit_gate_rejects_multi_proposal_and_zero_delta(tmp_path):
     assert proc.returncode == 1
     assert "exactly ONE" in proc.stderr
 
-    # v7 §5.2: the ONLY prediction hard gate is a strictly negative delta —
-    # a delta that does not reach the line (1000-100=900 > 500) is ADMITTED
-    # (the margin is a calibration disclosure in the round analysis)
+    # Prediction is calibration evidence only.
     art2 = _emit_ws(tmp_path / "above", delta=-100)
     assert _check_emit(art2).returncode == 0
 
-    # a NON-negative delta is rejected
+    # A non-negative estimate is still admitted; MFU measurement decides.
     art3 = _emit_ws(tmp_path / "zero", delta=0)
     proc3 = _check_emit(art3)
-    assert proc3.returncode == 1
-    assert "int < 0" in proc3.stderr
+    assert proc3.returncode == 0
     # sota_reference may be null (why-no-precedent lives in the rationale)
     art4 = _emit_ws(tmp_path / "noref")
     proposals = json.loads((art4 / "rounds" / "001" / "proposals.json")
@@ -1148,7 +1219,7 @@ def test_emit_gate_repair_trace_and_analysis_and_direction_rules(tmp_path):
     assert _check_emit(art).returncode == 0
 
     # analysis.md without the latency section is rejected on BOTH paths
-    for outcome in ("latency_pass", "latency_fail"):
+    for outcome in ("latency_improved", "latency_fail"):
         art = _emit_ws(tmp_path / f"a-{outcome}", outcome=outcome)
         (art / "rounds" / "001" / "analysis.md").write_text(
             "## summary\nno latency section here\n", encoding="utf-8")
@@ -1290,8 +1361,8 @@ def _probe_ws(tmp_path: Path, *, makespan: int = 400,
               verdict: bool = True, lock_vid: str = "r1-01",
               watchdog: bool = True,
               liveness: dict | None = None) -> Path:
-    """A launched-variant workspace for the §6.2 gate: one latency_pass vid
-    with a verdict at/below the frozen line, a ledger lock naming it, the
+    """A launched-variant workspace for the §6.2 gate: one improved vid
+    with a verdict below the incumbent, a ledger lock naming it, the
     watchdog pid file, and the liveness record."""
     art = tmp_path / "ws"
     (art / "scripts").mkdir(parents=True)
@@ -1303,13 +1374,13 @@ def _probe_ws(tmp_path: Path, *, makespan: int = 400,
     _impl(hist, "r1-01", "sig:r1-01")
     history_lib.append_latency(hist, "r1-01", structural_check="pass",
                                makespan_cycles=makespan, latency_gate="pass",
-                               pred_actual_ratio=None, outcome="latency_pass")
+                               pred_actual_ratio=None, outcome="latency_improved")
     vd = art / "variants" / "r1-01"
     (vd / "train").mkdir(parents=True)
     # the implementation completion proof: DONE pins the declaration it was
     # written against (write_done_marker's hash discipline)
     decl_text = json.dumps({"vid": "r1-01", "edited_files": [],
-                            "op_delta": {}, "predicted_delta_cycles": -400})
+                            "predicted_delta_cycles": -400})
     (vd / "declaration.json").write_text(decl_text, encoding="utf-8")
     (vd / "DONE").write_text(json.dumps({
         "vid": "r1-01",
@@ -1318,7 +1389,7 @@ def _probe_ws(tmp_path: Path, *, makespan: int = 400,
         "ts": "2026-09-01T00:00:00+00:00"}), encoding="utf-8")
     if verdict:
         (vd / "verdict.json").write_text(json.dumps(
-            {"vid": "r1-01", "round": 1, "outcome": "latency_pass",
+            {"vid": "r1-01", "round": 1, "outcome": "latency_improved",
              "makespan_cycles": makespan, "target_cycles": 500}),
             encoding="utf-8")
     _write_lock(art, 0, lock_vid, os.getpid())
@@ -1417,13 +1488,13 @@ def test_probe_emit_rejects_declaration_drift_after_done(tmp_path):
 
 
 def test_probe_emit_rejects_torn_verdict(tmp_path):
-    # above the frozen line -> torn workspace, never admissible
-    art = _probe_ws(tmp_path, makespan=600, liveness={})
+    # equal to the incumbent -> torn workspace, never admissible
+    art = _probe_ws(tmp_path, makespan=1000, liveness={})
     (art / "variants" / "r1-01" / "train" / "train.pid").write_text(
         f"{os.getpid()}\n", encoding="utf-8")
     proc = _check_probe(art)
     assert proc.returncode == 1
-    assert "torn workspace" in proc.stderr and "600" in proc.stderr
+    assert "torn workspace" in proc.stderr and "not below incumbent" in proc.stderr
 
     # verdict file gone entirely -> same failure class
     art2 = _probe_ws(tmp_path / "b", verdict=False, liveness={})
@@ -1431,7 +1502,7 @@ def test_probe_emit_rejects_torn_verdict(tmp_path):
         f"{os.getpid()}\n", encoding="utf-8")
     proc2 = _check_probe(art2)
     assert proc2.returncode == 1
-    assert "verdict.json missing" in proc2.stderr
+    assert "invalid or missing" in proc2.stderr and "verdict.json" in proc2.stderr
 
 
 def test_probe_emit_requires_lock_watchdog_and_liveness(tmp_path):
@@ -1491,7 +1562,7 @@ def test_probe_emit_empty_training_set_and_terminal_vids_pass(tmp_path):    # a 
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout)["probed"] == []
 
-    # a workspace with no latency_pass vid at all: nothing to verify
+    # a workspace with no latency_improved vid at all: nothing to verify
     art2 = _probe_ws(tmp_path / "b", liveness={})
     (art2 / "history.jsonl").unlink()
     proc2 = _check_probe(art2)
@@ -1612,7 +1683,7 @@ def _watch_ws(tmp_path: Path, *, epochs: int = 20, log_epochs=None,
         _write_lock(art, 0, "r1-01", os.getpid())
     # the shard exactly as the proposal node seeds it (§5.1 Step 6)
     (vd / "ledger_entry.json").write_text(json.dumps(
-        {"vid": "r1-01", "status": "latency_pass", "epoch": None,
+        {"vid": "r1-01", "status": "latency_improved", "epoch": None,
          "metric": None, "gap": None, "device": None,
          "change_summary": "swap erf activation for relu in block m",
          "ts": "2026-08-31T00:00:00+00:00"}), encoding="utf-8")
@@ -1620,7 +1691,7 @@ def _watch_ws(tmp_path: Path, *, epochs: int = 20, log_epochs=None,
     _impl(hist, "r1-01", "sig:r1-01")
     history_lib.append_latency(hist, "r1-01", structural_check="pass",
                                makespan_cycles=400, latency_gate="pass",
-                               pred_actual_ratio=None, outcome="latency_pass")
+                               pred_actual_ratio=None, outcome="latency_improved")
     return art
 
 
@@ -1673,7 +1744,7 @@ def test_watch_warmup_epochs_are_never_judged(tmp_path):
     assert status["epoch"] == 2                       # seen, never judged
     assert status["over_budget_streak"] == 0
     assert status["gap"] is None
-    assert _latest_row(art).get("outcome") == "latency_pass"   # no terminal
+    assert _latest_row(art).get("outcome") == "latency_improved"   # no terminal
     assert sleeper.poll() is None                     # nobody was killed
     assert (art / "devices" / "0.lock").is_file()
 
@@ -1698,7 +1769,7 @@ def test_watch_five_over_budget_epochs_do_not_kill(tmp_path):
     assert second.returncode == 0, second.stderr
     assert _train_status(art)["over_budget_streak"] == 5
     assert sleeper.poll() is None
-    assert _latest_row(art).get("outcome") == "latency_pass"
+    assert _latest_row(art).get("outcome") == "latency_improved"
 
 
 def test_watch_six_over_budget_epochs_kill_then_replay_never_rekills(tmp_path):
@@ -1768,7 +1839,7 @@ def test_watch_kill_attribution_refusal_is_fatal_no_terminal(tmp_path):
     assert (not status_path.exists()
             or _train_status(art)["stage"] not in ("killed", "done", "failed"))
     assert (art / "devices" / "0.lock").is_file()
-    assert _latest_row(art).get("outcome") == "latency_pass"
+    assert _latest_row(art).get("outcome") == "latency_improved"
 
 
 def test_watch_natural_completion_success(tmp_path):
@@ -1830,7 +1901,7 @@ def test_watch_natural_completion_waits_for_baseline_anchor(tmp_path):
     proc = _watch_run(art, "--once")
     assert proc.returncode == 0, proc.stderr
     assert _train_status(art)["stage"] == "waiting"    # not terminal
-    assert _latest_row(art).get("outcome") == "latency_pass"
+    assert _latest_row(art).get("outcome") == "latency_improved"
     assert (art / "devices" / "0.lock").is_file()      # card still held
 
 
@@ -1967,7 +2038,7 @@ def test_watch_within_budget_epoch_resets_the_streak(tmp_path):
     assert status["over_budget_streak"] == 8           # reset at epoch 12
     assert status["gap"] == pytest.approx(0.4)
     assert sleeper.poll() is None
-    assert _latest_row(art).get("outcome") == "latency_pass"
+    assert _latest_row(art).get("outcome") == "latency_improved"
 
 
 def test_watch_lower_better_direction_early_stops(tmp_path):
@@ -2120,12 +2191,12 @@ def test_probe_emit_watchdog_liveness_negative_branches(tmp_path):
 # ── §13.2 scenario smokes: script-level sequences over the real scripts ──────
 
 def test_scenario_single_variant_convergence_loop(tmp_path):
-    """§13.2-1: ONE vid iterates in place until it reaches the frozen line.
+    """§13.2-1: ONE vid iterates until it improves the current incumbent.
     The recheck's repair ledger counts each miss, no second vid ever
     appears, and the rerouting signal (direction.json) stays absent — the
     elimination path belongs to the >= 5 budget, not this round."""
     art = _recheck_ws(tmp_path, target=500)
-    _recheck_variant(art, "r1-01", 700)
+    _recheck_variant(art, "r1-01", 1100)
     vd = art / "variants" / "r1-01"
 
     def _remeasure(makespan: int) -> dict:
@@ -2137,27 +2208,27 @@ def test_scenario_single_variant_convergence_loop(tmp_path):
         assert proc.returncode == 0, proc.stderr
         return json.loads(proc.stdout)
 
-    out = _remeasure(700)
-    assert out["latency_pass_count"] == 0
+    out = _remeasure(1100)
+    assert out["latency_improved_count"] == 0
     trace = json.loads((vd / "repair_trace.json").read_text(encoding="utf-8"))
     assert trace["repair_count"] == 1 and len(trace["attempts"]) == 1
 
-    out = _remeasure(520)                       # still above the 500 line
-    assert out["latency_pass_count"] == 0
+    out = _remeasure(1000)                      # equal incumbent still fails
+    assert out["latency_improved_count"] == 0
     trace = json.loads((vd / "repair_trace.json").read_text(encoding="utf-8"))
     assert trace["repair_count"] == 2
 
-    out = _remeasure(500)                       # the repair lands exactly ON it
-    assert out["latency_pass_count"] == 1
+    out = _remeasure(999)                       # first strict improvement
+    assert out["latency_improved_count"] == 1
     trace = json.loads((vd / "repair_trace.json").read_text(encoding="utf-8"))
     assert trace["repair_count"] == 2           # a pass appends no attempt
     verdict = json.loads((vd / "verdict.json").read_text(encoding="utf-8"))
-    assert verdict["outcome"] == "latency_pass"
+    assert verdict["outcome"] == "latency_improved"
 
     # the SAME vid carries the whole loop; no elimination artifacts
     latest = history_lib.read_latest(art / "history.jsonl")
     assert set(latest) == {"r1-01"}
-    assert latest["r1-01"]["outcome"] == "latency_pass"
+    assert latest["r1-01"]["outcome"] == "latency_improved"
     assert not (art / "rounds" / "001" / "direction.json").exists()
 
 
@@ -2244,11 +2315,11 @@ def test_scenario_gate_report_exit_and_round_cap(tmp_path):
     _impl(hist, "r1-01", "sig:a")                  # in flight, no terminal
     history_lib.append_latency(hist, "r1-01", structural_check="pass",
                                makespan_cycles=460, latency_gate="pass",
-                               pred_actual_ratio=None, outcome="latency_pass")
+                               pred_actual_ratio=None, outcome="latency_improved")
     _impl(hist, "r2-01", "sig:b")
     history_lib.append_latency(hist, "r2-01", structural_check="pass",
                                makespan_cycles=480, latency_gate="pass",
-                               pred_actual_ratio=None, outcome="latency_pass")
+                               pred_actual_ratio=None, outcome="latency_improved")
     history_lib.append_terminal(hist, "r2-01", outcome="success", gap=0.02,
                                 stopped_at_epoch=20, final_acc=0.88)
     (art / "variants" / "r1-01").mkdir(parents=True, exist_ok=True)
@@ -2270,7 +2341,7 @@ def test_scenario_gate_report_exit_and_round_cap(tmp_path):
     _impl(hist2, "r1-01", "sig:a")
     history_lib.append_latency(hist2, "r1-01", structural_check="pass",
                                makespan_cycles=460, latency_gate="pass",
-                               pred_actual_ratio=None, outcome="latency_pass")
+                               pred_actual_ratio=None, outcome="latency_improved")
     capped = decide(cap, max_rounds=2)
     assert capped["decision"] == "report"          # the cap never loops
     assert capped["success_vids"] == []

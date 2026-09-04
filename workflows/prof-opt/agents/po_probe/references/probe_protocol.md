@@ -12,9 +12,9 @@ Budgets and lines used here — all read from disk, never from inputs:
   the variant renders the SAME template at the SAME full budget the
   baseline trained under — it differs from the baseline ONLY in structure.
   Never render a smaller epoch count, never tune a data/step cap here.
-- frozen target line = `base/origin_anchor.json` `target_cycles`
-  (read-only; the boundary is inclusive) — judged ONLY through
-  `scripts/check_verdict.py` (the one predicate).
+- current incumbent = `base/incumbent.json` when present, otherwise the
+  origin baseline. `scripts/check_verdict.py` admits only a strict measured
+  improvement. The frozen origin target remains disclosure-only here.
 - training device backend + count = `train_device.json` (resolved once at
   the entry node). Every card in use is owned by an `O_EXCL` lock under
   `devices/`; the ledger (`scripts/device_alloc.py`) is the ONLY
@@ -24,7 +24,7 @@ Budgets and lines used here — all read from disk, never from inputs:
 
 1. The deploy stamp is verified by the node's Step 0.
 2. Training set: vids whose LATEST `history.jsonl` row has
-   `outcome == "latency_pass"`. Per vid, the stage:
+   `outcome == "latency_improved"`. Per vid, the stage:
    - latest row already terminal (`success` / `accuracy_fail` /
      `probe_insufficient` / `latency_fail`) → done, skip (not in the set);
    - `variants/<VID>/train/liveness.json` exists and parses AND the launch
@@ -44,16 +44,16 @@ Budgets and lines used here — all read from disk, never from inputs:
 
 ## Verdict precondition (HARD — before any resource is claimed)
 
-For each vid in the training set, run the ONE latency-line predicate
+For each vid in the training set, run the ONE strict-improvement predicate
 (the recheck gate and the emit gate call the same script):
 
 ```bash
 python3 "$ORCA_ARTIFACTS_DIR/scripts/check_verdict.py" --vid <VID>
 ```
 
-Exit 0 (`{"vid", "makespan_cycles", "target_cycles", "ok": true}`) → the
-verdict holds. A non-zero exit (missing/unparseable verdict, missing
-makespan, above the frozen line) is a workspace-level failure: the node
+Exit 0 (`{"vid", "makespan_cycles", "incumbent_makespan_cycles", "ok": true}`)
+→ the verdict holds. A non-zero exit (missing/unparseable verdict, missing
+makespan, or no improvement over the incumbent) is a workspace-level failure: the node
 emits `status=failed` with the stderr quoted. No card is claimed, nothing
 launches.
 

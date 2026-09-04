@@ -4,10 +4,26 @@
 
 ---
 
-## 当前任务：无（prof-opt agent description 精简已完成，2026-09-03 归档）
+## 当前任务：prof-opt architecture-first propose（2026-09-04 待提交）
 
-上一任务：六个顶层 agent 的 description 全部缩短为两句话，仅保留节点主要目的。
-见 CHANGELOG 索引 + `docs/releases/2026-09-03-prof-opt-agent-description-simplification.md`。
+实现、独立审查与契约校验已完成；按用户要求未做 E2E。因本轮未要求 commit/push，暂不写 CHANGELOG 的 commit SHA，提交后归档本任务。
+
+## 已完成
+
+- 三架构候选并行生成，selector 融合为唯一架构后进入 implementer/assessor/MFU。
+- latency 严格优于 incumbent 即训练；accuracy success 后晋升，origin target 冻结。
+- active path 移除 op-delta 硬门；补 Ascend reference、Web 文档清单和 lineage。
+- 两轮独立只读 review 的 high/medium findings 全部关闭。
+- 验证：98 + 17 + 7 tests passed；diff/compile/bash/tars validate 通过。
+
+## 必读文件
+
+- `docs/specs/prof-opt-architecture-first-design-draft.md`
+- `docs/plans/2026-09-03-prof-opt-architecture-first.md`
+- `workflows/prof-opt/agents/po_propose/agent.md`
+- `workflows/prof-opt/agents/po_probe/agent.md`
+- `workflows/prof-opt/workflow.yaml`
+- `docs/releases/2026-09-04-prof-opt-architecture-first.md`
 
 ## 真机清单（归用户）
 

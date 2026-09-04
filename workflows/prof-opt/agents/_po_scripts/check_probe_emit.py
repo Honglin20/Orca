@@ -2,12 +2,11 @@
 """Pre-return gate for po_probe (v7 §6.2).
 
 Verifies the launch-and-release disk state before emit, for every variant
-whose LATEST history row is `latency_pass` (the training set; a vid that
+whose LATEST history row is `latency_improved` (the training set; a vid that
 already reached a terminal row is out of scope):
 
-  1. verdict precondition: check_verdict.py — the ONE latency-line
-     predicate (v7 §6.2). A missing/above-line verdict is a torn workspace
-     and must fail here.
+  1. verdict precondition: check_verdict.py — the ONE strict-improvement
+     predicate. A missing/non-improved verdict is a torn workspace.
   2. device lock: a devices/<idx>.lock exists whose vid matches the vid.
   3. training liveness: variants/<vid>/train/train.pid records a LIVE pid
      (pid_lib's three-valued liveness — an UNVERIFIABLE pid is disclosed,
@@ -70,8 +69,8 @@ def _pid_attributed(pid: int, expect: str) -> bool:
 
 
 def _check_vid(art: Path, vid: str, problems: list[str]) -> None:
-    # 1. verdict precondition — via check_verdict.py, the ONE latency-line
-    # predicate (v7 §6.2: the probe emit gate never re-implements it)
+    # 1. verdict precondition — via check_verdict.py, the one improvement
+    # predicate; this gate never re-implements it
     try:
         check_verdict(art, vid)
     except ValueError as exc:
@@ -239,7 +238,7 @@ def main() -> int:
               file=sys.stderr)
         return 1
     pending = sorted(vid for vid, row in latest.items()
-                     if row.get("outcome") == "latency_pass")
+                     if row.get("outcome") == "latency_improved")
 
     for vid in pending:
         _check_vid(art, vid, problems)

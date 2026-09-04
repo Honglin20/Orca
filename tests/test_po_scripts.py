@@ -48,7 +48,7 @@ def test_history_builder_rejects_unknown_fields(tmp_path: Path):
     with pytest.raises(TypeError):
         history_lib.append_latency(hist, "r1-01", structural_check="pass",
                                    makespan_cycles=1, latency_gate="pass",
-                                   pred_actual_ratio=1.0, outcome="latency_pass",
+                                   pred_actual_ratio=1.0, outcome="latency_improved",
                                    bogus_field=1)
     # internal guard: a stray field never reaches the file
     with pytest.raises(history_lib.HistoryError):
@@ -71,10 +71,10 @@ def _write_sig_history(hist: Path, sig: str, outcomes: list[str],
                "implemented": True,
                "base_at_proposal": {"vid": None, "makespan_cycles": 100},
                "version": 1, "ts": "2026-09-01T00:00:00+00:00"}
-        if outcome == "latency_pass":
+        if outcome == "latency_improved":
             row.update({"structural_check": "pass", "makespan_cycles": 100,
                         "latency_gate": "pass", "pred_actual_ratio": 1.0,
-                        "outcome": "latency_pass"})
+                        "outcome": "latency_improved"})
         elif outcome == "probe_insufficient":
             row.update({"outcome": "probe_insufficient", "stage": "train",
                         "max_retries_hit": True})
@@ -88,7 +88,7 @@ def _write_sig_history(hist: Path, sig: str, outcomes: list[str],
     (["promoted"], True),                      # v4 read-compat: still permanent
     (["advanced"], True),                      # permanent: read-compat row
     (["unsupported_op"], True),                # permanent: structurally infeasible
-    (["latency_pass"], False),                 # process state never blocks
+    (["latency_improved"], False),                 # process state never blocks
     (["accuracy_fail"], False),                # composed re-proposals use NEW sigs
     (["structural_mismatch"], False),          # joint budget allows one retry
     (["variant_broken"], False),               # the other class, same budget
@@ -2257,11 +2257,11 @@ def test_push_curves_top10_selection_strategy(tmp_path: Path):
                     train_status={"vid": vid, "stage": "failed"},
                     shard={"vid": vid, "status": "probe_insufficient",
                            "gap": None})
-    # latency_pass but no training yet -> NO curve -> never selected
+    # latency_improved but no training yet -> NO curve -> never selected
     _po_variant(art, "r9-wait",
-                shard={"vid": "r9-wait", "status": "latency_pass"},
+                shard={"vid": "r9-wait", "status": "latency_improved"},
                 verdict={"vid": "r9-wait", "makespan_cycles": 900,
-                         "outcome": "latency_pass"})
+                         "outcome": "latency_improved"})
     # 10 variant curves, cap 9: the LAST tier-3 null-gap entry drops (r8)
     sock = tmp_path / "chart.sock"
     thread, messages = _chart_server(sock, replies=1)
@@ -2300,19 +2300,19 @@ def test_push_curves_pareto_payload(tmp_path: Path):
                 shard={"vid": "r1-01", "status": "success", "gap": 0.02,
                        "metric": 0.42},
                 verdict={"vid": "r1-01", "makespan_cycles": 800,
-                         "outcome": "latency_pass"})
+                         "outcome": "latency_improved"})
     _po_variant(art, "r2-01", curve=[{"epoch": 1, "metric": 0.45}],
                 train_status={"vid": "r2-01", "stage": "training"},
                 shard={"vid": "r2-01", "status": "training", "gap": None,
                        "metric": 0.45},
                 verdict={"vid": "r2-01", "makespan_cycles": 1200,
-                         "outcome": "latency_pass"})
+                         "outcome": "latency_improved"})
     # 达线未训: seeded shard only — y must stay null and be disclosed
     _po_variant(art, "r3-01",
-                shard={"vid": "r3-01", "status": "latency_pass", "gap": None,
+                shard={"vid": "r3-01", "status": "latency_improved", "gap": None,
                        "metric": None},
                 verdict={"vid": "r3-01", "makespan_cycles": 900,
-                         "outcome": "latency_pass"})
+                         "outcome": "latency_improved"})
     # no verdict yet (mid-measurement) -> no x -> not plottable, no point
     _po_variant(art, "r4-01", curve=[{"epoch": 1, "metric": 0.5}],
                 train_status={"vid": "r4-01", "stage": "training"},
@@ -2337,7 +2337,7 @@ def test_push_curves_pareto_payload(tmp_path: Path):
     assert points["r2-01"]["y"] == 0.45            # metric fallback (no gap)
     assert points["r2-01"]["status"] == "in-flight"
     assert points["r3-01"]["y"] is None                  # 达线未训占位
-    assert points["r3-01"]["status"] == "latency_pass"
+    assert points["r3-01"]["status"] == "latency_improved"
     assert "null" in pareto["caption"]                   # disclosed, not silent
     assert all(isinstance(row["color"], str) and row["color"].startswith("#")
                for row in pareto["data"])
@@ -2421,14 +2421,14 @@ def test_push_curves_w3_joint_three_charts_idempotent(tmp_path: Path):
                 train_status={"vid": "r1-01", "stage": "done"},
                 shard={"vid": "r1-01", "status": "success", "gap": 0.02},
                 verdict={"vid": "r1-01", "makespan_cycles": 800,
-                         "outcome": "latency_pass"},
+                         "outcome": "latency_improved"},
                 docs=("assessment.md",))
     # 达线未训: y stays null — the placeholder the front end must NOT plot at 0
     _po_variant(art, "r2-01",
-                shard={"vid": "r2-01", "status": "latency_pass", "gap": None,
+                shard={"vid": "r2-01", "status": "latency_improved", "gap": None,
                        "metric": None},
                 verdict={"vid": "r2-01", "makespan_cycles": 900,
-                         "outcome": "latency_pass"},
+                         "outcome": "latency_improved"},
                 docs=("assessment.md",))
     sock = tmp_path / "chart.sock"
     pushed_charts = []
@@ -2496,9 +2496,9 @@ def test_push_curves_variant_state_verdict_only(tmp_path: Path):
     assert state["makespan"] == 900
     (vdir / "verdict.json").write_text(json.dumps(
         {"vid": "r1-01", "makespan_cycles": 900,
-         "outcome": "latency_pass"}), encoding="utf-8")
+         "outcome": "latency_improved"}), encoding="utf-8")
     state = push_curves._variant_state(vdir)
-    assert not state["terminal"] and state["status"] == "latency_pass"
+    assert not state["terminal"] and state["status"] == "latency_improved"
 
 
 # ── dashboard_snapshot v6 (§4.2/§7.5-②): aggregate-then-read + new fields ────
@@ -2568,9 +2568,8 @@ _RECHECK_SH = _REPO / "workflows" / "prof-opt" / "agents" / "po_propose" / "scri
 def _recheck_workspace(tmp_path: Path) -> tuple[Path, dict]:
     """GELU->ReLU variant fixture on the ONE mfu path: base + variant
     raw products produced through the real mfu_benchmark plus the analyzer's
-    single Markdown report. The anchor's target is set to the VARIANT's
-    measured makespan so the boundary is exactly inclusive on the happy
-    path. Returns (art, env)."""
+    single Markdown report. The anchor target is frozen independently from
+    the current-incumbent admission comparison. Returns (art, env)."""
     torch = pytest.importorskip("torch")
     pytest.importorskip("onnx")
 
@@ -2618,8 +2617,7 @@ def _recheck_workspace(tmp_path: Path) -> tuple[Path, dict]:
     variant_ms = measure(Tiny(torch.nn.ReLU()),
                          art / "variants" / "r1-01" / "profile")
 
-    # anchor target = the variant's measured makespan -> the gate boundary is
-    # exactly inclusive (variant == target HOLDS)
+    # Keep target disclosure independent from the strict incumbent comparison.
     (art / "base" / "origin_anchor.json").write_text(json.dumps({
         "baseline_makespan_cycles": base_ms,
         "latency_reduction_min": 0.5, "accuracy_budget": 0.1,
@@ -2668,20 +2666,19 @@ def test_run_latency_recheck_mfu_fail_loud_matrix(tmp_path: Path):
     assert not (art / "variants" / "r1-01" / "verdict.json").exists()
 
 
-def test_run_latency_recheck_gate_passes_at_inclusive_boundary(tmp_path: Path):
-    """The happy path with the boundary exactly AT the target: the gate is
-    check_verdict.py's inclusive comparison (== target HOLDS) — the verdict
-    lands latency_pass with the measured makespan recorded verbatim."""
+def test_run_latency_recheck_uses_incumbent_not_origin_target(tmp_path: Path):
+    """A strict incumbent improvement passes even when target is independent;
+    equality with the incumbent fails and consumes one repair attempt."""
     art, env = _recheck_workspace(tmp_path)
     proc = subprocess.run(["bash", str(_RECHECK_SH)],
                           capture_output=True, text=True, timeout=300, env=env)
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout)
     assert payload["status"] == "executed"
-    assert payload["latency_pass_count"] == 1
+    assert payload["latency_improved_count"] == 1
     verdict = json.loads((art / "variants" / "r1-01" / "verdict.json")
                          .read_text(encoding="utf-8"))
-    assert verdict["outcome"] == "latency_pass"
+    assert verdict["outcome"] == "latency_improved"
     assert verdict["latency_gate"] == "pass"
     # the gate number is raw schedule_result.json parallel_cycles, verbatim
     raw = next((art / "variants" / "r1-01" / "profile")
@@ -2696,11 +2693,16 @@ def test_run_latency_recheck_gate_passes_at_inclusive_boundary(tmp_path: Path):
     assert check.returncode == 0, check.stderr
     assert json.loads(check.stdout)["ok"] is True
 
-    # a target one BELOW the measurement flips the verdict to latency_fail
-    anchor = json.loads((art / "base" / "origin_anchor.json").read_text(encoding="utf-8"))
-    anchor["target_cycles"] = verdict["makespan_cycles"] - 1
-    (art / "base" / "origin_anchor.json").write_text(json.dumps(anchor),
-                                                     encoding="utf-8")
+    # Promoting an equal-latency incumbent flips the same measurement to fail;
+    # the frozen origin target remains unchanged.
+    anchor_before = (art / "base" / "origin_anchor.json").read_text(encoding="utf-8")
+    (art / "base" / "incumbent.json").write_text(json.dumps({
+        "vid": "r0-01", "makespan_cycles": verdict["makespan_cycles"],
+    }), encoding="utf-8")
+    base_raw = next((art / "base" / "profile").glob("*/schedule_result.json"))
+    base_doc = json.loads(base_raw.read_text(encoding="utf-8"))
+    base_doc["parallel_cycles"] = verdict["makespan_cycles"]
+    base_raw.write_text(json.dumps(base_doc), encoding="utf-8")
     (art / "variants" / "r1-01" / "verdict.json").unlink()
     proc2 = subprocess.run(["bash", str(_RECHECK_SH)],
                            capture_output=True, text=True, timeout=300, env=env)
@@ -2708,6 +2710,8 @@ def test_run_latency_recheck_gate_passes_at_inclusive_boundary(tmp_path: Path):
     verdict2 = json.loads((art / "variants" / "r1-01" / "verdict.json")
                           .read_text(encoding="utf-8"))
     assert verdict2["outcome"] == "latency_fail"
+    assert (art / "base" / "origin_anchor.json").read_text(
+        encoding="utf-8") == anchor_before
     # the failed measurement consumed one repair attempt (the script's ledger)
     trace = json.loads((art / "variants" / "r1-01" / "repair_trace.json")
                        .read_text(encoding="utf-8"))

@@ -42,13 +42,13 @@ def main() -> int:
     ap.add_argument("--round", type=int, required=True)
     ap.add_argument("--seq", type=int, required=True)
     ap.add_argument("--parent-vid", type=nullable_value, default=None,
-                    help="lineage parent vid, or null (the base never advances)")
+                    help="lineage parent vid, or null for the origin baseline")
     ap.add_argument("--change-sig", required=True)
     ap.add_argument("--probe-epochs", type=int, required=True,
                     help="contracts.json proxy_budget.epochs (epoch-only, v7)")
     ap.add_argument("--target-modules", required=True,
                     help="JSON list from declaration.target_modules")
-    ap.add_argument("--predicted-delta-cycles", type=int, required=True)
+    ap.add_argument("--predicted-delta-cycles", type=int, default=None)
     ap.add_argument("--base-at-proposal", required=True,
                     help='JSON object, e.g. {"vid": null, "makespan_cycles": 15288}')
     ap.add_argument("--not-implemented", action="store_true",

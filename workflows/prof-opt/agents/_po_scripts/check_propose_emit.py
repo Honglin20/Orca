@@ -5,10 +5,8 @@ Verifies the single-variant convergence loop closed its disk state before
 the node emits:
 
   1. proposals.json parses with `round == R` and holds EXACTLY ONE
-     proposal whose `predicted_delta_cycles` is an int < 0 — the ONLY
-     admission hard gate left (v7 §5.2: whether the predicted makespan
-     reaches the frozen line is a calibration DISCLOSURE in the round
-     analysis, never a rejection here). A zero-proposal round is legal
+      proposal with a non-empty change description. Prediction is optional
+      calibration evidence, not an admission gate. A zero-proposal round is legal
      only with a non-empty `exhausted_rationale`.
   2. The round's variant carries `variants/<vid>/assessment.md` (the
      variant-assessor subagent's product — sentinel first line, non-empty
@@ -20,7 +18,7 @@ the node emits:
      repair classes (latency / structural) rewrite declaration.json, so
      the key changes with them and the mechanical re-entry guard holds.
   4. The vid has its expected history row; a latency-passing vid has a
-     `latency_pass` row, an eliminated vid its terminal/elimination
+      `latency_improved` row, an eliminated vid its terminal/elimination
      outcome, and a latency_fail elimination also lands in
      rounds/<R>/direction.json `failed_sigs`.
   5. variants/<vid>/repair_trace.json, when present, records
@@ -41,6 +39,12 @@ import sys
 from pathlib import Path
 
 VAS_SENTINEL = "[subagent:variant-assessor v1 VAS4K9]"
+CANDIDATE_SENTINELS = {
+    "semantic.md": "[subagent:semantic-architecture-proposer v1 SAP1A1]",
+    "hardware.md": "[subagent:hardware-architecture-proposer v1 HAP1B1]",
+    "sota.md": "[subagent:sota-architecture-proposer v1 SOTA1C1]",
+}
+SELECTOR_SENTINEL = "[subagent:architecture-selector v1 ASC1D1]"
 # variant-assessor section contract (§5.3): the last heading of the
 # document is its conclusion section and carries the required sub-section
 ASSESSMENT_HEADINGS = ("## 任务语义", "## 输入输出", "## 架构动机",
@@ -49,7 +53,7 @@ ASSESSMENT_HEADINGS = ("## 任务语义", "## 输入输出", "## 架构动机",
 ASSESSMENT_SUBSECTION = "### 被牺牲信息与预期精度代价"
 # §5.3 outcomes a round's single vid may legitimately end on at emit time
 LEGAL_END_OUTCOMES = frozenset({
-    "latency_pass", "latency_fail", "structural_mismatch", "variant_broken",
+    "latency_improved", "latency_fail", "structural_mismatch", "variant_broken",
     "unsupported_op"})
 REPAIR_MAX = 5
 
@@ -85,6 +89,15 @@ def _check_assessment(path: Path, vid: str, problems: list[str]) -> None:
     if ASSESSMENT_SUBSECTION not in present:
         problems.append(f"{vid} assessment.md missing the conclusion "
                         f"sub-section {ASSESSMENT_SUBSECTION!r}")
+
+
+def _check_first_line(path: Path, sentinel: str, problems: list[str]) -> None:
+    if not path.is_file():
+        problems.append(f"required architecture document missing: {path}")
+        return
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if not lines or lines[0].strip() != sentinel:
+        problems.append(f"{path} first line is not {sentinel!r}")
 
 
 def _check_analysis_stamp(art: Path, vid: str, sig: str,
@@ -173,6 +186,10 @@ def main() -> int:
         return 1
 
     rd = art / f"rounds/{r:03d}"
+    for name, sentinel in CANDIDATE_SENTINELS.items():
+        _check_first_line(rd / "candidates" / name, sentinel, problems)
+    _check_first_line(rd / "architecture_decision.md", SELECTOR_SENTINEL,
+                      problems)
     proposal: dict = {}
     try:
         proposals = _load_json(rd / "proposals.json", "proposals.json")
@@ -205,25 +222,50 @@ def main() -> int:
     except Exception as exc:
         problems.append(f"history.jsonl unreadable: {exc}")
 
+    expected_parent = None
+    expected_base_ms = None
+    try:
+        incumbent = _load_json(art / "base" / "incumbent.json",
+                               "base/incumbent.json")
+        if isinstance(incumbent, dict):
+            expected_parent = incumbent.get("vid")
+            expected_base_ms = incumbent.get("makespan_cycles")
+        else:
+            anchor = _load_json(art / "base" / "origin_anchor.json",
+                                "base/origin_anchor.json")
+            if isinstance(anchor, dict):
+                expected_base_ms = anchor.get("baseline_makespan_cycles")
+    except ValueError as exc:
+        problems.append(str(exc))
+
     if proposal:
         vid = proposal.get("vid")
         if not isinstance(vid, str) or not vid:
             problems.append("proposal missing vid")
         else:
-            for key in ("change_sig", "predicted_delta_cycles", "edited_files",
-                        "target_pattern_id", "predicted_acc_impact",
+            for key in ("change_sig", "edited_files", "change_spec",
+                        "parent_vid", "base_at_proposal", "target_pattern_id",
+                        "predicted_acc_impact",
                         "sota_reference"):
                 if key not in proposal:
                     problems.append(f"{vid} proposal missing {key}")
-            delta = proposal.get("predicted_delta_cycles")
-            if not isinstance(delta, int) or isinstance(delta, bool) \
-                    or delta >= 0:
-                problems.append(
-                    f"{vid} predicted_delta_cycles must be an int < 0 (the "
-                    "only admission hard gate; reaching the target line is a "
-                    "calibration disclosure, v7 §5.2)")
             if not proposal.get("edited_files"):
                 problems.append(f"{vid} edited_files must be non-empty")
+            elif any(not (art / "shadow" / rel).is_file()
+                     for rel in proposal["edited_files"]):
+                problems.append(f"{vid} edited_files contains a path absent "
+                                "from the current incumbent shadow")
+            if "op_delta" in proposal:
+                problems.append(f"{vid} proposal must not contain op_delta")
+            if proposal.get("parent_vid") != expected_parent:
+                problems.append(f"{vid} parent_vid does not match current incumbent")
+            base_at_proposal = proposal.get("base_at_proposal")
+            if not isinstance(base_at_proposal, dict) or {
+                    "vid": base_at_proposal.get("vid"),
+                    "makespan_cycles": base_at_proposal.get("makespan_cycles"),
+                    } != {"vid": expected_parent,
+                          "makespan_cycles": expected_base_ms}:
+                problems.append(f"{vid} base_at_proposal does not match current incumbent")
             tpid = proposal.get("target_pattern_id")
             if not isinstance(tpid, str) or not tpid.strip():
                 problems.append(
@@ -236,14 +278,17 @@ def main() -> int:
             elif row.get("round") != r \
                     or row.get("change_sig") != proposal.get("change_sig"):
                 problems.append(f"{vid} history row does not match proposal")
+            elif row.get("parent_vid") != proposal.get("parent_vid") \
+                    or row.get("base_at_proposal") != proposal.get("base_at_proposal"):
+                problems.append(f"{vid} history lineage does not match proposal")
             elif row.get("outcome") not in LEGAL_END_OUTCOMES:
                 problems.append(
                     f"{vid} history row outcome {row.get('outcome')!r} is not "
                     "a legal round ending (expected one of "
                     f"{sorted(LEGAL_END_OUTCOMES)})")
-            elif row.get("outcome") == "latency_pass" \
+            elif row.get("outcome") == "latency_improved" \
                     and row.get("latency_gate") != "pass":
-                problems.append(f"{vid} latency_pass row lacks latency_gate "
+                problems.append(f"{vid} latency_improved row lacks latency_gate "
                                 "'pass'")
             if row and row.get("outcome") == "latency_fail":
                 try:

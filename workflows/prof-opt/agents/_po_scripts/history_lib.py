@@ -6,7 +6,7 @@ Rows are append-only multi-version snapshots — each append writes the FULL
 merged state of a vid, so "latest version per vid" is just the last row
 with that vid.
 
-v6 row semantics (§4.3): impl / latency_pass / latency_fail / success /
+Row semantics: impl / latency_improved / latency_fail / success /
 accuracy_fail / probe_insufficient. Terminal outcomes are written ONLY via
 append_terminal (the watchdog's terminal action); the v5-only builders and
 their field sets (round advance, probe gate, proxy accuracy) are retired
@@ -22,7 +22,7 @@ Dedup side (mechanical rules — no LLM judgement):
                       with old workspaces only — v6 never writes them);
                       judged over ANY version row (a later row cannot
                       resurrect a permanently-exhausted signature);
-    latency_pass    is a process state and NEVER blocks;
+    latency_improved is a process state and NEVER blocks;
     structural_mismatch / variant_broken share ONE joint retry budget per sig
                       (total attempts with those outcomes <= 2, i.e. <= 1 retry);
     probe_insufficient permanently consumes the signature (v7: the proxy
@@ -122,7 +122,7 @@ def append_implemented(path: str | Path, vid: str, *, round: int, seq: int,
                        parent_vid: str | None, change_sig: str,
                        probe_epochs: int,
                        target_modules: list[str],
-                       predicted_delta_cycles: int,
+                       predicted_delta_cycles: int | None,
                        base_at_proposal: dict,
                        implemented: bool = True) -> dict:
     """First row of a vid (the proposal node's mechanical write after the
@@ -139,9 +139,10 @@ def append_implemented(path: str | Path, vid: str, *, round: int, seq: int,
         "vid": vid, "round": round, "seq": seq, "parent_vid": parent_vid,
         "change_sig": change_sig, "probe_epochs": probe_epochs,
         "target_modules": list(target_modules),
-        "predicted_delta_cycles": predicted_delta_cycles,
         "implemented": implemented, "base_at_proposal": dict(base_at_proposal),
     }
+    if predicted_delta_cycles is not None:
+        fields["predicted_delta_cycles"] = predicted_delta_cycles
     return _append(Path(path), vid, fields, IMPL_FIELDS, "append_implemented")
 
 
@@ -160,7 +161,7 @@ def append_latency(path: str | Path, vid: str, *, structural_check: str,
                    makespan_cycles: int | None, latency_gate: str | None,
                    pred_actual_ratio: float | None, outcome: str) -> dict:
     """L0 row (the batch latency recheck inside the proposal node).
-    outcome: latency_pass (process) or one of the
+    outcome: latency_improved (process) or one of the
     terminal L0 eliminations structural_mismatch / unsupported_op /
     latency_fail."""
     fields = {

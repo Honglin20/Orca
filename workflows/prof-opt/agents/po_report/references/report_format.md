@@ -35,7 +35,7 @@ THREE fixed lines (plus the deployed scripts' version stamp
 
 The in-flight set = the baseline finalizer (when `baseline/finalizer.pid`
 names a live, attribution-checked pid) plus every variant whose LATEST
-`history.jsonl` row has `outcome == "latency_pass"` (no terminal row —
+`history.jsonl` row has `outcome == "latency_improved"` (no terminal row —
 `success` / `accuracy_fail` / `probe_insufficient` / `latency_fail` — in
 any version). For each member, ONE bounded poll (≤ 60 s):
 
@@ -96,14 +96,15 @@ terminal row in ANY version makes the vid judged).
 |---|---|---|---|
 | 1 | `project_manifest.md` OR `shadow/` OR `BASELINE.lock` missing | failed | flatten |
 | 2 | `contracts.json` missing, or its recorded viability flag is false | failed | contract |
-| 3 | the baseline early chain is incomplete (`base/profile/mfu_bottleneck_report.md` or `baseline/train.rendered.sh` missing), OR `baseline_status.md` records the chain as failed, OR `baseline/train_final.json` exists with `status: failed`, OR the finalizer is dead (attribution-checked `baseline/finalizer.pid` names no live pid) with NO `train_final.json` on disk (an externally killed guardian) | failed | baseline |
+| 3 | the early chain is incomplete (the current base profile `base/profile/mfu_bottleneck_report.md` or the origin baseline trainer `baseline/train.rendered.sh` is missing), OR `baseline_status.md` records the chain as failed, OR `baseline/train_final.json` exists with `status: failed`, OR the finalizer is dead (attribution-checked `baseline/finalizer.pid` names no live pid) with NO `train_final.json` on disk (an externally killed guardian) | failed | baseline |
 | 4 | `rounds/` has no numeric directory | failed | propose |
-| 5 | any vid has a `success` row (after Step 0's harvest every in-flight training is terminal) | success | probe |
-| 6 | no success AND some vid's latest row is `latency_pass` while its training left NO terminal record (no terminal row, `train_status.json` missing or non-terminal, watchdog dead/absent — a torn launch, not a wait) | failed | probe |
-| 7 | no success AND `round_state current`'s round ≥ `max_rounds` (the hard cap ended the loop without a winner) | failed | gate |
-| 8 | otherwise (no success, nothing in flight or torn, below the cap — the loop ended without any exit condition leaving a disk trace) | failed | gate |
+| 5 | any vid has a `success` row and `makespan_cycles <= origin_anchor.target_cycles` (after Step 0's harvest every in-flight training is terminal) | success | probe |
+| 6 | no final winner AND some vid's latest row is `latency_improved` while its training left NO terminal record (no terminal row, `train_status.json` missing or non-terminal, watchdog dead/absent — a torn launch, not a wait) | failed | probe |
+| 7 | no final winner AND `round_state current`'s round ≥ `max_rounds` (the hard cap ended the loop without a target-meeting winner) | failed | gate |
+| 8 | otherwise (no final winner, nothing in flight or torn, below the cap — the loop ended without any exit condition leaving a disk trace) | failed | gate |
 
-Row 5's stage is `probe` because the winner's training and final eval were
+An accuracy-success variant that misses the origin target is an incumbent,
+not a final winner. Row 5's stage is `probe` because the winner's training and final eval were
 launched and judged by the probe pipeline's detached watchdogs — the
 `reason` must name the winner and its gap/makespan so the success is
 self-describing. Row 6 is the honest torn-launch terminal: a variant was
@@ -123,7 +124,8 @@ terminal record — torn launch").
 
 - `status` / `stage` / `reason`: from the table above (plus the harvest
   disclosure when it fired).
-- **winner**: among vids with a `success` row, pick the smallest
+- **winner**: among vids with a `success` row whose measured makespan is at
+  or below `base/origin_anchor.json.target_cycles`, pick the smallest
   `gap` from the success row; ties broken by the smallest
   `makespan_cycles` in the vid's merged history snapshot (the latency
   row's measured value); further ties by vid (lexicographic, pinned so
@@ -131,9 +133,9 @@ terminal record — torn launch").
   "change_sig", "lineage"}`: `change_sig` from the winner's latest
   history row; `lineage` = the parent chain walked backwards through
   history (`parent_vid` links, oldest first, ending with the winner vid) —
-  the base never advances so `parent_vid` is null and the chain is
-  the winner vid alone. **No success row anywhere → `null` and a
-  no-promotion disclosure in `reason`** (the report references the
+  parent links are read from history and the chain is walked back to the
+  origin baseline. **No target-meeting success row anywhere → `null` and a
+  no-final-winner disclosure in `reason`** (the report references the
   dashboard for what was tried).
 - `baseline`: `ref_acc` = the baseline full-training anchor, three-state
   read of `baseline/baseline_full_acc.json`: `baseline/train_final.json`
@@ -173,7 +175,7 @@ terminal record — torn launch").
 
 The write-back source is the **WINNER's variant shadow**
 (`variants/<winner-vid>/shadow/` — the tree the implementer actually
-optimized; the global `shadow/` stays the untouched baseline copy)
+optimized; the global `shadow/` may hold the latest promoted incumbent)
 diffed against the user's original files at the same relative paths. User
 files are never modified; new files are written beside the originals.
 
