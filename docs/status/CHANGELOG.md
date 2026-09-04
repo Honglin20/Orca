@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-09-04] feat(prof-opt): architecture-first 多候选融合与渐进式 incumbent（commit `386d7c6`）
+
+每轮由业务语义、Ascend 硬件与 SOTA 三路并行生成宏观架构候选，经 selector 融合为唯一架构后进入实现/MFU/训练；latency 准入改为严格优于当前 incumbent，精度通过后晋升且 origin target 始终冻结。详见 [release note](../releases/2026-09-04-prof-opt-architecture-first.md)。
+
 ## [2026-09-03] docs(prof-opt): 精简六个节点 agent description（commit `389242f`）
 
 所有 description 收敛为一两句话，只描述节点主要目的，不再展开执行过程和失败细节；`tars validate` 通过。详见 [release note](../releases/2026-09-03-prof-opt-agent-description-simplification.md)。

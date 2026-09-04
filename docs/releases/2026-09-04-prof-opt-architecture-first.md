@@ -1,7 +1,7 @@
 # prof-opt architecture-first propose
 
 日期：2026-09-04  
-状态：实现与契约校验完成，未执行 E2E，工作区待提交
+状态：实现与契约校验完成，未执行 E2E，已提交
 
 ## 目标
 
@@ -44,5 +44,4 @@ promotion 后仍沿用旧 base idle streak。上述 high/medium findings 均已�
 
 ## 提交状态
 
-本轮未收到 commit/push 指令，因此未创建提交。CHANGELOG 索引应在提交后以
-实际 commit SHA 补录，避免记录不包含本改动的旧 SHA。
+实现提交：`386d7c6`（`feat(prof-opt): add architecture-first proposal loop`）。
