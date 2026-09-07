@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-09-08] feat(prof-opt): 反馈批——文档内容事件通道 + web UX 四项 + rounds shadow 留档（commit `39f9214`）
+
+异机文档 404 根治（内容随清单走 chart 事件通道 + artifacts 根回退解析）；文档独立页签/图标网格、单图 560px 上限、R 徽标改数节点自身执行次数、帕累托补 baseline 锚点；gate 时每轮 shadow 源码幂等留档到 `rounds/<NNN>/<vid>/`。SDD loop：spec 评审 2 轮收敛、独立验证 PASS（后端 121 passed / 前端 635 passed / tsc clean；3 个 pytest 失败经 HEAD~1 对照实证为既有）。详见 [release note](../releases/2026-09-08-prof-opt-feedback-batch.md)。
+
 ## [2026-09-04] feat(prof-opt): architecture-first 多候选融合与渐进式 incumbent（commit `386d7c6`）
 
 每轮由业务语义、Ascend 硬件与 SOTA 三路并行生成宏观架构候选，经 selector 融合为唯一架构后进入实现/MFU/训练；latency 准入改为严格优于当前 incumbent，精度通过后晋升且 origin target 始终冻结。详见 [release note](../releases/2026-09-04-prof-opt-architecture-first.md)。
