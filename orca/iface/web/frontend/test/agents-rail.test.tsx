@@ -403,6 +403,112 @@ describe("selectAgentGroups —— 阶段分组（P3 方案 4 + P2-3 算法）",
     const entry = setup!.agents.find((a) => a.node === "entry");
     expect(entry?.iteration).toBeUndefined();
   });
+
+  // ── B1（2026-09-07 #8）：iteration 口径 = 节点自身执行次数（execSessions）──
+  test("B1 happy：3 自身执行 session + 21 子代理 session → iteration 3（sessionCount 不变）", () => {
+    const subSessions = ["main", ...Array.from({ length: 21 }, (_, i) => `sub-${i}`)];
+    const state = makeGroupsState(
+      [
+        { name: "entry", kind: "agent" },
+        { name: "loopA", kind: "agent" },
+        { name: "loopB", kind: "agent" },
+        { name: "exit", kind: "agent" },
+      ],
+      [
+        { from: "entry", to: "loopA" },
+        { from: "loopA", to: "loopB" },
+        { from: "loopB", to: "loopA" }, // back-route
+        { from: "loopB", to: "exit" },
+      ],
+      {
+        loopA: {
+          sessions: subSessions,
+          sessionEventCounts: Object.fromEntries(
+            subSessions.map((s) => [s, 1])
+          ),
+          sessionFirstTs: Object.fromEntries(
+            subSessions.map((s, i) => [s, i + 1])
+          ),
+        },
+      }
+    );
+    // node_started 收集的 3 个自身执行 session（retry 各计一次）
+    (state.nodes as Record<string, unknown>).loopA = {
+      status: "done",
+      execSessions: ["own-1", "own-2", "own-3"],
+    };
+    const groups = selectAgentGroups(state);
+    const loopA = groups.find((g) => g.group === "Loop")!.agents.find(
+      (a) => a.node === "loopA"
+    );
+    // B1 口径：R = 自身执行次数（现状曾被子代理 session 膨胀成 22）
+    expect(loopA?.iteration).toBe(3);
+    // 「N subs」口径不动
+    expect(loopA?.sessionCount).toBe(21);
+  });
+
+  test("B1 sad：无 execSessions（in-session 老 tape）→ 回退 sessionCount 旧派生", () => {
+    const state = makeGroupsState(
+      [
+        { name: "entry", kind: "agent" },
+        { name: "loopA", kind: "agent" },
+        { name: "loopB", kind: "agent" },
+        { name: "exit", kind: "agent" },
+      ],
+      [
+        { from: "entry", to: "loopA" },
+        { from: "loopA", to: "loopB" },
+        { from: "loopB", to: "loopA" }, // back-route
+        { from: "loopB", to: "exit" },
+      ],
+      {
+        loopA: {
+          sessions: ["main", "s1", "s2"],
+          sessionEventCounts: { main: 1, s1: 1, s2: 1 },
+          sessionFirstTs: { main: 1, s1: 2, s2: 3 },
+        },
+      }
+    );
+    // nodes 无 loopA（或无 execSessions 字段）→ 诚实降级
+    const groups = selectAgentGroups(state);
+    const loopA = groups.find((g) => g.group === "Loop")!.agents.find(
+      (a) => a.node === "loopA"
+    );
+    expect(loopA?.iteration).toBe(2);
+  });
+
+  test("B1 edge：execSessions 空数组（node_started 全无 session_id）→ 同样回退，不显示 R0", () => {
+    const state = makeGroupsState(
+      [
+        { name: "entry", kind: "agent" },
+        { name: "loopA", kind: "agent" },
+        { name: "loopB", kind: "agent" },
+        { name: "exit", kind: "agent" },
+      ],
+      [
+        { from: "entry", to: "loopA" },
+        { from: "loopA", to: "loopB" },
+        { from: "loopB", to: "loopA" }, // back-route
+        { from: "loopB", to: "exit" },
+      ],
+      {
+        loopA: {
+          sessions: ["main", "s1"],
+          sessionEventCounts: { main: 1, s1: 1 },
+          sessionFirstTs: { main: 1, s1: 2 },
+        },
+      }
+    );
+    (state.nodes as Record<string, unknown>).loopA = {
+      status: "done",
+      execSessions: [], // node_started 全无 session_id → 空（非 undefined）
+    };
+    const groups = selectAgentGroups(state);
+    const loopA = groups.find((g) => g.group === "Loop")!.agents.find(
+      (a) => a.node === "loopA"
+    );
+    expect(loopA?.iteration).toBe(1); // 回退 sessionCount，不是 0
+  });
 });
 
 // ── P3：视觉重做组件测试（色条 / 底色 / 分组 / 折叠 / 子 session 联动）──────────────

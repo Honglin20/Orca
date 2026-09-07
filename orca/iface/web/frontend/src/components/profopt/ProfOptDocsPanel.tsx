@@ -1,53 +1,49 @@
-// components/profopt/ProfOptDocsPanel.tsx —— prof-opt「分析文档」面板（web SPEC §3）。
+// components/profopt/ProfOptDocsPanel.tsx —— prof-opt「文档」页签面板（web SPEC §3 +
+// 2026-09-07 B4 重构）。
 //
-// 数据流（web SPEC §3.2，铁律 1+5：selectors 是唯一 view 输入）：
-//   chart socket → store.events → selectCharts → label `prof-opt/docs` 的 table 清单
-//   → 本面板只渲染名称 + 状态徽标 + 更新时间（**不渲染正文**，web §2.3）
-//   → 点选条目 → GET /api/runs/<id>/artifacts/file?path=<相对 path>（W-P1 端点）
-//   → `.md` 复用 MarkdownText；其余（json 等）复用 FileContentView。
+// 数据流（铁律 1+5：selectors 是唯一 view 输入）：
+//   chart socket → store.events → selectDocRowsWithContent（selectors 层合并跨推送
+//   content，R-1）→ 本面板按组分区渲染**图标卡片网格** → 点卡片 → 面板内正文预览。
 //
-// 清单 payload 契约（v6 §10.4 + web §2.3；P4-T3 push_curves 推送方）：
-//   chart_type="table"、label="prof-opt/docs"、行字段（列名即 canonical 契约）：
-//     vid（baseline / r<R>-NN / round / rules）、doc（文档名）、status、
-//     path（相对 run artifacts 根）、updated_at（可选——缺席则不显示更新时间，不造假值）。
+// 正文三态（B4/C3）：
+//   1. 行 content 非空（本推自带或历史合并）→ 直接渲染，**零请求**（异机可见——
+//      与 workflows md 同等体验）；
+//   2. content 空 + content_omitted === "true" → 显式提示「内容过大或本批未推送，
+//      仅清单可读」，**不发起 fetch**（异机必 404，fail loud 不假试）；
+//   3. content 空且未标注（legacy run）→ 回退既有 artifacts fetch（同机可用，
+//      404/413 提示保留）。
 //
-// 分组（web §3.1：基线 / 变体按轮序 / 轮次 / 规则）从行内容**确定性派生**，不依赖
-// 推送方额外字段：
-//   - path === "base/accuracy_rules_snapshot.json"      → 规则（S-9：规则组 path 源）
-//   - path 以 "rounds/" 开头                             → 轮次
-//   - vid === "baseline" 或 path 在 base//baseline/ 下   → 基线
-//   - 其余（variants/<vid>/...）                         → 变体（按 vid 自然序 = 轮序）
+// 清单 payload 契约（v6 §10.4 + C3；P4-T3 push_curves 推送方）：字段名 dict 行
+// vid/doc/status/path/updated_at（+ 可选 content/content_omitted）。解析/分组
+// （parseDocManifest/docGroupOf）在 selectors.ts；中文组名（GROUP_ORDER）留展示层。
+//
+// 分组（web §3.1：基线 / 变体按轮序 / 轮次 / 规则）从行内容确定性派生；变体组内
+// 按 vid 归卡（docs-variant-card-<vid>），组内文件渲染为图标卡片网格（lucide：
+// .md → FileText，.json → Braces，其余 FileText）+ 文件名 + 状态点（statusClass
+// 配色）+ 可选 updated_at。
 //
 // 只读与白名单（web §5）：面板只消费清单内相对 path，唯一网络请求是 GET artifacts
-// 端点，无任何写入口。markdown 内相对图片改写为 artifacts 端点前缀（doc 目录相对
-// 解析）；http(s)/data/blob/file:// 不改写——交由 MarkdownText 现有 assets 改写约定
-// （file:// 落 assets 端点 = 已知破图降级，fail-soft 不崩渲染）。
-//
-// 变体卡片实现拍板偏离说明（W2-T1）：「复用 chart table payload」落在**数据源**层
-// ——本面板直接消费清单行，不另造数据/表格派生逻辑；**渲染层**自绘卡片，因
-// DataTableWidget 无点选/分组/状态徽标能力，复用它必须改 widget，与「chart widgets
-// 零改」（web §7）直接冲突——二选一取零改优先。已上报编排方回写 plan 记录。
+// 端点（且仅 legacy 三态走它），无任何写入口。markdown 内相对图片改写为 artifacts
+// 端点前缀（doc 目录相对解析）；http(s)/data/blob/file:// 不改写——交由
+// MarkdownText 现有 assets 改写约定（file:// 落 assets 端点 = 已知破图降级）。
 //
 // 失败路径（web §5：降级提示不崩）：404 → 「不存在」提示；413 → 「超 1MB」提示；
-// 其余非 2xx / 网络错误 → 显式错误行；清单行缺 path → schema warning（fail loud 计数，
-// 与 ChartRenderer chart-schema-warning 同模式），合法行照常渲染。
+// 其余非 2xx / 网络错误 → 显式错误行；清单行缺 path → schema warning（fail loud
+// 计数，与 ChartRenderer chart-schema-warning 同模式），合法行照常渲染。
 
 import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Loader2 } from "lucide-react";
+import { Braces, ChevronDown, ChevronRight, FileText, Loader2 } from "lucide-react";
 import { useWorkflowStore } from "@/stores/workflow-store";
-import { selectCharts } from "@/selectors";
+import {
+  selectDocRowsWithContent,
+  docGroupOf,
+  type DocGroupKey,
+  type DocRow,
+} from "@/selectors";
 import { MarkdownText } from "@/components/conversation/MarkdownText";
 import { FileContentView } from "@/components/conversation/FileContentView";
 
-/** 文档清单 chart 的 label（v6 §10.4 契约字面量）。 */
-const DOCS_LABEL = "prof-opt/docs";
-
-/** 规则组唯一合法 path（S-9 拍板：规则面板数据源 = run 内只读快照）。 */
-const RULES_SNAPSHOT_PATH = "base/accuracy_rules_snapshot.json";
-
-/** 面板分组键（web §3.1 四组，渲染顺序同此）。 */
-type DocGroupKey = "baseline" | "variants" | "rounds" | "rules";
-
+/** 面板分组渲染顺序（中文组名属展示层，留组件；键与 selectors.DocGroupKey 对齐）。 */
 const GROUP_ORDER: { key: DocGroupKey; label: string }[] = [
   { key: "baseline", label: "基线" },
   { key: "variants", label: "变体" },
@@ -55,28 +51,9 @@ const GROUP_ORDER: { key: DocGroupKey; label: string }[] = [
   { key: "rules", label: "规则" },
 ];
 
-/** 清单行（列名 = P4-T3 推送方 canonical 契约；updated_at 可选）。 */
-export interface DocRow {
-  vid: string;
-  doc: string;
-  status: string;
-  path: string;
-  updated_at?: string;
-}
-
-/** 行 → 分组（确定性派生，见文件头注释）。 */
-export function docGroupOf(row: DocRow): DocGroupKey {
-  if (row.path === RULES_SNAPSHOT_PATH) return "rules";
-  if (row.path.startsWith("rounds/")) return "rounds";
-  if (
-    row.vid === "baseline" ||
-    row.path.startsWith("baseline/") ||
-    row.path.startsWith("base/")
-  ) {
-    return "baseline";
-  }
-  return "variants";
-}
+/** 图标卡片网格（非一行一行）：auto-fill 自适应列，卡片最小 170px。 */
+const CARD_GRID_CLASS =
+  "grid gap-1.5 [grid-template-columns:repeat(auto-fill,minmax(170px,1fr))]";
 
 /** artifacts 只读端点 URL（web SPEC §2.1；唯一被本面板消费的端点）。 */
 export function artifactFileUrl(runId: string, path: string): string {
@@ -127,42 +104,7 @@ export function rewriteDocImages(
     .join("");
 }
 
-/** 清单 payload 解析：合法行 + 坏行计数 + payload 形状漂移标记（fail loud 披露）。 */
-export function parseDocManifest(payload: unknown): {
-  rows: DocRow[];
-  invalid: number;
-  /** payload 在场但缺 data 数组 → 整体形状漂移（INV-5 同口径：显形不静默空态）。 */
-  malformed: boolean;
-} {
-  const p = payload as { data?: unknown } | null;
-  if (!p) return { rows: [], invalid: 0, malformed: false };
-  if (!Array.isArray(p.data)) return { rows: [], invalid: 0, malformed: true };
-  const rows: DocRow[] = [];
-  let invalid = 0;
-  for (const raw of p.data) {
-    const r = raw as Record<string, unknown> | null;
-    if (!r || typeof r.path !== "string" || r.path.length === 0) {
-      invalid++;
-      continue;
-    }
-    const vid = typeof r.vid === "string" ? r.vid : "";
-    // 变体行必须有 vid（无 vid 渲染不出卡片归属，归坏行；基线/轮次/规则按 path 判组不依赖 vid）。
-    if (!vid && r.path.startsWith("variants/")) {
-      invalid++;
-      continue;
-    }
-    rows.push({
-      path: r.path,
-      vid,
-      doc: typeof r.doc === "string" ? r.doc : r.path,
-      status: typeof r.status === "string" ? r.status : "",
-      updated_at: typeof r.updated_at === "string" ? r.updated_at : undefined,
-    });
-  }
-  return { rows, invalid, malformed: false };
-}
-
-/** 状态徽标配色：success 绿、含 fail/insufficient 红、其余中性。 */
+/** 状态徽标配色：success 绿、含 fail/insufficient 红、其余中性（B4：状态点沿用）。 */
 function statusClass(status: string): string {
   if (status === "success") return "text-emerald-600";
   if (status.includes("fail") || status.includes("insufficient")) {
@@ -177,30 +119,26 @@ interface Selection {
 }
 
 export function ProfOptDocsPanel({ runId }: { runId: string }) {
-  // 订阅收窄（与 ChartRenderer 同面）：selectCharts 全部输入。
+  // 订阅收窄：selectDocRowsWithContent 全部输入（与 ChartRenderer 同面）。
   const events = useWorkflowStore((s) => s.events);
   const huge = useWorkflowStore((s) => s.huge);
   const serverOverview = useWorkflowStore((s) => s.serverOverview);
   const hugeFullyLoaded = useWorkflowStore((s) => s.hugeFullyLoaded);
 
-  const manifest = useMemo(() => {
-    const { groups } = selectCharts._from(
-      events,
-      huge,
-      serverOverview,
-      hugeFullyLoaded
-    );
-    const g = groups.find((x) => x.group === DOCS_LABEL);
-    if (!g) return null;
-    // 同 label 多 title 防御：取 seq 最大（最新一次幂等替换语义，web §2.3）。
-    let latest = g.entries[0];
-    for (const e of g.entries) if (e.seq > latest.seq) latest = e;
-    return latest;
-  }, [events, huge, serverOverview, hugeFullyLoaded]);
+  const { rows, invalid, malformed, placeholder, empty } = useMemo(
+    () =>
+      selectDocRowsWithContent._from(
+        events,
+        huge,
+        serverOverview,
+        hugeFullyLoaded
+      ),
+    [events, huge, serverOverview, hugeFullyLoaded]
+  );
 
-  const { rows, invalid, malformed } = useMemo(
-    () => parseDocManifest(manifest?.payload),
-    [manifest]
+  const rowByPath = useMemo(
+    () => new Map(rows.map((r) => [r.path, r])),
+    [rows]
   );
 
   // 分组 + 变体按 vid 归卡（自然序 = 轮序：r1-01 < r2-01 < r10-01）。
@@ -231,11 +169,26 @@ export function ProfOptDocsPanel({ runId }: { runId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  // 点选 → 拉正文（web §2.3：点开后才拉，AbortController 防过期竞态）。
+  // 三态解析（渲染期派生，非 state）：事件 content（含历史合并）→ 直渲零请求；
+  // omitted → 提示不 fetch；legacy → fetch 回退。
+  const mergedRow = selection ? rowByPath.get(selection.path) : undefined;
+  const inline =
+    mergedRow && (mergedRow.content ?? "") !== "" ? mergedRow.content! : null;
+  const omitted = !inline && mergedRow?.content_omitted === "true";
+
+  // legacy 回退 fetch（web §2.3：点开后才拉，AbortController 防过期竞态）。
   useEffect(() => {
     if (!selection) {
       setContent(null);
       setError(null);
+      setLoading(false);
+      return;
+    }
+    if (inline !== null || omitted) {
+      // 事件通道已有正文（或显式 omitted）——网络层零请求。
+      setContent(null);
+      setError(null);
+      setLoading(false);
       return;
     }
     const ctrl = new AbortController();
@@ -273,8 +226,9 @@ export function ProfOptDocsPanel({ runId }: { runId: string }) {
       cancelled = true;
       ctrl.abort();
     };
-  }, [selection, runId]);
+  }, [selection, runId, inline, omitted]);
 
+  const body = inline ?? content;
   const isMarkdown = selection?.path.toLowerCase().endsWith(".md") ?? false;
 
   return (
@@ -296,12 +250,12 @@ export function ProfOptDocsPanel({ runId }: { runId: string }) {
         分析文档（prof-opt）
       </button>
       {open && (
-        <div className="max-h-64 overflow-auto px-3 pb-2">
-          {manifest?.placeholder ? (
+        <div className="max-h-[70vh] overflow-auto px-3 pb-2">
+          {placeholder ? (
             <p className="text-xs orca-text-faint" data-testid="docs-huge-hint">
               超大 run：需「加载全部」后才能查看文档清单。
             </p>
-          ) : !manifest ? (
+          ) : empty ? (
             <p className="text-xs orca-text-faint" data-testid="docs-empty">
               暂无分析文档清单（prof-opt run 推送后显示）。
             </p>
@@ -339,23 +293,25 @@ export function ProfOptDocsPanel({ runId }: { runId: string }) {
                         return (
                           <div
                             key={vid}
-                            className="orca-border mb-1 rounded p-1.5"
+                            className="orca-border orca-bg-surface mb-1 rounded p-1.5"
                             data-testid={`docs-variant-card-${vid}`}
                           >
                             <p className="flex items-center gap-2 text-xs">
                               <span className="font-medium">{vid}</span>
                               <span className={`text-[10px] ${statusClass(st)}`}>
-                                {st}
+                                ● {st}
                               </span>
                             </p>
-                            {vidRows.map((row) => (
-                              <DocItemButton
-                                key={row.path}
-                                row={row}
-                                active={selection?.path === row.path}
-                                onSelect={setSelection}
-                              />
-                            ))}
+                            <div className={`mt-1 ${CARD_GRID_CLASS}`}>
+                              {vidRows.map((row) => (
+                                <DocItemCard
+                                  key={row.path}
+                                  row={row}
+                                  active={selection?.path === row.path}
+                                  onSelect={setSelection}
+                                />
+                              ))}
+                            </div>
                           </div>
                         );
                       })}
@@ -369,14 +325,16 @@ export function ProfOptDocsPanel({ runId }: { runId: string }) {
                     <p className="orca-text-faint mb-1 text-[11px] font-medium">
                       {label}
                     </p>
-                    {groupRows.map((row) => (
-                      <DocItemButton
-                        key={row.path}
-                        row={row}
-                        active={selection?.path === row.path}
-                        onSelect={setSelection}
-                      />
-                    ))}
+                    <div className={CARD_GRID_CLASS}>
+                      {groupRows.map((row) => (
+                        <DocItemCard
+                          key={row.path}
+                          row={row}
+                          active={selection?.path === row.path}
+                          onSelect={setSelection}
+                        />
+                      ))}
+                    </div>
                   </div>
                 );
               })}
@@ -402,18 +360,25 @@ export function ProfOptDocsPanel({ runId }: { runId: string }) {
                 <Loader2 size={12} strokeWidth={1.5} className="animate-spin" aria-hidden />
                 拉取文档…
               </p>
+            ) : body != null && selection ? (
+              isMarkdown ? (
+                <MarkdownText>
+                  {rewriteDocImages(body, selection.path, runId)}
+                </MarkdownText>
+              ) : (
+                <FileContentView content={body} filePath={selection.path} />
+              )
+            ) : omitted ? (
+              <p
+                className="text-xs orca-text-faint"
+                data-testid="doc-omitted"
+              >
+                内容过大或本批未推送，仅清单可读。
+              </p>
             ) : error ? (
               <p className="text-xs orca-text-failed" data-testid="doc-fetch-error">
                 {error}
               </p>
-            ) : content != null && selection ? (
-              isMarkdown ? (
-                <MarkdownText>
-                  {rewriteDocImages(content, selection.path, runId)}
-                </MarkdownText>
-              ) : (
-                <FileContentView content={content} filePath={selection.path} />
-              )
             ) : null}
           </div>
         </div>
@@ -422,8 +387,8 @@ export function ProfOptDocsPanel({ runId }: { runId: string }) {
   );
 }
 
-/** 单个文档条目：名称 + 状态徽标 + 更新时间（web §3.1；不渲染正文）。 */
-function DocItemButton({
+/** 单个文档卡片（B4 图标网格项）：类型图标 + 文件名 + 状态点 + 可选更新时间。 */
+function DocItemCard({
   row,
   active,
   onSelect,
@@ -434,19 +399,24 @@ function DocItemButton({
 }) {
   // 轮次组 doc 名同为 analysis.md → 用完整相对 path 作显示名消歧。
   const name = docGroupOf(row) === "rounds" ? row.path : row.doc;
+  const Icon = row.path.toLowerCase().endsWith(".json") ? Braces : FileText;
   return (
     <button
       type="button"
       onClick={() => onSelect({ path: row.path, name })}
       title={row.path}
       data-testid="doc-item"
-      className={`flex w-full items-center gap-2 rounded px-1.5 py-1 text-left text-xs hover:orca-bg-surface-2 ${
-        active ? "orca-bg-surface-2 orca-accent" : ""
+      className={`orca-border orca-bg-surface flex items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:orca-bg-surface-2 ${
+        active ? "orca-border-accent orca-accent" : ""
       }`}
     >
+      <Icon size={14} strokeWidth={1.5} className="shrink-0" aria-hidden />
       <span className="min-w-0 flex-1 truncate">{name}</span>
-      <span className={`shrink-0 text-[10px] ${statusClass(row.status)}`}>
-        {row.status}
+      <span
+        className={`shrink-0 text-[10px] ${statusClass(row.status)}`}
+        title={row.status}
+      >
+        ● {row.status}
       </span>
       {row.updated_at ? (
         <span className="orca-text-faint shrink-0 text-[10px]">

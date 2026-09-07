@@ -30,6 +30,12 @@ if ! bash "$ART/scripts/deploy_scripts.sh" --verify; then
   exit 0
 fi
 
+# Per-round shadow source archive (C1): sidecar — an unexpected crash must not
+# block the gate (stderr stays visible; per-vid failures land in
+# rounds/<RRR>/shadow_archive_error.json inside the script). A mid-run resume
+# against an old deployed set without this script only echoes this stderr line.
+python3 "$ART/scripts/archive_round_shadow.py" --artifacts "$ART" || echo "archive_round_shadow failed (non-zero; see stderr)" >&2
+
 # Accuracy-safe latency improvements that have completed training become the
 # next round's base before the pure decision script evaluates loop/report.
 promote_out=""

@@ -460,7 +460,24 @@ const eventHandlers: Record<EventType, Handler> = {
   // ── node 生命周期（last-writer-wins，幂等）──
   node_started: (s, _d, e) => {
     if (!e.node) return;
-    patchNode(s.nodes, e.node, { status: "running", startedAt: e.timestamp });
+    // B1（2026-09-07 #8）：收集节点自身执行的 session_id（R 徽标 = 自身执行次数，
+    // 不再被子代理 session 膨胀）。仅非空 string 入列——in-session 路径 node_started
+    // 无 session_id → 不入（回退旧派生）；数组去重保证 refold / fold-twice 幂等。
+    // 存放点钉死 NodeState（nodesIndex 是子代理 conversation 口径，禁混）。
+    const sid =
+      typeof e.session_id === "string" && e.session_id ? e.session_id : null;
+    const prior = s.nodes[e.node]?.execSessions;
+    const execSessions =
+      sid === null
+        ? prior
+        : prior?.includes(sid)
+          ? prior
+          : [...(prior ?? []), sid];
+    patchNode(s.nodes, e.node, {
+      status: "running",
+      startedAt: e.timestamp,
+      ...(execSessions ? { execSessions } : {}),
+    });
   },
   node_completed: (s, d, e) => {
     if (!e.node) return;

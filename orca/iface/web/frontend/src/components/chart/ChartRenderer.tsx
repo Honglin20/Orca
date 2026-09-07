@@ -13,9 +13,14 @@
 
 import { useMemo } from "react";
 import { useWorkflowStore, untitledChartWarned } from "@/stores/workflow-store";
-import { selectCharts, type ChartEntry } from "@/selectors";
+import { selectCharts, DOCS_LABEL, type ChartEntry } from "@/selectors";
 import { ChartGroup } from "./ChartGroup";
 import type { ChartPayload } from "./types";
+
+// B2（2026-09-07 #2）：prof-opt 文档清单表不进图表渲染。它是文档面板
+// （ProfOptDocsPanel / selectDocRowsWithContent）的数据源——**推送侧不停**
+// （事件照常进 store，面板从事件流读清单），仅不作为 chart 呈现。
+// DOCS_LABEL 契约字面量单源在 selectors（DRY：漂移 = 过滤静默失效）。
 
 interface ChartRendererProps {
   /** 限定到某节点；undefined = 全部节点（ChartsView 用）。 */
@@ -99,16 +104,24 @@ export function ChartRenderer({ nodeId }: ChartRendererProps) {
     [events, huge, serverOverview, hugeFullyLoaded]
   );
 
+  // B2：整组滤除 docs 清单组——valid 与 huge placeholder 两分支同免（组级剔除，
+  // 不留 0 项组壳）；空态判定在过滤**之后**（docs-only run 显示诚实 chart-empty，
+  // 非过滤副作用的空壳）。selectCharts 输出不变（文档面板仍从事件读同一清单）。
+  const chartGroups = useMemo(
+    () => groups.filter((g) => g.group !== DOCS_LABEL),
+    [groups]
+  );
+
   // nodeId filter（可选）：限定到某节点
   const filtered = useMemo(() => {
-    if (nodeId === undefined) return groups;
-    return groups
+    if (nodeId === undefined) return chartGroups;
+    return chartGroups
       .map((g) => ({
         ...g,
         entries: g.entries.filter((e) => e.node === nodeId),
       }))
       .filter((g) => g.entries.length > 0);
-  }, [groups, nodeId]);
+  }, [chartGroups, nodeId]);
 
   // partition：cast + reject 分区（替代旧 silent filter）
   const partitioned = useMemo(() => partitionCharts(filtered), [filtered]);

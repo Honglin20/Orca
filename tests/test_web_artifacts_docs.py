@@ -450,3 +450,185 @@ def test_shared_guard_equivalent_to_legacy_resolve_asset_path(tmp_path):
         await manager.shutdown()
 
     run_async(go())
+
+
+# ── 2026-09-07 SPEC §1（A1）：project-scoped artifacts 根（orca_env.sh 记录）────
+
+
+def _write_orca_env(manager, rid: str, lines: list[str]) -> None:
+    """写 run 目录 ``orca_env.sh``（bootstrap 同位：tape 所在 runs 目录 / <run_id>/）。
+
+    值的引号形态与 bootstrap 写盘一致（shlex 单引号），覆盖引擎可能已写的文件，
+    保证用例盘面确定性。
+    """
+    run_dir = manager.get_handle(rid).tape.path.parent / rid
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "orca_env.sh").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
+
+
+def test_artifacts_file_recorded_project_scoped_root(tmp_path):
+    """happy：``orca_env.sh`` 记录的 project-scoped 目录存在 → 端点按该根解析。
+
+    意图（SPEC §1 验收 1）：prof-opt 等 project-scoped 产物的真实落点记录在
+    bootstrap env 文件里；同机场景端点必须读得到（此前的 404 根因）。
+    红线（SPEC §1 验收 5 / R-17）：recorded 根与 per-run 派生根**两个绝对路径**
+    都不得出现在响应正文——双根同时造盘，防只断言派生根的假绿。
+    """
+    manager = make_manager(tmp_path)
+
+    async def go():
+        rid = await _start_run(manager, tmp_path)
+        scoped = tmp_path / "proj-root" / "artifacts" / "prof-opt"
+        (scoped / "variants" / "v1").mkdir(parents=True)
+        (scoped / "variants" / "v1" / "assessment.md").write_text(
+            "# v1 评估\n", encoding="utf-8"
+        )
+        # 双根同时在场：recorded（scoped）+ per-run（_make_artifacts 造），
+        # recorded 优先且两者都不泄露。
+        _make_artifacts(manager, rid)
+        _write_orca_env(
+            manager, rid, [f"export ORCA_ARTIFACTS_DIR='{scoped}'"]
+        )
+        async with _client_factory(manager) as client:
+            resp = await client.get(
+                f"/api/runs/{rid}/artifacts/file",
+                params={"path": "variants/v1/assessment.md"},
+            )
+            assert resp.status_code == 200
+            assert resp.text == "# v1 评估\n"
+            # per-run 根存在但 recorded 根优先：per-run 下无此文件也 200 证优先级
+            assert not (_artifacts_root(manager, rid) / "variants").exists()
+            # recorded 根一旦解析成功即独占：per-run 独有文件不跨根兜底 → 404
+            resp_per_run = await client.get(
+                f"/api/runs/{rid}/artifacts/file",
+                params={"path": "baseline/business_logic.md"},
+            )
+            assert resp_per_run.status_code == 404
+            # 红线：双根绝对路径均不泄露
+            assert str(scoped) not in resp.text
+            assert str(_artifacts_root(manager, rid)) not in resp.text
+        await manager.shutdown()
+
+    run_async(go())
+
+
+def test_artifacts_file_recorded_missing_path_falls_back(tmp_path):
+    """sad：记录的路径不存在（异机）→ 回退 per-run 派生根；两处皆无 → 404。
+
+    意图（SPEC §1 验收 2）：``orca_env.sh`` 里的绝对路径指向 workflow 机器的本地
+    盘，serve 机上不存在 → 端点回退既有 per-run 派生（老 run 语义不变），仍无则
+    404 fail loud——不因 env 记录失效而 500。
+    """
+    manager = make_manager(tmp_path)
+
+    async def go():
+        rid = await _start_run(manager, tmp_path)
+        _make_artifacts(manager, rid)
+        _write_orca_env(
+            manager, rid,
+            ["export ORCA_ARTIFACTS_DIR='/nonexistent/remote/artifacts'"],
+        )
+        async with _client_factory(manager) as client:
+            # per-run 根有文件 → 回退后 200
+            resp = await client.get(
+                f"/api/runs/{rid}/artifacts/file",
+                params={"path": "baseline/business_logic.md"},
+            )
+            assert resp.status_code == 200
+
+        # 第二个 run：记录路径不存在且 per-run 根也不存在 → 404
+        rid2 = await _start_run(manager, tmp_path)
+        _write_orca_env(
+            manager, rid2,
+            ["export ORCA_ARTIFACTS_DIR='/nonexistent/remote/artifacts'"],
+        )
+        assert not _artifacts_root(manager, rid2).exists()
+        async with _client_factory(manager) as client:
+            resp = await client.get(
+                f"/api/runs/{rid2}/artifacts/file",
+                params={"path": "baseline/business_logic.md"},
+            )
+            assert resp.status_code == 404
+        await manager.shutdown()
+
+    run_async(go())
+
+
+def test_artifacts_file_recorded_parse_edges(tmp_path):
+    """edge：引号含空格路径 / 多行重复 export（末行生效）/ 相对路径 / 坏引号行。
+
+    意图（SPEC §1 验收 4）：解析逐字对齐 shell source 语义——末条 export 胜、
+    坏引号行跳过**不崩**（R-5 防 500）、其后有效行照常生效；相对路径视为无记录
+    回退 per-run。
+    """
+    manager = make_manager(tmp_path)
+
+    async def go():
+        # (a) 值带 shlex 引号且含空格：路径本体有效 → 按该根解析
+        rid_a = await _start_run(manager, tmp_path)
+        scoped = tmp_path / "proj a" / "artifacts prof-opt"
+        (scoped / "base").mkdir(parents=True)
+        (scoped / "base" / "origin_anchor.json").write_text(
+            '{"ok": 1}', encoding="utf-8"
+        )
+        _write_orca_env(
+            manager, rid_a, [f"export ORCA_ARTIFACTS_DIR='{scoped}'"]
+        )
+        async with _client_factory(manager) as client:
+            resp = await client.get(
+                f"/api/runs/{rid_a}/artifacts/file",
+                params={"path": "base/origin_anchor.json"},
+            )
+            assert resp.status_code == 200
+            assert resp.text == '{"ok": 1}'
+
+        # (b) 多行重复 export：末行（空值）胜 → 无记录 → 回退 per-run
+        rid_b = await _start_run(manager, tmp_path)
+        _make_artifacts(manager, rid_b)
+        _write_orca_env(
+            manager, rid_b,
+            [
+                "export ORCA_ARTIFACTS_DIR='/nonexistent/first'",
+                "export ORCA_ARTIFACTS_DIR=",
+            ],
+        )
+        async with _client_factory(manager) as client:
+            resp = await client.get(
+                f"/api/runs/{rid_b}/artifacts/file",
+                params={"path": "baseline/business_logic.md"},
+            )
+            assert resp.status_code == 200  # 空值无记录 → per-run 回退
+
+        # (c) 相对路径 → 视为无记录 → 回退 per-run（无文件 → 404，不 500）
+        rid_c = await _start_run(manager, tmp_path)
+        _write_orca_env(
+            manager, rid_c, ["export ORCA_ARTIFACTS_DIR=relative/artifacts"]
+        )
+        async with _client_factory(manager) as client:
+            resp = await client.get(
+                f"/api/runs/{rid_c}/artifacts/file",
+                params={"path": "baseline/business_logic.md"},
+            )
+            assert resp.status_code == 404
+
+        # (d) 坏引号行 + 其后有效行：坏行跳过、有效行生效（R-5：不崩不 500）
+        rid_d = await _start_run(manager, tmp_path)
+        _write_orca_env(
+            manager, rid_d,
+            [
+                "export ORCA_ARTIFACTS_DIR='/nonexistent/broken",  # 坏引号
+                f"export ORCA_ARTIFACTS_DIR='{scoped}'",           # 其后有效行
+            ],
+        )
+        async with _client_factory(manager) as client:
+            resp = await client.get(
+                f"/api/runs/{rid_d}/artifacts/file",
+                params={"path": "base/origin_anchor.json"},
+            )
+            assert resp.status_code == 200
+            assert resp.text == '{"ok": 1}'
+        await manager.shutdown()
+
+    run_async(go())

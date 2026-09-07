@@ -2,7 +2,8 @@
 //
 // web-shell-v2 §4 三栏：
 //   - 左 AgentsRail（agents 列表 + DAG 浮层挂点）
-//   - 中 tabs [会话 | 图表]（gate 模态浮于其上，§5.6）
+//   - 中 tabs [会话 | 图表 | 文档]（B4 2026-09-07：prof-opt 文档面板独立页签；
+//     gate 模态浮于其上，§5.6）
 //   - 右 LogStream（常驻最右，虚拟化 live）
 // 顶 TopBar（status + elapsed；P5a 已去 cost UI）。**无** Replay 控件（SPEC §3.1 / §8）。
 //
@@ -41,15 +42,16 @@ const ConversationView = lazy(() =>
 const ChartsView = lazy(() =>
   import("@/components/views/ChartsView").then((m) => ({ default: m.ChartsView }))
 );
-// W-P2（web SPEC §3.1）：prof-opt 分析文档面板，挂图表区上方（charts 页签内）。
-// 同 D5 策略 lazy：面板复用 MarkdownText（markdown 全家桶），不进首屏 chunk。
+// W-P2（web SPEC §3.1）+ B4（2026-09-07 #5）：prof-opt 分析文档面板独占「文档」
+// 页签（从图表页签移出）。同 D5 策略 lazy：面板复用 MarkdownText（markdown 全家
+// 桶），不进首屏 chunk。
 const ProfOptDocsPanel = lazy(() =>
   import("@/components/profopt/ProfOptDocsPanel").then((m) => ({
     default: m.ProfOptDocsPanel,
   }))
 );
 
-type Tab = "conversation" | "charts";
+type Tab = "conversation" | "charts" | "docs";
 
 export function RunDetailPage() {
   const { runId } = useParams<{ runId: string }>();
@@ -104,6 +106,7 @@ export function RunDetailPage() {
                     [
                       ["conversation", "会话"],
                       ["charts", "图表"],
+                      ["docs", "文档"],
                     ] as const
                   ).map(([t, label]) => (
                     <button
@@ -140,13 +143,11 @@ export function RunDetailPage() {
                           onChartClick={handleChartClick}
                         />
                       )}
-                      {tab === "charts" && (
-                        <div className="flex h-full flex-col">
-                          {/* W-P2：分析文档面板（可折叠）+ 图表区（ChartsView 零改，web §4） */}
+                      {tab === "charts" && <ChartsView />}
+                      {tab === "docs" && (
+                        // B4：文档面板独占页签（不再与图表区同栏挤占）
+                        <div className="flex h-full flex-col overflow-auto">
                           <ProfOptDocsPanel runId={runId} />
-                          <div className="min-h-0 flex-1">
-                            <ChartsView />
-                          </div>
                         </div>
                       )}
                     </Suspense>

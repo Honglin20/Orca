@@ -33,6 +33,14 @@ const GRID_STYLE: React.CSSProperties = {
 /** 表格独占一行：横跨全部 grid 列；minWidth 0 防超宽内容撑破 auto-fit 列。 */
 const TABLE_ROW_STYLE: React.CSSProperties = { gridColumn: "1 / -1", minWidth: 0 };
 
+/**
+ * B3（2026-09-07 #6）：组内**唯一** visual（非 table、无占位卡）的最大宽度。
+ * auto-fit 网格下单图折叠空轨道后独占整行 + aspect-[4/3] → 巨图不可读；560px
+ * 让单图回到可读尺寸。JS 判定（LazyChartWidget 无 style 通道，禁 CSS 伪类 hack）。
+ * 占位卡在场或 ≥2 visuals 时不受限；table 恒整行不变。
+ */
+const SINGLE_CHART_MAX_WIDTH = 560;
+
 interface ChartGroupItem {
   identity: string;
   payload: ChartPayload;
@@ -103,13 +111,21 @@ export function ChartGroup({
               <span className="text-[10px] orca-text-faint">加载全部后显示</span>
             </div>
           ))}
-          {visuals.map((c) => (
-            // SPEC audit-c E3/BLOCKER-1：key=identity（titled 跨 huge→full 稳定；无 title 允许 remount）
-            <LazyChartWidget
-              key={c.identity}
-              payload={c.payload}
-            />
-          ))}
+          {visuals.map((c) =>
+            // B3：唯一 visual 外包一层 div 承载 maxWidth（LazyChartWidget 无 style
+            // 通道）；key=identity（SPEC audit-c E3/BLOCKER-1，跨 huge→full 稳定）。
+            placeholders.length === 0 && visuals.length === 1 ? (
+              <div
+                key={c.identity}
+                style={{ maxWidth: SINGLE_CHART_MAX_WIDTH }}
+                data-testid="single-chart-wrap"
+              >
+                <LazyChartWidget payload={c.payload} />
+              </div>
+            ) : (
+              <LazyChartWidget key={c.identity} payload={c.payload} />
+            )
+          )}
           {tables.map((c) => (
             <div key={c.identity} style={TABLE_ROW_STYLE}>
               <LazyChartWidget payload={c.payload} />

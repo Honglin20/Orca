@@ -2038,11 +2038,17 @@ def test_metric_curve_compare_pins_depth_and_reports_anchor(tmp_path: Path):
 
 # ── push_curves (D-V4-2b): best-effort live-chart sidecar ─────────────────────
 
-def _push_env(art: Path, sock: Path | None) -> dict[str, str]:
+def _push_env(art: Path, sock: Path | None,
+              run_id: str | None = None) -> dict[str, str]:
     env = dict(os.environ)
     env["ORCA_ARTIFACTS_DIR"] = str(art)
     env["ORCA_NODE"] = "po_baseline"
     env["ORCA_SESSION_ID"] = "s-test"
+    # C3: ORCA_RUN_ID scopes the docs push state per run（.docs_push_state.<id>.json）
+    if run_id is not None:
+        env["ORCA_RUN_ID"] = run_id
+    else:
+        env.pop("ORCA_RUN_ID", None)
     if sock is not None:
         env["ORCA_CHART_SOCK"] = str(sock)
     else:
@@ -2050,10 +2056,12 @@ def _push_env(art: Path, sock: Path | None) -> dict[str, str]:
     return env
 
 
-def _push(art: Path, sock: Path | None, *extra: str):
+def _push(art: Path, sock: Path | None, *extra: str,
+          run_id: str | None = None):
     return subprocess.run(
         [sys.executable, str(_SCRIPTS / "push_curves.py"), *extra],
-        capture_output=True, text=True, timeout=60, env=_push_env(art, sock))
+        capture_output=True, text=True, timeout=60,
+        env=_push_env(art, sock, run_id=run_id))
 
 
 def _chart_server(sock_path: Path, replies: int, silent: bool = False):
@@ -2329,7 +2337,13 @@ def test_push_curves_pareto_payload(tmp_path: Path):
     assert pareto["pareto_y_direction"] == "min"
     assert pareto["color"] == "color"                    # per-row status color
     points = {row["vid"]: row for row in pareto["data"]}
-    assert set(points) == {"r1-01", "r2-01", "r3-01"}    # 全量变体一个点
+    # 全量变体一个点 + C2 baseline 锚点（anchor 在场必加原点参照；既有精确集
+    # 断言随 2026-09-07 C2 契约同步 +baseline，非静默）
+    assert set(points) == {"r1-01", "r2-01", "r3-01", "baseline"}
+    assert points["baseline"]["x"] == 0            # 原点 = 相对基线的 0 降幅
+    assert points["baseline"]["y"] == 0            # gap basis（r1-01 gap 非空）
+    assert points["baseline"]["status"] == "baseline"
+    assert points["baseline"]["color"] == "#0ea5e9"  # 独立锚点色（非状态色）
     assert points["r1-01"]["x"] == 20.0                  # 1 - 800/1000
     assert points["r1-01"]["y"] == 0.02
     assert points["r1-01"]["status"] == "success"
@@ -2368,7 +2382,7 @@ def test_push_curves_docs_manifest_whitelist_and_columns(tmp_path: Path):
                 docs=("assessment.md",))
     sock = tmp_path / "chart.sock"
     thread, messages = _chart_server(sock, replies=2)   # line + docs (no pareto anchor)
-    proc = _push(art, sock, "--docs")
+    proc = _push(art, sock, "--docs", run_id="run-docs-a")
     assert proc.returncode == 0, proc.stderr
     thread.join(timeout=10)
     by_type = {m["payload"]["chart_type"]: m["payload"] for m in messages}
@@ -2394,25 +2408,44 @@ def test_push_curves_docs_manifest_whitelist_and_columns(tmp_path: Path):
     for path, row in rows.items():
         assert not Path(path).is_absolute() and ".." not in Path(path).parts
         assert (art / path).is_file()
-        assert set(row) == {"vid", "doc", "status", "path", "updated_at"}
+        # R-10（2026-09-07 C3）：5 字段集 → 7 字段集（+content/content_omitted）
+        assert set(row) == {"vid", "doc", "status", "path", "updated_at",
+                            "content", "content_omitted"}
+        # 首推（state 为空）：每份可读文档带全文
+        assert row["content"] == (art / path).read_text(encoding="utf-8")
+        assert row["content_omitted"] == ""
     assert "rounds/notes/analysis.md" not in rows          # non-numeric round
-    # idempotent replace (web §2.3): a second push carries the identical
-    # label+title+data — the front end REPLACES, never duplicates
+    # C3：成功发送后写 per-run state（relpath -> mtime/size）
+    state = json.loads((art / ".docs_push_state.run-docs-a.json")
+                       .read_text(encoding="utf-8"))
+    assert set(state) == set(rows)
+    assert all({"mtime", "size"} <= set(v) and isinstance(v["size"], int)
+               for v in state.values())
+    # R-10（2026-09-07 C3）：二推 payload 逐字一致 → 状态语义断言——同 label+title
+    # 幂等替换不变，未变行 content 为空（正文走前端历史合并，不重推）
     thread2, messages2 = _chart_server(sock, replies=2)
-    proc2 = _push(art, sock, "--docs")
+    proc2 = _push(art, sock, "--docs", run_id="run-docs-a")
     assert proc2.returncode == 0, proc2.stderr
     thread2.join(timeout=10)
     docs2 = {m["payload"]["chart_type"]: m["payload"] for m in messages2}["table"]
     assert docs2["title"] == docs["title"]
-    assert docs2["data"] == docs["data"]
+    assert {r["path"] for r in docs2["data"]} == set(rows)
+    for row2 in docs2["data"]:
+        base = rows[row2["path"]]
+        assert row2["vid"] == base["vid"]
+        assert row2["status"] == base["status"]
+        assert row2["updated_at"] == base["updated_at"]
+        assert row2["content"] == ""              # 未变行：不带正文
+        assert row2["content_omitted"] == ""
 
 
 def test_push_curves_w3_joint_three_charts_idempotent(tmp_path: Path):
     """W3-T1 联调（web §6.3-1 后端侧）：一次 ``--docs`` 推送三图齐全——line
-    （§10.1 top-10）/ pareto（§10.2 全量，y=null 占位**保持 null 不伪造 0**——前端
-    W-P3 修正后按 null 剔除渲染，0 会让占位点画在 0 位）/ docs（§10.4 canonical
-    列）；同工作区二次推送三图 label+title+data 逐字一致（幂等替换契约：前端按
-    label+title 替换不复制——pareto 的幂等此前未覆盖）。"""
+    （§10.1 top-10）/ pareto（§10.2 全量 + C2 baseline 锚点，y=null 占位**保持
+    null 不伪造 0**——前端 W-P3 修正后按 null 剔除渲染，0 会让占位点画在 0 位）/
+    docs（§10.4 canonical 列）。R-10（2026-09-07 C3）：同工作区二次推送——三图
+    label+title 逐字一致 + line/pareto data 逐字一致（幂等替换）；docs 行集/
+    状态一致但**未变行 content 为空**（正文经前端事件历史合并，不重推）。"""
     art = _po_ws(tmp_path)
     (art / "base").mkdir()
     (art / "base" / "origin_anchor.json").write_text(json.dumps(
@@ -2434,7 +2467,7 @@ def test_push_curves_w3_joint_three_charts_idempotent(tmp_path: Path):
     pushed_charts = []
     for _ in range(2):
         thread, messages = _chart_server(sock, replies=3)  # line+pareto+docs
-        proc = _push(art, sock, "--docs")
+        proc = _push(art, sock, "--docs", run_id="run-w3")
         assert proc.returncode == 0, proc.stderr
         thread.join(timeout=10)
         assert len(messages) == 3
@@ -2448,16 +2481,31 @@ def test_push_curves_w3_joint_three_charts_idempotent(tmp_path: Path):
         points = {row["vid"]: row for row in by_type["pareto"]["data"]}
         assert points["r2-01"]["y"] is None
         assert points["r1-01"]["y"] == 0.02
-        # §10.4 canonical columns carried verbatim
+        # C2: the baseline anchor rides along (r1-01 gap non-null → y=0)
+        assert points["baseline"]["x"] == 0 and points["baseline"]["y"] == 0
+        # §10.4 canonical columns carried verbatim（C3 有意不动 columns）
         assert by_type["table"]["columns"] == ["vid", "doc", "status", "path",
                                                "updated_at"]
         pushed_charts.append(by_type)
-    # idempotent replace: the second push of an unchanged workspace is
-    # byte-identical on label+title+data for ALL THREE charts
+    # idempotent replace (R-10 revised for C3): label+title identical for ALL
+    # THREE charts; line/pareto data identical; docs manifest fields identical
+    # with the second push carrying no bodies (state semantics)
     for ctype in ("line", "pareto", "table"):
         assert pushed_charts[1][ctype]["label"] == pushed_charts[0][ctype]["label"]
         assert pushed_charts[1][ctype]["title"] == pushed_charts[0][ctype]["title"]
-        assert pushed_charts[1][ctype]["data"] == pushed_charts[0][ctype]["data"]
+    assert pushed_charts[1]["line"]["data"] == pushed_charts[0]["line"]["data"]
+    assert pushed_charts[1]["pareto"]["data"] == pushed_charts[0]["pareto"]["data"]
+
+    def strip_content(rows):
+        return [{k: v for k, v in r.items() if k != "content"}
+                for r in rows]
+
+    first_docs = pushed_charts[0]["table"]["data"]
+    second_docs = pushed_charts[1]["table"]["data"]
+    assert strip_content(second_docs) == strip_content(first_docs)
+    assert all(r["content"] != "" for r in first_docs)   # 首推全文
+    assert all(r["content"] == "" and r["content_omitted"] == ""
+               for r in second_docs)                     # 二推未变行不带正文
 
 
 def test_push_curves_recency_and_origin_anchor(tmp_path: Path):
@@ -2860,3 +2908,519 @@ def test_check_prerequisites_fails_loud_without_artifacts_env():
                           text=True, timeout=60, env=env)
     assert proc.returncode != 0
     assert "ORCA_ARTIFACTS_DIR not set" in proc.stderr
+
+
+# ── C1 (2026-09-07): per-round shadow source archive ──────────────────────────
+
+
+def _archive(art: Path):
+    return subprocess.run(
+        [sys.executable, str(_SCRIPTS / "archive_round_shadow.py"),
+         "--artifacts", str(art)],
+        capture_output=True, text=True, timeout=60)
+
+
+def _seed_round3(art: Path, vids: list[str]) -> None:
+    """rounds/003/proposals.json（顶层 dict + proposals list）+ 各 vid 的 shadow 树。"""
+    rdir = art / "rounds" / "003"
+    rdir.mkdir(parents=True)
+    (rdir / "proposals.json").write_text(json.dumps(
+        {"round": 3, "proposals": [{"vid": v} for v in vids]}),
+        encoding="utf-8")
+
+
+def _seed_shadow(art: Path, vid: str) -> None:
+    """shadow 源码树 + 变体根下 shadow 之外的兄弟产物（onnx/profile）。"""
+    sdir = art / "variants" / vid / "shadow"
+    (sdir / "sub").mkdir(parents=True)
+    (sdir / "model.py").write_text(f"# {vid} model\n", encoding="utf-8")
+    (sdir / "sub" / "util.py").write_text(f"# {vid} util\n", encoding="utf-8")
+    (sdir / "__pycache__").mkdir()
+    (sdir / "__pycache__" / "model.cpython-312.pyc").write_bytes(b"\x00pyc")
+    (art / "variants" / vid / "profile").mkdir(parents=True, exist_ok=True)
+    (art / "variants" / vid / "profile" / "report.md").write_text(
+        "profile\n", encoding="utf-8")
+    (art / "variants" / vid / f"{vid}.onnx").write_bytes(b"\x00onnx")
+
+
+def _tree_relfiles(root: Path) -> set[str]:
+    return {str(p.relative_to(root)).replace("\\", "/")
+            for p in root.rglob("*") if p.is_file()}
+
+
+def test_archive_round_shadow_happy_two_variants(tmp_path: Path):
+    """happy：round 内全部 vid 留档，仅源码（无 __pycache__/*.pyc、不含
+    onnx/profile 兄弟产物），内容与源一致，无 error 文件，exit 0。"""
+    art = tmp_path / "art"
+    art.mkdir()
+    _seed_round3(art, ["r1-01", "r2-01"])
+    for vid in ("r1-01", "r2-01"):
+        _seed_shadow(art, vid)
+    proc = _archive(art)
+    assert proc.returncode == 0, proc.stderr
+    for vid in ("r1-01", "r2-01"):
+        dst = art / "rounds" / "003" / vid / "shadow"
+        src = art / "variants" / vid / "shadow"
+        assert _tree_relfiles(dst) == {"model.py", "sub/util.py"}
+        assert (dst / "model.py").read_text(encoding="utf-8") == \
+            (src / "model.py").read_text(encoding="utf-8")
+        # 轮归档目录只有 shadow（兄弟 onnx/profile 不进留档）
+        assert [p.name for p in (art / "rounds" / "003" / vid).iterdir()] == \
+            ["shadow"]
+    assert not (art / "rounds" / "003" / "shadow_archive_error.json").exists()
+
+
+def test_archive_round_shadow_idempotent_replay(tmp_path: Path):
+    """edge：重复执行（gate 重放）零副作用——dst 完整即跳过，源后续变化不回写。"""
+    art = tmp_path / "art"
+    art.mkdir()
+    _seed_round3(art, ["r1-01"])
+    _seed_shadow(art, "r1-01")
+    assert _archive(art).returncode == 0
+    dst_file = art / "rounds" / "003" / "r1-01" / "shadow" / "model.py"
+    before = dst_file.read_text(encoding="utf-8")
+    (art / "variants" / "r1-01" / "shadow" / "model.py").write_text(
+        "# mutated later — must NOT overwrite the archive\n", encoding="utf-8")
+    proc = _archive(art)
+    assert proc.returncode == 0, proc.stderr
+    assert dst_file.read_text(encoding="utf-8") == before
+
+
+def test_archive_round_shadow_missing_source_disclosed(tmp_path: Path):
+    """edge：单 vid 源缺失 → error 文件含该 vid、其余照常、恒 exit 0；
+    随后源补齐重放 → 全成功时 stale error 文件被删除（披露不跨重放残留）。"""
+    art = tmp_path / "art"
+    art.mkdir()
+    _seed_round3(art, ["r1-01", "r2-01"])
+    _seed_shadow(art, "r1-01")                 # r2-01 无 shadow 源
+    proc = _archive(art)
+    assert proc.returncode == 0, proc.stderr
+    err = json.loads((art / "rounds" / "003" / "shadow_archive_error.json")
+                     .read_text(encoding="utf-8"))
+    assert set(err) == {"r2-01"}
+    assert "r2-01" in err["r2-01"] or "shadow" in err["r2-01"]
+    assert (art / "rounds" / "003" / "r1-01" / "shadow").is_dir()  # 其余照常
+    # 重放收敛：缺失源补齐 → 全部成功 → stale error 文件删除
+    _seed_shadow(art, "r2-01")
+    proc = _archive(art)
+    assert proc.returncode == 0, proc.stderr
+    assert not (art / "rounds" / "003" / "shadow_archive_error.json").exists()
+    assert (art / "rounds" / "003" / "r2-01" / "shadow").is_dir()
+
+
+def test_archive_round_shadow_missing_proposals_and_round0(tmp_path: Path):
+    """edge：proposals.json 缺失 → error 文件（键 __round__）+ exit 0；
+    round=0（无数字 rounds/ 目录）→ no-op、exit 0、零目录创建。"""
+    art = tmp_path / "art"
+    art.mkdir()
+    (art / "rounds" / "003").mkdir(parents=True)   # 数字目录但无 proposals.json
+    proc = _archive(art)
+    assert proc.returncode == 0, proc.stderr
+    err = json.loads((art / "rounds" / "003" / "shadow_archive_error.json")
+                     .read_text(encoding="utf-8"))
+    assert set(err) == {"__round__"}
+
+    empty = tmp_path / "empty-art"
+    empty.mkdir()
+    proc = _archive(empty)
+    assert proc.returncode == 0, proc.stderr
+    assert not (empty / "rounds").exists()          # 零目录创建
+    assert list(empty.iterdir()) == []
+
+
+def test_gate_node_mounts_shadow_archive_between_verify_and_promote():
+    """挂点（C1）：``bash -n`` 通过 + 挂点行位于 deploy ``--verify`` 块之后、
+    incumbent promote 块之前（gate 语义：留档先于基线推进）。"""
+    gate = _SCRIPTS / "gate_node.sh"
+    proc = subprocess.run(["bash", "-n", str(gate)],
+                          capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    text = gate.read_text(encoding="utf-8")
+    i_verify = text.index("deploy_scripts.sh\" --verify")
+    i_archive = text.index("archive_round_shadow.py")
+    i_promote = text.index("promote_incumbent.py")
+    assert i_verify < i_archive < i_promote
+    # 意外崩溃不阻断 gate（挂点自带 || 兜底，stderr 可见）
+    assert 'echo "archive_round_shadow failed (non-zero; see stderr)" >&2' \
+        in text
+
+
+# ── C2 (2026-09-07): pareto baseline anchor ───────────────────────────────────
+
+
+def test_pareto_baseline_anchor_gap_and_metric_basis(tmp_path: Path):
+    """C2 选项 b：gap basis（任一 variant gap 非空）→ 锚点 y=0；全体 metric
+    basis → 锚点 y=基线曲线末行 metric；曲线缺失 → y=None（禁退化成 0 谎报）；
+    无 anchor → 行数不变；重复调用 → 仍只 1 条 baseline 行（幂等）。"""
+    art = tmp_path / "art"
+    (art / "base").mkdir(parents=True)
+    (art / "base" / "origin_anchor.json").write_text(json.dumps(
+        {"baseline_makespan_cycles": 1000}), encoding="utf-8")
+    (art / "baseline").mkdir()
+    (art / "baseline" / "baseline_metrics.jsonl").write_text(
+        '{"epoch": 1, "metric": 0.40}\n{"epoch": 2, "metric": 0.50}\n',
+        encoding="utf-8")
+    # gap basis：r1-01 gap 非空
+    _po_variant(art, "r1-01",
+                shard={"vid": "r1-01", "status": "success", "gap": 0.02,
+                       "metric": 0.38},
+                verdict={"vid": "r1-01", "makespan_cycles": 800,
+                         "outcome": "latency_improved"})
+    rows = push_curves.collect_pareto(art)
+    points = {r["vid"]: r for r in rows}
+    assert points["baseline"]["x"] == 0
+    assert points["baseline"]["y"] == 0              # gap basis
+    assert points["baseline"]["color"] == "#0ea5e9"
+    assert sum(1 for r in rows if r["vid"] == "baseline") == 1  # 幂等：仅 1 条
+    # 重复调用仍只 1 条
+    rows_again = push_curves.collect_pareto(art)
+    assert sum(1 for r in rows_again if r["vid"] == "baseline") == 1
+
+    # metric basis：全体 gap=None → y = 基线曲线末行 metric（0.50）
+    art2 = tmp_path / "art2"
+    (art2 / "base").mkdir(parents=True)
+    (art2 / "base" / "origin_anchor.json").write_text(json.dumps(
+        {"baseline_makespan_cycles": 1000}), encoding="utf-8")
+    (art2 / "baseline").mkdir()
+    (art2 / "baseline" / "baseline_metrics.jsonl").write_text(
+        '{"epoch": 1, "metric": 0.40}\n{"epoch": 2, "metric": 0.50}\n',
+        encoding="utf-8")
+    _po_variant(art2, "r1-01",
+                shard={"vid": "r1-01", "status": "in-flight", "gap": None,
+                       "metric": 0.45},
+                verdict={"vid": "r1-01", "makespan_cycles": 900,
+                         "outcome": "latency_improved"})
+    points2 = {r["vid"]: r for r in push_curves.collect_pareto(art2)}
+    assert points2["baseline"]["y"] == 0.50          # 末行 metric（同族 loader）
+
+    # 曲线缺失 → y=None（占位披露，不谎报 0）
+    art3 = tmp_path / "art3"
+    (art3 / "base").mkdir(parents=True)
+    (art3 / "base" / "origin_anchor.json").write_text(json.dumps(
+        {"baseline_makespan_cycles": 1000}), encoding="utf-8")
+    _po_variant(art3, "r1-01",
+                shard={"vid": "r1-01", "status": "in-flight", "gap": None,
+                       "metric": 0.45},
+                verdict={"vid": "r1-01", "makespan_cycles": 900,
+                         "outcome": "latency_improved"})
+    points3 = {r["vid"]: r for r in push_curves.collect_pareto(art3)}
+    assert points3["baseline"]["y"] is None
+
+    # 无 anchor → 行为与现状一致（空表，不加锚点）
+    art4 = tmp_path / "art4"
+    art4.mkdir()
+    assert push_curves.collect_pareto(art4) == []
+
+
+def test_pareto_baseline_anchor_caption_disclosure(tmp_path: Path):
+    """C2：caption 逐字追加 mixed-basis 披露句（锚点 y 的两种读法）。"""
+    art = _po_ws(tmp_path)
+    (art / "base").mkdir()
+    (art / "base" / "origin_anchor.json").write_text(json.dumps(
+        {"baseline_makespan_cycles": 1000}), encoding="utf-8")
+    _po_variant(art, "r1-01",
+                shard={"vid": "r1-01", "status": "success", "gap": 0.02},
+                verdict={"vid": "r1-01", "makespan_cycles": 800,
+                         "outcome": "latency_improved"})
+    sock = tmp_path / "chart.sock"
+    thread, messages = _chart_server(sock, replies=2)   # line + pareto
+    proc = _push(art, sock)
+    assert proc.returncode == 0, proc.stderr
+    thread.join(timeout=10)
+    pareto = {m["payload"]["chart_type"]: m["payload"]
+              for m in messages}["pareto"]
+    assert ("the baseline anchor (x=0) reads y=0 on the gap basis "
+            "(baseline gap is 0 by definition) or the baseline's latest "
+            "metric on the metric basis") in pareto["caption"]
+
+
+# ── C3 (2026-09-07): docs content channel + per-run push state ────────────────
+
+
+def _docs_ws(tmp_path: Path) -> Path:
+    """最小 docs 工作区：基线三文档白名单齐 + rounds 无（控制行集）。"""
+    art = tmp_path / "art"
+    (art / "baseline").mkdir(parents=True)
+    for rel in ("baseline/business_logic.md", "base/information_analysis.md",
+                "base/profile/mfu_bottleneck_report.md"):
+        target = art / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"body of {rel}\n", encoding="utf-8")
+    return art
+
+
+def test_docs_content_first_push_touch_and_repush(tmp_path: Path):
+    """C3 真值表：首推全量带 content；二推（无变更）content 全空；touch 一份后
+    三推仅该份带 content（mtime+size 双键变更判定）。"""
+    art = _docs_ws(tmp_path)
+    sock = tmp_path / "chart.sock"
+
+    thread, messages = _chart_server(sock, replies=1)   # docs only（无曲线）
+    assert _push(art, sock, "--docs", run_id="run-c3").returncode == 0
+    thread.join(timeout=10)
+    first = {m["payload"]["chart_type"]: m["payload"]
+             for m in messages}["table"]
+    rows1 = {r["path"]: r for r in first["data"]}
+    assert all(r["content"] == f"body of {p}\n"
+               for p, r in rows1.items())               # 首推全量
+    assert all(r["content_omitted"] == "" for r in rows1.values())
+    state_path = art / ".docs_push_state.run-c3.json"
+    assert set(json.loads(state_path.read_text(encoding="utf-8"))) == set(rows1)
+
+    # 二推：无变更 → content 全空 + 无 omitted（走前端合并）
+    thread, messages = _chart_server(sock, replies=1)
+    assert _push(art, sock, "--docs", run_id="run-c3").returncode == 0
+    thread.join(timeout=10)
+    second = {m["payload"]["chart_type"]: m["payload"]
+              for m in messages}["table"]
+    rows2 = {r["path"]: r for r in second["data"]}
+    assert all(r["content"] == "" and r["content_omitted"] == ""
+               for r in rows2.values())
+
+    # 三推：touch 一份（新 mtime+size）→ 仅该份带 content
+    target = art / "baseline" / "business_logic.md"
+    target.write_text("body of baseline/business_logic.md\nTOUCHED\n",
+                      encoding="utf-8")
+    os.utime(target, (time.time() + 5, time.time() + 5))   # mtime 必变
+    thread, messages = _chart_server(sock, replies=1)
+    assert _push(art, sock, "--docs", run_id="run-c3").returncode == 0
+    thread.join(timeout=10)
+    third = {m["payload"]["chart_type"]: m["payload"]
+             for m in messages}["table"]
+    rows3 = {r["path"]: r for r in third["data"]}
+    assert rows3["baseline/business_logic.md"]["content"].endswith("TOUCHED\n")
+    assert all(r["content"] == ""
+               for p, r in rows3.items() if p != "baseline/business_logic.md")
+
+
+def test_docs_content_oversize_doc_omitted_but_in_state(tmp_path: Path):
+    """C3：>256KB 文档 → content 空 + omitted 标注，**且入 state**（重试无益）；
+    二推仍标 omitted（前端不误判 legacy 回退 fetch）。"""
+    art = _docs_ws(tmp_path)
+    big = art / "base" / "information_analysis.md"
+    big.write_text("超" * ((256 * 1024) // 3 + 10), encoding="utf-8")
+    assert big.stat().st_size > push_curves.MAX_DOC_CONTENT_BYTES
+    sock = tmp_path / "chart.sock"
+    for _ in range(2):
+        thread, messages = _chart_server(sock, replies=1)
+        proc = _push(art, sock, "--docs", run_id="run-big")
+        assert proc.returncode == 0, proc.stderr
+        thread.join(timeout=10)
+        docs = {m["payload"]["chart_type"]: m["payload"]
+                for m in messages}["table"]
+        rows = {r["path"]: r for r in docs["data"]}
+        row = rows["base/information_analysis.md"]
+        assert row["content"] == ""
+        assert row["content_omitted"] == "true"         # 两推均 omitted
+        assert "bytes, content omitted" in proc.stderr  # stderr 披露在场
+    state = json.loads((art / ".docs_push_state.run-big.json")
+                       .read_text(encoding="utf-8"))
+    assert "base/information_analysis.md" in state      # 入 state：不再重试
+
+
+def test_docs_content_budget_truncation_not_in_state(tmp_path: Path):
+    """C3：聚合预算截断行 → omitted 标注 + **不入 state**（下轮预算空闲重试
+    补齐）——与 size>MAX 的「入 state」形成对照。"""
+    art = tmp_path / "art"
+    (art / "baseline").mkdir(parents=True)
+    # 7 份各 ~250KB（≤256KB 单文档上限）：前 5 份填满 1.5MB，第 6/7 份截断
+    per_doc = "x" * 250_000
+    for i in range(1, 8):
+        target = art / "variants" / f"r1-0{i}" / "assessment.md"
+        target.parent.mkdir(parents=True)
+        target.write_text(per_doc + f"\n#{i}\n", encoding="utf-8")
+        (art / "variants" / f"r1-0{i}" / "ledger_entry.json").write_text(
+            json.dumps({"vid": f"r1-0{i}", "status": "in-flight"}),
+            encoding="utf-8")
+    sock = tmp_path / "chart.sock"
+    thread, messages = _chart_server(sock, replies=1)   # docs only（无曲线）
+    proc = _push(art, sock, "--docs", run_id="run-budget")
+    assert proc.returncode == 0, proc.stderr
+    thread.join(timeout=10)
+    docs = {m["payload"]["chart_type"]: m["payload"]
+            for m in messages}["table"]
+    rows = {r["path"]: r for r in docs["data"]}
+    carried = [p for p, r in rows.items() if r["content"] != ""]
+    truncated = [p for p, r in rows.items() if r["content_omitted"] == "true"]
+    assert len(carried) == 5                             # 250KB×5 ≈ 1.25MB
+    assert len(truncated) == 2
+    assert all(r["content"] == "" for p, r in rows.items()
+               if p in truncated)
+    assert any("budget" in line and any(t in line for t in truncated)
+               for line in proc.stderr.splitlines())     # 每截断行一条 stderr
+    state = json.loads((art / ".docs_push_state.run-budget.json")
+                       .read_text(encoding="utf-8"))
+    assert set(state) == set(carried)                    # 截断行不入 state
+    # 二推：预算空闲（未变行不再占额）→ 截断行补齐 content
+    thread, messages = _chart_server(sock, replies=1)
+    proc = _push(art, sock, "--docs", run_id="run-budget")
+    assert proc.returncode == 0, proc.stderr
+    thread.join(timeout=10)
+    docs2 = {m["payload"]["chart_type"]: m["payload"]
+             for m in messages}["table"]
+    rows2 = {r["path"]: r for r in docs2["data"]}
+    assert all(rows2[p]["content"].startswith(per_doc[:100])
+               for p in truncated)                       # 重试补齐
+    state2 = json.loads((art / ".docs_push_state.run-budget.json")
+                        .read_text(encoding="utf-8"))
+    assert set(state2) == set(rows2)                     # 全量入 state
+
+
+def test_docs_content_send_failure_leaves_no_state(tmp_path: Path):
+    """C3：socket 不可达（fail-soft 路径）→ state 未写入 + stderr 有行——
+    「首推」定义为 state 为空时的第一次**成功**推送。"""
+    art = _docs_ws(tmp_path)
+    sock = tmp_path / "chart.sock"          # 无 server 监听 → connect 失败
+    proc = _push(art, sock, "--docs", run_id="run-fail")
+    assert proc.returncode == 0             # fail-soft：恒 exit 0
+    assert "push failed" in proc.stderr
+    assert not (art / ".docs_push_state.run-fail.json").exists()
+    # 修复通道后重推：state 仍为空 → 全量带 content（首推语义）
+    thread, messages = _chart_server(sock, replies=1)
+    assert _push(art, sock, "--docs", run_id="run-fail").returncode == 0
+    thread.join(timeout=10)
+    docs = {m["payload"]["chart_type"]: m["payload"]
+            for m in messages}["table"]
+    assert all(r["content"] != "" for r in docs["data"])
+    assert (art / ".docs_push_state.run-fail.json").is_file()
+
+
+def test_docs_content_state_corrupt_full_repush(tmp_path: Path):
+    """C3：state 文件损坏 → 视为空 dict 全量重推 + stderr 一行，不崩。"""
+    art = _docs_ws(tmp_path)
+    state_path = art / ".docs_push_state.run-corrupt.json"
+    state_path.write_text("{torn json", encoding="utf-8")
+    sock = tmp_path / "chart.sock"
+    thread, messages = _chart_server(sock, replies=1)
+    proc = _push(art, sock, "--docs", run_id="run-corrupt")
+    assert proc.returncode == 0, proc.stderr
+    thread.join(timeout=10)
+    assert "docs push state unreadable" in proc.stderr
+    docs = {m["payload"]["chart_type"]: m["payload"]
+            for m in messages}["table"]
+    assert all(r["content"] != "" for r in docs["data"])  # 全量重推
+    # 损坏 state 被成功推送后的写回覆盖为合法 JSON
+    assert set(json.loads(state_path.read_text(encoding="utf-8"))) == \
+        {r["path"] for r in docs["data"]}
+
+
+def test_docs_content_cjk_manifest_under_2mb_envelope(tmp_path: Path):
+    """C3 + _send 编码：7 份各 ~214KB 的中文文档（单份 ≤256KB、合计贴近但
+    不超 1.5MB utf-8）→ ``ensure_ascii=False`` 序列化整包 < 2MB、单次发送成功、
+    行 content 非空且可被 ``json.loads`` 还原。（单份 1.5MB 文档必被 256KB
+    上限截断 → 假绿；ASCII 大文档同理错位——禁用。）"""
+    art = tmp_path / "art"
+    (art / "baseline").mkdir(parents=True)
+    char = "训"
+    per_chars = 214_000 // 3                       # 214,000 bytes utf-8 / 份
+    doc_body = char * per_chars
+    assert len(doc_body.encode("utf-8")) == per_chars * 3
+    for i in range(1, 8):                          # 7 × 214,000 = 1,498,000
+        target = art / "variants" / f"r1-0{i}" / "assessment.md"
+        target.parent.mkdir(parents=True)
+        target.write_text(doc_body, encoding="utf-8")
+        (art / "variants" / f"r1-0{i}" / "ledger_entry.json").write_text(
+            json.dumps({"vid": f"r1-0{i}", "status": "in-flight"}),
+            encoding="utf-8")
+    assert 7 * len(doc_body.encode("utf-8")) <= push_curves.MAX_MANIFEST_CONTENT_BYTES
+    sock = tmp_path / "chart.sock"
+    thread, messages = _chart_server(sock, replies=1)   # docs only（无曲线）
+    proc = _push(art, sock, "--docs", run_id="run-cjk")
+    assert proc.returncode == 0, proc.stderr
+    thread.join(timeout=10)
+    assert len(messages) == 1                       # docs 一次发送成功（无曲线）
+    docs_msg = next(m for m in messages
+                    if m["payload"]["chart_type"] == "table")
+    rows = docs_msg["payload"]["data"]
+    assert len(rows) == 7 and all(r["content"] == doc_body for r in rows)
+    # json.loads 已在 server stub 还原（messages 本身即 parse 产物）；
+    # 再断言两种序列化的字节量：raw CJK 过线、\\uXXXX 逃生会爆线
+    wire = json.dumps(docs_msg, ensure_ascii=False).encode("utf-8")
+    assert len(wire) < 2_000_000
+    assert len(json.dumps(docs_msg).encode("utf-8")) > 2_000_000
+
+
+def test_docs_content_run_id_unset_full_content_no_state(tmp_path: Path):
+    """C3（state 作用域 R-2）：``ORCA_RUN_ID`` 未设（脱离 run 手跑）→ 视为空
+    state、全量带 content、**不入盘**（$ART 无任何 state 文件）。"""
+    art = _docs_ws(tmp_path)
+    sock = tmp_path / "chart.sock"
+    thread, messages = _chart_server(sock, replies=1)
+    proc = _push(art, sock, "--docs")          # 不传 run_id
+    assert proc.returncode == 0, proc.stderr
+    thread.join(timeout=10)
+    docs = {m["payload"]["chart_type"]: m["payload"]
+            for m in messages}["table"]
+    rows = {r["path"]: r for r in docs["data"]}
+    assert all(r["content"] != "" for r in rows.values())   # 全量（空 state）
+    assert all(r["content_omitted"] == "" for r in rows.values())
+    assert not list(art.glob(".docs_push_state.*.json"))    # 不入盘
+
+
+def test_docs_content_unreadable_doc_stays_contentless(tmp_path: Path):
+    """C3（R-12）：文档读取 decode 失败 → content 空 + stderr 一行 + 按无内容行
+    处理（无 omitted 标注，走前端合并/回退），且**不入 state**（下次重试）。"""
+    art = _docs_ws(tmp_path)
+    # 非 utf-8 文本（过 is_file 守卫、read_text utf-8 必炸）
+    (art / "base" / "information_analysis.md").write_bytes(
+        "中文".encode("gbk"))
+    sock = tmp_path / "chart.sock"
+    thread, messages = _chart_server(sock, replies=1)
+    proc = _push(art, sock, "--docs", run_id="run-badread")
+    assert proc.returncode == 0, proc.stderr
+    thread.join(timeout=10)
+    assert "doc read failed" in proc.stderr
+    docs = {m["payload"]["chart_type"]: m["payload"]
+            for m in messages}["table"]
+    rows = {r["path"]: r for r in docs["data"]}
+    bad = rows["base/information_analysis.md"]
+    assert bad["content"] == ""
+    assert bad["content_omitted"] == ""        # 无内容行语义（非 omitted）
+    assert rows["baseline/business_logic.md"]["content"] != ""  # 其余照常
+    state = json.loads((art / ".docs_push_state.run-badread.json")
+                       .read_text(encoding="utf-8"))
+    assert "base/information_analysis.md" not in state        # 不入 state
+
+
+def test_archive_round_shadow_bad_proposals_shapes(tmp_path: Path):
+    """C1 edge：proposals.json 不可解析 / 顶层非 dict / proposals 非 list →
+    error 文件（键 __round__）+ exit 0（三种坏形态逐一）。"""
+    for name, raw in (
+        ("torn", '{"proposals": [trorn'),
+        ("top-list", '[{"vid": "r1-01"}]'),
+        ("proposals-dict", '{"round": 3, "proposals": {"vid": "r1-01"}}'),
+    ):
+        art = tmp_path / f"art-{name}"
+        (art / "rounds" / "003").mkdir(parents=True)
+        (art / "rounds" / "003" / "proposals.json").write_text(
+            raw, encoding="utf-8")
+        proc = _archive(art)
+        assert proc.returncode == 0, (name, proc.stderr)
+        assert "proposals unreadable" in proc.stderr, name
+        err = json.loads((art / "rounds" / "003" / "shadow_archive_error.json")
+                         .read_text(encoding="utf-8"))
+        assert set(err) == {"__round__"}, name
+
+
+def test_archive_round_shadow_error_file_merges_across_calls(tmp_path: Path):
+    """C1 edge：error 文件跨调用**合并**——run1 缺 r2 源、run2 缺 r1 源（r2 已
+    补齐）→ 两轮失败各有披露、互不清除；run3 全成功才整体删除。"""
+    art = tmp_path / "art"
+    art.mkdir()
+    _seed_round3(art, ["r1-01", "r2-01"])
+    _seed_shadow(art, "r1-01")                       # r2-01 源缺失
+    assert _archive(art).returncode == 0
+    err1 = json.loads((art / "rounds" / "003" / "shadow_archive_error.json")
+                      .read_text(encoding="utf-8"))
+    assert set(err1) == {"r2-01"}
+    # run2：补 r2 源、删 r1 源 → 新失败（r1）与旧披露（r2 已成功但历史条目保留）
+    _seed_shadow(art, "r2-01")
+    shutil.rmtree(art / "variants" / "r1-01" / "shadow")
+    assert _archive(art).returncode == 0
+    err2 = json.loads((art / "rounds" / "003" / "shadow_archive_error.json")
+                      .read_text(encoding="utf-8"))
+    assert set(err2) == {"r2-01", "r1-01"}           # 合并不清旧
+    # run3：全成功 → 整体删除（stale 披露不跨重放残留）
+    _seed_shadow(art, "r1-01")
+    assert _archive(art).returncode == 0
+    assert not (art / "rounds" / "003" / "shadow_archive_error.json").exists()

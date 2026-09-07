@@ -13,14 +13,19 @@ label+title on every push -> the front end replaces the previous chart):
     latency reduction vs the baseline makespan in % (negative = slower), y =
     the final gap (or the latest metric while no gap exists yet), one
     status-colored point per variant; a latency_improved variant that has not
-    started training keeps y=null (disclosed in the caption).
+    started training keeps y=null (disclosed in the caption). C2: a distinct
+    ``baseline`` anchor point (x=0, dedicated color) pins the origin whenever
+    the baseline makespan anchor resolves.
   * table  ``prof-opt/docs``    — the analysis-docs manifest (§10.4, ``--docs``):
     rows of vid / doc / status / path relative to the artifacts root (+
-    updated_at). Paths only, NEVER the document bodies; the whitelist is the
-    run's own artifacts tree (every listed path is a constructed constant,
-    never a discovered absolute path). Trigger points: the proposal node's
-    latency_improved emit (wired) and the report node's final pass (wired with
-    the report node's v6 finalization).
+    updated_at) plus the optional content channel (C3): rows also carry
+    ``content`` (the document body, or "" when not carried this push) and
+    ``content_omitted`` ("true" when the body was too large or the aggregate
+    budget was spent). The whitelist is the run's own artifacts tree (every
+    listed path is a constructed constant, never a discovered absolute path).
+    Trigger points: the baseline chain's first push (run_baseline_chain.sh)
+    and the report node's final pass (``--title "(final)"``) — the two
+    existing ``--docs`` call sites; the push frequency is unchanged.
 
 Fail-soft by contract — this sidecar must never stall or fail a worker:
   * ``ORCA_CHART_SOCK`` unset           -> silent exit 0;
@@ -41,7 +46,8 @@ Usage:
 ``--title`` is a TITLE SUFFIX (default empty) applied to every chart; the
 report's finalize push passes ``(final)`` so the terminal charts are visibly
 distinct from the live ones. ``--docs`` additionally pushes the analysis-docs
-manifest (§10.4 trigger: propose latency_improved emit / report final).
+manifest with the content channel (triggers: the baseline chain's first push
+and the report node's final pass — the only two call sites).
 """
 from __future__ import annotations
 
@@ -80,6 +86,21 @@ _STATUS_COLORS = {
     "probe_insufficient": "#a855f7",
 }
 _NEUTRAL_COLOR = "#64748b"
+# C2 baseline anchor color: sky-500 (#0ea5e9) — deliberately distinct from
+# every _STATUS_COLORS entry AND the neutral gray above, so the origin
+# reference reads as its own series instead of masquerading as a variant
+# state (the closest neighbors, in-flight #3b82f6 / probe_insufficient
+# #a855f7, are far enough in hue to stay distinguishable at plot size).
+_BASELINE_COLOR = "#0ea5e9"
+
+# C3 content-channel budgets, measured in utf-8 BYTES of the raw content
+# BEFORE serialization. The aggregate cap keeps 0.5MB of headroom under the
+# 2MB chart-socket line limit so the JSON envelope (field names + the ≈5%
+# escape growth of quotes/backslashes/newlines under ensure_ascii=False)
+# always fits; residual escapes are covered by that headroom, not re-metered
+# after serialization.
+MAX_DOC_CONTENT_BYTES = 256 * 1024
+MAX_MANIFEST_CONTENT_BYTES = 1_500_000
 
 # §10.4 manifest row set — the whitelist IS this table of constructed
 # artifacts-relative constants; nothing discovered outside it is ever listed.
@@ -235,27 +256,52 @@ def collect_pareto(artifacts: Path) -> list[dict[str, Any]]:
     """§10.2 one point per variant: x = latency reduction vs baseline (%,
     negative = slower), y = the final gap (or the latest metric while no gap
     exists yet; null = the 达线未训 placeholder), status-colored. Variants
-    without a measured makespan have no x and are not plottable."""
+    without a measured makespan have no x and are not plottable.
+
+    C2 baseline anchor: whenever the origin anchor resolves, one extra
+    ``vid="baseline"`` row pins the origin (x=0) so "relative to the
+    baseline" has a visible reference point at every stage. A missing anchor
+    keeps the chart exactly as it was (no fabricated origin)."""
     base_ms = _baseline_makespan(artifacts)
     if base_ms is None:
         return []
     rows: list[dict[str, Any]] = []
+    any_gap_basis = False
     variants_dir = artifacts / "variants"
-    if not variants_dir.is_dir():
-        return rows
-    for vdir in sorted(variants_dir.iterdir()):
-        if not vdir.is_dir():
-            continue
-        state = _variant_state(vdir)
-        if state["makespan"] is None:
-            continue
-        x = round((1.0 - state["makespan"] / base_ms) * 100.0, 4)
-        y = state["gap"] if state["gap"] is not None else state["metric"]
-        rows.append({"vid": state["vid"], "x": x, "y": y,
-                     "status": state["status"],
-                     "color": _STATUS_COLORS.get(state["status"],
-                                                 _NEUTRAL_COLOR)})
+    if variants_dir.is_dir():
+        for vdir in sorted(variants_dir.iterdir()):
+            if not vdir.is_dir():
+                continue
+            state = _variant_state(vdir)
+            if state["makespan"] is None:
+                continue
+            x = round((1.0 - state["makespan"] / base_ms) * 100.0, 4)
+            y = state["gap"] if state["gap"] is not None else state["metric"]
+            any_gap_basis = any_gap_basis or state["gap"] is not None
+            rows.append({"vid": state["vid"], "x": x, "y": y,
+                         "status": state["status"],
+                         "color": _STATUS_COLORS.get(state["status"],
+                                                     _NEUTRAL_COLOR)})
+    if not any(r["vid"] == "baseline" for r in rows):  # idempotent anchor
+        rows.append(_baseline_anchor_row(artifacts, any_gap_basis))
     return rows
+
+
+def _baseline_anchor_row(artifacts: Path, any_gap_basis: bool) -> dict[str, Any]:
+    """C2 the baseline origin reference row (x=0). y follows the variant
+    rows' basis (option b): 0 when any variant plots a gap (the baseline gap
+    is 0 by definition — dimension-consistent), else the baseline's latest
+    metric from the same curve loader the variant y values use. A missing or
+    empty baseline curve keeps y=null (disclosed in the caption) — never a
+    fabricated 0."""
+    if any_gap_basis:
+        y: float | None = 0
+    else:
+        curve = _load_curve(artifacts / "baseline" / "baseline_metrics.jsonl",
+                            "baseline")
+        y = curve[-1]["metric"] if curve else None
+    return {"vid": "baseline", "x": 0, "y": y, "status": "baseline",
+            "color": _BASELINE_COLOR}
 
 
 def collect_docs(artifacts: Path) -> list[dict[str, Any]]:
@@ -317,11 +363,149 @@ def collect_docs(artifacts: Path) -> list[dict[str, Any]]:
     return rows
 
 
+# ── C3 content channel state (per-run, in the shared $ART root) ─────────────
+
+
+def _docs_state_path(artifacts: Path) -> Path | None:
+    """Per-run state file ``$ART/.docs_push_state.<ORCA_RUN_ID>.json``.
+
+    ``$ART`` is project-scoped and shared across runs — the per-run suffix
+    keeps one run's push state from polluting another's. ``ORCA_RUN_ID``
+    unset (manual run outside an Orca run) → None: no state read, every push
+    carries full content, nothing persisted."""
+    run_id = os.environ.get("ORCA_RUN_ID", "")
+    if not run_id:
+        return None
+    return artifacts / f".docs_push_state.{run_id}.json"
+
+
+def _load_docs_state(path: Path | None) -> dict[str, dict[str, Any]]:
+    """Read the push state ``relpath -> {mtime, size}``.
+
+    No file yet → {} (the normal first push — silent). Unreadable/corrupt →
+    {} + one stderr line (full re-push this time, never a crash). Malformed
+    entries are dropped (treated as not-pushed)."""
+    if path is None:
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError) as exc:
+        sys.stderr.write(f"[push_curves] docs push state unreadable "
+                         f"(full re-push): {path}: {exc}\n")
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {rel: entry for rel, entry in data.items()
+            if isinstance(rel, str) and isinstance(entry, dict)
+            and isinstance(entry.get("mtime"), (int, float))
+            and isinstance(entry.get("size"), int)}
+
+
+def _write_docs_state(path: Path,
+                      updates: dict[str, dict[str, Any]]) -> None:
+    """Merge-write the push state, tmp + ``os.replace`` atomic.
+
+    Existing entries survive (stale relpaths are harmless — rows only ever
+    come from the whitelist's live files); ``updates`` win. No locking: the
+    three ``--docs`` trigger points sit on serial DAG nodes, there is no
+    concurrent-writer surface."""
+    data: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            loaded = None
+        if isinstance(loaded, dict):
+            data = loaded
+    data.update(updates)
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    try:
+        tmp.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        sys.stderr.write(f"[push_curves] docs push state write failed "
+                         f"(ignored): {exc}\n")
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _fill_docs_content(artifacts: Path, rows: list[dict[str, Any]],
+                       state: dict[str, dict[str, Any]]
+                       ) -> dict[str, dict[str, Any]]:
+    """C3 fill ``content`` / ``content_omitted`` on manifest rows, in
+    whitelist order, under the aggregate budget. Three-state truth table:
+
+      * content carried      ⇔ needs push (absent from state, or mtime/size
+        changed) AND size <= MAX_DOC_CONTENT_BYTES AND within budget;
+      * content_omitted=true ⇔ size > MAX_DOC_CONTENT_BYTES (state-free —
+        judged fresh every push) OR budget-truncated this push;
+      * empty + no omission  ⇔ unchanged row (the front end merges it from
+        an earlier push in the same label's event history).
+
+    Returns the state write-back updates: carried rows ∪ size-omitted rows
+    (retrying either is useless). Budget-truncated rows are NOT included —
+    the next trigger retries them once the budget is free. Rows whose read
+    fails (OSError/decode) stay contentless and out of the state (stderr
+    line; the front end's merge/fallback path covers them)."""
+    updates: dict[str, dict[str, Any]] = {}
+    total = 0
+    for row in rows:
+        path = artifacts / row["path"]
+        try:
+            st = path.stat()
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            sys.stderr.write(f"[push_curves] doc read failed (row stays "
+                             f"contentless): {row['path']}: {exc}\n")
+            row["content"] = ""
+            row["content_omitted"] = ""
+            continue
+        if st.st_size > MAX_DOC_CONTENT_BYTES:
+            sys.stderr.write(f"[push_curves] doc over "
+                             f"{MAX_DOC_CONTENT_BYTES} bytes, content "
+                             f"omitted: {row['path']}\n")
+            row["content"] = ""
+            row["content_omitted"] = "true"
+            updates[row["path"]] = {"mtime": st.st_mtime, "size": st.st_size}
+            continue
+        prev = state.get(row["path"])
+        needs_push = not (prev is not None
+                          and prev.get("mtime") == st.st_mtime
+                          and prev.get("size") == st.st_size)
+        if not needs_push:
+            row["content"] = ""
+            row["content_omitted"] = ""
+            continue
+        nbytes = len(text.encode("utf-8"))
+        if total + nbytes > MAX_MANIFEST_CONTENT_BYTES:
+            sys.stderr.write(f"[push_curves] manifest content budget "
+                             f"exceeded, content omitted this push: "
+                             f"{row['path']}\n")
+            row["content"] = ""
+            row["content_omitted"] = "true"
+            continue  # NOT recorded — retried on the next trigger
+        total += nbytes
+        row["content"] = text
+        row["content_omitted"] = ""
+        updates[row["path"]] = {"mtime": st.st_mtime, "size": st.st_size}
+    return updates
+
+
 def _send(sock_path: str, node: str, session_id: str,
           payload: dict[str, Any]) -> None:
-    """One socket push. Raises on any failure (caller decides fail-soft)."""
+    """One socket push. Raises on any failure (caller decides fail-soft).
+
+    ``ensure_ascii=False`` (C3): the docs manifest now carries CJK document
+    bodies — the default ascii escaping would inflate them 2-3x in \\uXXXX
+    form and blow the 2MB line limit for an all-CJK payload. The transport
+    is utf-8 line decoding + ``json.loads`` (chart ingestor), which takes
+    raw CJK natively."""
     msg = {"node": node, "session_id": session_id, "payload": payload}
-    encoded = (json.dumps(msg) + "\n").encode("utf-8")
+    encoded = (json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
         s.settimeout(_SOCK_TIMEOUT_SECONDS)  # connect + send + ack, each <= 5s
         s.connect(sock_path)
@@ -363,9 +547,9 @@ def main() -> int:
                          "(the report finalize push passes '(final)'); "
                          "default: no suffix")
     ap.add_argument("--docs", action="store_true",
-                    help="also push the analysis-docs manifest table "
-                         "(§10.4 trigger: propose latency_improved emit / report "
-                         "final)")
+                    help="also push the analysis-docs manifest table with the "
+                         "content channel (triggers: baseline chain first "
+                         "push / report final push)")
     ns = ap.parse_args()
 
     sock_path = os.environ.get("ORCA_CHART_SOCK", "")
@@ -419,19 +603,30 @@ def main() -> int:
             "caption": "y=null = no measurable outcome yet (达线未训占位, or "
                        "trained but still awaiting the baseline anchor); y "
                        "falls back to the latest metric while no gap exists "
-                       "(lower-is-better holds for gap only)",
+                       "(lower-is-better holds for gap only); "
+                       "the baseline anchor (x=0) reads y=0 on the gap basis "
+                       "(baseline gap is 0 by definition) or the baseline's "
+                       "latest metric on the metric basis",
         })
 
-    # chart 3 — analysis-docs manifest (§10.4): paths only, never bodies
+    # chart 3 — analysis-docs manifest (§10.4) + content channel (C3):
+    # rows carry the doc body when it changed and fits; unchanged rows stay
+    # empty (the front end merges history), oversized/budget-truncated rows
+    # are flagged. State is written back ONLY after a successful send.
     if ns.docs:
         docs_rows = collect_docs(art)
         if docs_rows:
+            state_path = _docs_state_path(art)
+            state = _load_docs_state(state_path)
+            state_updates = _fill_docs_content(art, docs_rows, state)
             pushed["docs"] = _push_best_effort(sock_path, node, session_id, {
                 "chart_type": "table", "data": docs_rows,
                 "columns": ["vid", "doc", "status", "path", "updated_at"],
                 "label": _DOCS_LABEL, "title": _DOCS_TITLE + suffix,
                 "x": "", "y": "", "hue": "", "color": "", "value": "",
             })
+            if pushed["docs"] and state_path is not None and state_updates:
+                _write_docs_state(state_path, state_updates)
 
     print(json.dumps({"pushed": pushed, "rows": len(data),
                       "pareto_points": len(pareto_rows)}, sort_keys=True))

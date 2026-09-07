@@ -344,8 +344,8 @@ describe("W2-T3c 404/413 降级（web §6.2-2 后半）", () => {
   });
 });
 
-describe("W2-T2 RunDetailPage 挂载冒烟（plan W-P2 验收「渲染冒烟」）", () => {
-  test("charts 页签 → 面板挂图表区旁，ChartsView 同页渲染（零改）", async () => {
+describe("W2-T2 RunDetailPage 挂载冒烟（plan W-P2 + B4 页签重构）", () => {
+  test("「文档」页签独占面板；「图表」页签内无文档面板、ChartsView 照常（B4）", async () => {
     useWorkflowStore.setState({ loadStatus: "loaded", activeRunId: RUN_ID });
     useWorkflowStore.getState().processEvent(manifestEvent(fullRows()));
     render(
@@ -355,10 +355,117 @@ describe("W2-T2 RunDetailPage 挂载冒烟（plan W-P2 验收「渲染冒烟」�
         </Routes>
       </MemoryRouter>
     );
-    fireEvent.click(screen.getByTestId("tab-charts"));
-    // lazy 面板 + ChartsView 都挂载；清单分组可见（面板在图表区上方）
+    // B4：文档为独立页签（tab-docs），面板独占
+    fireEvent.click(screen.getByTestId("tab-docs"));
     expect(await screen.findByTestId("profopt-docs-panel")).toBeInTheDocument();
-    expect(screen.getByTestId("charts-view")).toBeInTheDocument();
     expect(screen.getByTestId("docs-group-baseline")).toBeInTheDocument();
+    // 图表页签：ChartsView 在、文档面板不在（不再同栏挤占）
+    fireEvent.click(screen.getByTestId("tab-charts"));
+    expect(await screen.findByTestId("charts-view")).toBeInTheDocument();
+    expect(screen.queryByTestId("profopt-docs-panel")).toBeNull();
+  });
+});
+
+// ── B4/C3（2026-09-07）：正文三态 + 跨推送合并 + huge 防御 ──────────────────────
+
+describe("B4/C3：正文三态（content 直渲 / omitted 提示 / legacy 回退）", () => {
+  test("带 content 行 → 预览渲染 content 原文，网络层零 fetch（异机可见）", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    setup([
+      {
+        vid: "baseline", doc: "business_logic.md", status: "ready",
+        path: "baseline/business_logic.md", content: "# 事件通道正文\n\nC3 直送。",
+      },
+    ]);
+    fireEvent.click(screen.getAllByTestId("doc-item")[0]);
+    expect(await screen.findByText("事件通道正文")).toBeInTheDocument();
+    // 意图：正文已随清单事件到达 → 不发任何请求（跨机同等体验的核心）
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("doc-loading")).toBeNull();
+  });
+
+  test("content_omitted=\"true\" → 显式提示「内容过大或本批未推送」，不 fetch（fail loud 不假试）", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    setup([
+      {
+        vid: "baseline", doc: "business_logic.md", status: "ready",
+        path: "baseline/business_logic.md", content: "", content_omitted: "true",
+      },
+    ]);
+    fireEvent.click(screen.getAllByTestId("doc-item")[0]);
+    const hint = await screen.findByTestId("doc-omitted");
+    expect(hint.textContent).toContain("内容过大或本批未推送，仅清单可读");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("两连推合并：第一推带 content、第二推同 path 行 content 空 → 渲染第一推内容、mock fetch 零调用", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    useWorkflowStore.setState({ loadStatus: "loaded", activeRunId: RUN_ID });
+    // 第一推（首推全量带 content）
+    useWorkflowStore.getState().processEvent(
+      manifestEvent(
+        [
+          {
+            vid: "baseline", doc: "business_logic.md", status: "ready",
+            path: "baseline/business_logic.md", content: "# 首推正文\n",
+          },
+        ],
+        "docs v1"
+      )
+    );
+    // 第二推（同 path 未变行 content 空 + 新 title → max-seq 胜）
+    useWorkflowStore.getState().processEvent(
+      manifestEvent(
+        [
+          {
+            vid: "baseline", doc: "business_logic.md", status: "ready",
+            path: "baseline/business_logic.md", content: "", content_omitted: "",
+          },
+        ],
+        "docs v2"
+      )
+    );
+    render(<ProfOptDocsPanel runId={RUN_ID} />);
+    fireEvent.click(screen.getAllByTestId("doc-item")[0]);
+    expect(await screen.findByText("首推正文")).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("json 行带 content → FileContentView 直渲（零 fetch，通道不限 md）", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    setup([
+      {
+        vid: "rules", doc: "accuracy_rules_snapshot.json", status: "active",
+        path: "base/accuracy_rules_snapshot.json",
+        content: '{"rules": []}',
+      },
+    ]);
+    fireEvent.click(screen.getAllByTestId("doc-item")[0]);
+    expect(await screen.findByTestId("file-content-view")).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("huge 未 loadFull 且 overview 目录含 docs chart → 既有 huge 提示分支（不显示「暂无清单」）（防御性用例）", () => {
+    useWorkflowStore.setState({
+      loadStatus: "loaded",
+      activeRunId: RUN_ID,
+      huge: true,
+      hugeFullyLoaded: false,
+      serverOverview: {
+        agents: [],
+        charts: [
+          { label: "prof-opt/docs", title: "prof-opt analysis docs", chart_type: "table" },
+        ],
+        cost_usd: 0,
+        run_status: "running",
+      },
+    });
+    render(<ProfOptDocsPanel runId={RUN_ID} />);
+    expect(screen.getByTestId("docs-huge-hint")).toBeInTheDocument();
+    expect(screen.queryByTestId("docs-empty")).toBeNull();
   });
 });

@@ -610,3 +610,53 @@ describe("workflow-store C3 — ev 索引 + takenEdgeKeys", () => {
     expect(() => fd.ev.all.push(makeEvent("agent_message", { seq: 99, node: "x" }))).toThrow();
   });
 });
+
+// ── B1（2026-09-07 #8）：node_started 收集 execSessions（R 徽标口径）───────────
+
+describe("workflow-store B1 — execSessions（节点自身执行 session 收集）", () => {
+  beforeEach(() => resetStore());
+
+  it("非空 string session_id 的 node_started 入列（多次执行各计一次）", () => {
+    useWorkflowStore.getState().loadFromEvents([
+      makeEvent("node_started", { seq: 1, node: "po_propose", session_id: "s-a" }),
+      makeEvent("node_completed", { seq: 2, node: "po_propose" }),
+      makeEvent("node_started", { seq: 3, node: "po_propose", session_id: "s-b" }),
+      makeEvent("node_started", { seq: 4, node: "po_propose", session_id: "s-c" }),
+    ]);
+    expect(useWorkflowStore.getState().nodes.po_propose.execSessions).toEqual([
+      "s-a",
+      "s-b",
+      "s-c",
+    ]);
+  });
+
+  it("重复 session_id 的 node_started（refold 重放）→ 去重仍计 1（幂等）", () => {
+    useWorkflowStore.getState().loadFromEvents([
+      makeEvent("node_started", { seq: 1, node: "n1", session_id: "s-a" }),
+      makeEvent("node_started", { seq: 2, node: "n1", session_id: "s-a" }),
+    ]);
+    expect(useWorkflowStore.getState().nodes.n1.execSessions).toEqual(["s-a"]);
+  });
+
+  it("null / 缺席 session_id 的 node_started 不入 execSessions（in-session 路径）", () => {
+    useWorkflowStore.getState().loadFromEvents([
+      makeEvent("node_started", { seq: 1, node: "n1", session_id: null }),
+      makeEvent("node_started", { seq: 2, node: "n2" }), // session_id 缺席
+    ]);
+    expect(useWorkflowStore.getState().nodes.n1.execSessions).toBeUndefined();
+    expect(useWorkflowStore.getState().nodes.n2.execSessions).toBeUndefined();
+  });
+
+  it("execSessions 存 NodeState；nodesIndex 口径不动（own session 仍计 conversation 会话）", () => {
+    useWorkflowStore.getState().loadFromEvents([
+      makeEvent("node_started", { seq: 1, node: "n1", session_id: "s-own" }),
+      makeEvent("agent_message", { seq: 2, node: "n1", session_id: "s-sub-1" }),
+    ]);
+    // B1 新口径：自身执行 session 收在 NodeState.execSessions（R 徽标数据源）
+    expect(useWorkflowStore.getState().nodes.n1.execSessions).toEqual(["s-own"]);
+    // nodesIndex 行为不动：node_started 本就在 CONVERSATION_TYPES → s-own 仍在
+    // sessions（「N subs 含 own session」是既有口径，SPEC §9 非目标明确不动）
+    const idx = useWorkflowStore.getState().nodesIndex.n1;
+    expect(idx.sessions).toEqual(["s-own", "s-sub-1"]);
+  });
+});

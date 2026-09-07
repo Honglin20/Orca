@@ -31,7 +31,11 @@ export interface AgentRow {
   reasoningTokens?: number;
   /** P3：子 agent session 数（不含 "main"；依赖 nodesIndex）。> 1 → UI 折叠子 session。 */
   sessionCount?: number;
-  /** P3：循环节点迭代号（= sessionCount；仅 Loop 组派生，selectAgentGroups 设）。 */
+  /** B1（2026-09-07 #8）：节点自身执行 session（node_started 收集；空 = in-session
+   * 老 tape 无 session_id）。Loop 组 iteration 优先取其长度（= 自身执行次数）。 */
+  execSessions?: string[];
+  /** P3：循环节点迭代号（仅 Loop 组派生，selectAgentGroups 设）。B1 起口径 =
+   * execSessions.length（无记录回退 sessionCount 旧派生）。 */
   iteration?: number;
 }
 
@@ -123,6 +127,7 @@ export function selectAgents(state: WorkflowState): AgentRow[] {
       outputTokens: ns?.outputTokens,
       reasoningTokens: ns?.reasoningTokens,
       sessionCount: subSessionCount > 0 ? subSessionCount : undefined,
+      execSessions: ns?.execSessions,
     };
   });
 }
@@ -143,8 +148,9 @@ export function selectAgents(state: WorkflowState): AgentRow[] {
 //     Loop  = [hypothesizer, engineer, structure_gate, evaluator, analyst, curator, viz_round]
 //     Finalize = [finalize, viz_finalize]
 //
-// **iteration**（P3 方案 5）：Loop 组 agent 设 iteration = sessionCount（UI 显示 R{N}，
-// 从 selectNodeSessions distinct session 数派生，依赖 P2 nodesIndex）。
+// **iteration**（P3 方案 5 + B1 2026-09-07 #8）：Loop 组 agent 设 iteration（UI 显示
+// R{N}）——B1 起优先 execSessions（节点自身执行次数），无记录回退 sessionCount 旧派生
+// （依赖 P2 nodesIndex）。
 export interface AgentGroup {
   /** "Setup" | "Loop" | "Finalize" | "Agents"（无 back-route fallback 单组）。 */
   group: string;
@@ -203,14 +209,20 @@ export function selectAgentGroups(state: WorkflowState): AgentGroup[] {
   const groups: AgentGroup[] = [];
   if (setup.length) groups.push({ group: "Setup", agents: setup });
   if (loop.length) {
-    // P3 方案 5：Loop 组 agent 派生 iteration = sessionCount（UI 显示 R{N}）
+    // B1（2026-09-07 #8）：iteration 口径 = 节点自身执行次数（execSessions）；
+    // 无记录（in-session 老 tape / huge overview）回退 sessionCount 旧派生
+    // （诚实降级，不显示 R0/Rundefined）。sessionCount（"N subs"）口径不变。
     groups.push({
       group: "Loop",
-      agents: loop.map((a) =>
-        a.iteration === undefined && a.sessionCount
-          ? { ...a, iteration: a.sessionCount }
-          : a
-      ),
+      agents: loop.map((a) => {
+        if (a.iteration !== undefined) return a;
+        const own = a.execSessions?.length ?? 0;
+        return own > 0
+          ? { ...a, iteration: own }
+          : a.sessionCount
+            ? { ...a, iteration: a.sessionCount }
+            : a;
+      }),
     });
   }
   if (finalize.length) groups.push({ group: "Finalize", agents: finalize });
@@ -601,6 +613,194 @@ function selectChartsFrom(
   return { groups: Array.from(groupMap.entries()).map(([group, entries]) => ({ group, entries })) };
 }
 
+// ── prof-opt 文档清单（B4/C3 2026-09-07）：DocRow / docGroupOf / parseDocManifest ──
+// 自 ProfOptDocsPanel.tsx 迁入（R-A：selectors 是唯一 view 输入，内容合并也在
+// selectors 层；**禁止反向 import 组件**——面板已 import selectors）。中文组名等
+// 展示层标签留组件（GROUP_ORDER）。
+
+/** 文档清单 chart 的 label（v6 §10.4 契约字面量）。 */
+export const DOCS_LABEL = "prof-opt/docs";
+
+/** 规则组唯一合法 path（S-9：规则面板数据源 = run 内只读快照）。 */
+const RULES_SNAPSHOT_PATH = "base/accuracy_rules_snapshot.json";
+
+/** 清单行（列名 = P4-T3 推送方 canonical 契约；updated_at 可选）。
+ * C3：新增可选 content / content_omitted（行是字段名 dict；legacy 行无这两字段
+ * ≡ 有字段但无内容——回退 fetch，有意设计）。前端判定统一 `=== "true"`。 */
+export interface DocRow {
+  vid: string;
+  doc: string;
+  status: string;
+  path: string;
+  updated_at?: string;
+  /** 事件通道正文（C3）；空串 = 本推未带（合并历史或回退 fetch）。 */
+  content?: string;
+  /** "true" = 内容过大或超聚合预算未推送（不 fetch，显式提示）。 */
+  content_omitted?: string;
+}
+
+/** 面板分组键（web §3.1 四组；渲染顺序与中文组名在组件 GROUP_ORDER）。 */
+export type DocGroupKey = "baseline" | "variants" | "rounds" | "rules";
+
+/** 行 → 分组（确定性派生，不依赖推送方额外字段）。 */
+export function docGroupOf(row: DocRow): DocGroupKey {
+  if (row.path === RULES_SNAPSHOT_PATH) return "rules";
+  if (row.path.startsWith("rounds/")) return "rounds";
+  if (
+    row.vid === "baseline" ||
+    row.path.startsWith("baseline/") ||
+    row.path.startsWith("base/")
+  ) {
+    return "baseline";
+  }
+  return "variants";
+}
+
+/** 清单 payload 解析：合法行 + 坏行计数 + payload 形状漂移标记（fail loud 披露）。 */
+export function parseDocManifest(payload: unknown): {
+  rows: DocRow[];
+  invalid: number;
+  /** payload 在场但缺 data 数组 → 整体形状漂移（INV-5 同口径：显形不静默空态）。 */
+  malformed: boolean;
+} {
+  const p = payload as { data?: unknown } | null;
+  if (!p) return { rows: [], invalid: 0, malformed: false };
+  if (!Array.isArray(p.data)) return { rows: [], invalid: 0, malformed: true };
+  const rows: DocRow[] = [];
+  let invalid = 0;
+  for (const raw of p.data) {
+    const r = raw as Record<string, unknown> | null;
+    if (!r || typeof r.path !== "string" || r.path.length === 0) {
+      invalid++;
+      continue;
+    }
+    const vid = typeof r.vid === "string" ? r.vid : "";
+    // 变体行必须有 vid（无 vid 渲染不出卡片归属，归坏行；基线/轮次/规则按 path 判组不依赖 vid）。
+    if (!vid && r.path.startsWith("variants/")) {
+      invalid++;
+      continue;
+    }
+    rows.push({
+      path: r.path,
+      vid,
+      doc: typeof r.doc === "string" ? r.doc : r.path,
+      status: typeof r.status === "string" ? r.status : "",
+      updated_at: typeof r.updated_at === "string" ? r.updated_at : undefined,
+      content: typeof r.content === "string" ? r.content : undefined,
+      content_omitted:
+        typeof r.content_omitted === "string" ? r.content_omitted : undefined,
+    });
+  }
+  return { rows, invalid, malformed: false };
+}
+
+/** selectDocRowsWithContent 输出（B4：面板唯一清单输入）。 */
+export interface DocRowsSelection {
+  rows: DocRow[];
+  invalid: number;
+  malformed: boolean;
+  /** huge 未 loadFull 且 overview 目录含 docs chart → 既有 placeholder 语义
+   *（面板显示 docs-huge-hint，**不得静默返空清单**退化成「暂无清单」）。 */
+  placeholder: boolean;
+  /** 无 docs 事件（面板显示 docs-empty）。 */
+  empty: boolean;
+}
+
+/**
+ * B4/C3（R-1）：max-seq 清单行 + 跨推送内容合并（state 版薄委托）。
+ *
+ * **数据源钉死 = ``state.events`` 原始 custom 事件序列**（非 selectCharts 去重
+ * 输出——同 identity 后到胜会丢首推 content），含被 upsert 覆盖的旧条目。
+ *
+ * 合并规则：以 max-seq 清单为基；行 content 为空且无 ``content_omitted`` 时，按
+ * seq 升序扫同 label 全部历史 payload 中同 path 行的**最近非空 content** 补上；
+ * 历史亦无 → 保留空（面板回退 legacy fetch）。``content_omitted === "true"`` 的行
+ * 不合并（面板显式提示，不 fetch）。``selectCharts`` 输出不变（合并只在 selectors
+ * 层，保「selectors 唯一 view 输入」）。
+ */
+export function selectDocRowsWithContent(state: WorkflowState): DocRowsSelection {
+  return docRowsFrom(
+    state.events,
+    state.huge,
+    state.serverOverview,
+    state.hugeFullyLoaded
+  );
+}
+
+/**
+ * 四参变体（订阅收窄直调，同 ``selectCharts._from`` 消费模式：面板订阅
+ * events/huge/serverOverview/hugeFullyLoaded 四字段后不走全 state）。私有（非
+ * ``select`` 前缀导出——selectX 第一参数必须 state，huge-mode AST 守门）。
+ */
+function docRowsFrom(
+  events: WebEvent[],
+  huge: boolean,
+  serverOverview: WorkflowState["serverOverview"],
+  hugeFullyLoaded: boolean
+): DocRowsSelection {
+  // huge 模式：沿用既有 placeholder 语义（目录占位，无 data）——不扫事件产半份清单。
+  if (huge && serverOverview && !hugeFullyLoaded) {
+    const has = serverOverview.charts.some((c) => c.label === DOCS_LABEL);
+    return {
+      rows: [],
+      invalid: 0,
+      malformed: false,
+      placeholder: has,
+      empty: !has,
+    };
+  }
+  // events 已 seq 升序（store 不变式）→ 顺序遍历即时间序，末位即 max-seq。
+  const payloads: unknown[] = [];
+  for (const e of events) {
+    if (e.type !== "custom") continue;
+    const d = e.data;
+    if (!d || d.kind !== "chart") continue;
+    const chart = d.chart;
+    if (!chart || typeof chart !== "object") continue;
+    if ((chart as { label?: unknown }).label !== DOCS_LABEL) continue;
+    payloads.push(chart);
+  }
+  if (payloads.length === 0) {
+    return { rows: [], invalid: 0, malformed: false, placeholder: false, empty: true };
+  }
+  const base = parseDocManifest(payloads[payloads.length - 1]);
+  // 合并：需要补内容的行 = content 空（或字段缺席）且未标 omitted。
+  const need = new Set(
+    base.rows
+      .filter(
+        (r) => (r.content ?? "") === "" && r.content_omitted !== "true"
+      )
+      .map((r) => r.path)
+  );
+  if (need.size > 0) {
+    const merged = new Map<string, string>();
+    for (const payload of payloads) {
+      // seq 升序扫全部历史 payload，后写胜 = 最近非空 content。
+      for (const row of parseDocManifest(payload).rows) {
+        if (
+          need.has(row.path) &&
+          row.content !== undefined &&
+          row.content !== ""
+        ) {
+          merged.set(row.path, row.content);
+        }
+      }
+    }
+    base.rows = base.rows.map((r) =>
+      need.has(r.path) && merged.has(r.path)
+        ? { ...r, content: merged.get(r.path) }
+        : r
+    );
+  }
+  return {
+    rows: base.rows,
+    invalid: base.invalid,
+    malformed: base.malformed,
+    placeholder: false,
+    empty: false,
+  };
+}
+
 // ── selectLog：events → LogStream 行模型（仅生命周期/routing/gate/失败进 Log）─────
 // SPEC web-presentation-refinement §P1：LogStream 装分级 classifier，过程事件（agent_*/
 // foreach_item_*/prompt_rendered/agent_usage/custom/dialog_message/unknown_event）归
@@ -885,4 +1085,7 @@ export namespace selectLog {
 }
 export namespace selectCharts {
   export const _from = selectChartsFrom;
+}
+export namespace selectDocRowsWithContent {
+  export const _from = docRowsFrom;
 }

@@ -9,6 +9,7 @@
 import { describe, expect, test, afterEach, vi } from "vitest";
 import { cleanup, render, screen, fireEvent } from "@testing-library/react";
 import { useWorkflowStore, untitledChartWarned } from "@/stores/workflow-store";
+import { selectCharts } from "@/selectors";
 import { ChartRenderer } from "@/components/chart/ChartRenderer";
 import { ChartErrorBoundary } from "@/components/chart/ChartErrorBoundary";
 import type { ChartPayload } from "@/components/chart/types";
@@ -266,5 +267,69 @@ describe("SPEC audit-c MINOR-5 无 title chart warn-once-per-identity", () => {
       String(c[0] ?? "").includes("chart 缺 title")
     );
     expect(untitledWarns.length).toBe(1); // warn-once-per-identity
+  });
+});
+
+// ── B2（2026-09-07 #2）：prof-opt/docs 清单组不进图表渲染 ─────────────────────
+
+describe("B2：docs 清单组整组滤除（valid + huge 占位两分支）", () => {
+  const DOCS_CHART: Record<string, unknown> = {
+    chart_type: "table",
+    label: "prof-opt/docs",
+    title: "prof-opt analysis docs",
+    columns: ["vid", "doc", "status", "path", "updated_at"],
+    data: [{ vid: "baseline", doc: "x.md", status: "ready", path: "baseline/x.md" }],
+  };
+
+  test("docs-only run → 过滤后空态判定（chart-empty，非空组壳）", () => {
+    useWorkflowStore.setState({ loadStatus: "loaded" });
+    useWorkflowStore.getState().processEvent(chartEvent("po_baseline", DOCS_CHART));
+    render(<ChartRenderer />);
+    expect(screen.getByTestId("chart-empty")).toBeInTheDocument();
+    expect(screen.queryByTestId("chart-renderer")).toBeNull();
+    expect(screen.queryAllByTestId(/^chart-placeholder-/).length).toBe(0);
+  });
+
+  test("docs + line 混存 → line 渲染、docs 组不渲染（valid 分支滤除）", async () => {
+    useWorkflowStore.setState({ loadStatus: "loaded" });
+    useWorkflowStore.getState().processEvent(chartEvent("po_baseline", DOCS_CHART));
+    useWorkflowStore.getState().processEvent(
+      chartEvent("n1", { ...LINE_OK, label: "g1", title: "ok" })
+    );
+    render(<ChartRenderer />);
+    expect(screen.getAllByTestId("chart-widget").length).toBe(1);
+    const labels = screen
+      .getAllByTestId("chart-group")
+      .map((g) => g.getAttribute("data-label"));
+    expect(labels).toEqual(["g1"]); // docs 组整组剔除（无 0 项组壳）
+  });
+
+  test("huge 占位分支：overview 目录里的 docs chart 同样滤除", () => {
+    useWorkflowStore.setState({
+      loadStatus: "loaded",
+      huge: true,
+      hugeFullyLoaded: false,
+      activeRunId: "r-huge",
+      serverOverview: {
+        agents: [],
+        charts: [
+          { label: "prof-opt/docs", title: "prof-opt analysis docs", chart_type: "table" },
+          { label: "g1", title: "loss", chart_type: "line" },
+        ],
+        cost_usd: 0,
+        run_status: "running",
+      },
+    });
+    render(<ChartRenderer />);
+    // docs 占位卡不渲染；其余占位照常
+    expect(screen.queryByTestId("chart-placeholder-prof-opt analysis docs")).toBeNull();
+    expect(screen.getAllByTestId(/^chart-placeholder-/).length).toBe(1);
+  });
+
+  test("推送不停：selectCharts 输出不变（文档面板数据源仍从事件读清单）", () => {
+    useWorkflowStore.setState({ loadStatus: "loaded" });
+    useWorkflowStore.getState().processEvent(chartEvent("po_baseline", DOCS_CHART));
+    const { groups } = selectCharts(useWorkflowStore.getState());
+    expect(groups.map((g) => g.group)).toContain("prof-opt/docs"); // selector 层保留
   });
 });

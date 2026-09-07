@@ -6,7 +6,8 @@
 //   2. 去固定宽度 → w-full h-full（react-resizable-panels 全弹性，根治 GAP）。
 //   3. 状态色条：左竖条 import NODE_STATUS_HEX（与 DAG 浮层同源 DRY）替代文字 icon。
 //   4. 阶段分组 selectAgentGroups：Setup/Loop/Finalize（无 back-route → 单组平铺）。
-//   5. 循环节点显示 R3（iteration = sessionCount，依赖 P2 nodesIndex）。
+//   5. 循环节点显示 R3（iteration = 节点自身执行次数 execSessions，B1 2026-09-07；
+//      无记录回退 sessionCount 旧派生，依赖 P2 nodesIndex）。
 //   6. 子 agent 折叠：sessionCount > 1 → ▸ N subs，展开点子 session 切中栏会话
 //      （setSelectedNode + setSelectedSession 联动，复用 P2）。
 //

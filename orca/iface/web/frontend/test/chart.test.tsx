@@ -1185,3 +1185,96 @@ describe("轴标签 / caption（render_chart x_label/y_label/caption）", () => 
     expect(texts).toEqual(expect.arrayContaining(["x", "y"]));
   });
 });
+
+// ── B3（2026-09-07 #6）：组内唯一 visual 的 maxWidth 自适应 ────────────────────
+
+describe("ChartGroup B3 —— 单图尺寸自适应（SINGLE_CHART_MAX_WIDTH=560）", () => {
+  const TABLE = (title: string): ChartPayload => ({
+    chart_type: "table",
+    data: [{ a: 1 }],
+    label: "g1",
+    title,
+  });
+  const PLACEHOLDER = (identity: string) => ({
+    identity,
+    payload: { chart_type: "line", label: "g1", title: identity } as ChartPayload,
+    placeholder: true,
+  });
+
+  test("组内唯一 line 图 → 外包 div style.maxWidth = 560px", async () => {
+    render(
+      <ChartGroup
+        label="g1"
+        charts={[{ identity: "t1", payload: { ...LINE_PAYLOAD, label: "g1", title: "t1" } }]}
+      />,
+    );
+    const wrap = screen.getByTestId("single-chart-wrap");
+    expect(wrap.style.maxWidth).toBe("560px");
+    await waitFor(() => {
+      expect(screen.getAllByTestId("chart-widget").length).toBe(1);
+    });
+    // 包装 div 真正包住 widget（LazyChartWidget 外层）
+    expect(wrap.contains(screen.getByTestId("chart-widget"))).toBe(true);
+  });
+
+  test("1 图 + 1 表 → 图受限（maxWidth）、表仍整行（gridColumn 1/-1）", async () => {
+    render(
+      <ChartGroup
+        label="g1"
+        charts={[
+          { identity: "t1", payload: { ...LINE_PAYLOAD, label: "g1", title: "图" } },
+          { identity: "t2", payload: TABLE("表") },
+        ]}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getAllByTestId("chart-widget").length).toBe(2);
+    });
+    const wrap = screen.getByTestId("single-chart-wrap");
+    expect(wrap.style.maxWidth).toBe("560px");
+    const group = screen.getByTestId("chart-group");
+    const gridContainer = group.querySelector(
+      'div[style*="grid-template-columns"]',
+    ) as HTMLElement | null;
+    expect(gridContainer).toBeTruthy();
+    const children = Array.from(gridContainer!.children) as HTMLElement[];
+    expect(children[1].style.gridColumn).toBe("1 / -1"); // 表整行不变
+  });
+
+  test("2 图 → 均无 maxWidth 包装", async () => {
+    render(
+      <ChartGroup
+        label="g1"
+        charts={[
+          { identity: "t1", payload: { ...LINE_PAYLOAD, label: "g1", title: "图1" } },
+          { identity: "t2", payload: { ...LINE_PAYLOAD, label: "g1", title: "图2" } },
+        ]}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getAllByTestId("chart-widget").length).toBe(2);
+    });
+    expect(screen.queryByTestId("single-chart-wrap")).toBeNull();
+  });
+
+  test("仅占位卡 → 无 maxWidth", () => {
+    render(<ChartGroup label="g1" charts={[PLACEHOLDER("p1"), PLACEHOLDER("p2")]} />);
+    expect(screen.queryByTestId("single-chart-wrap")).toBeNull();
+  });
+
+  test("1 visual + 1 placeholder → 无 maxWidth（占位卡在场即不受限）", async () => {
+    render(
+      <ChartGroup
+        label="g1"
+        charts={[
+          PLACEHOLDER("p1"),
+          { identity: "t1", payload: { ...LINE_PAYLOAD, label: "g1", title: "图" } },
+        ]}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getAllByTestId("chart-widget").length).toBe(1);
+    });
+    expect(screen.queryByTestId("single-chart-wrap")).toBeNull();
+  });
+});

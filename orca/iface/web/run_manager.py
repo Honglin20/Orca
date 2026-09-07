@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import time
 from dataclasses import dataclass, field
@@ -300,18 +301,56 @@ class RunManager:
             return None
         return safe_resolve(self._runs_dir / run_id / "assets", rel_path)
 
+    def _recorded_artifacts_dir(self, run_dir: Path) -> Path | None:
+        """读 run 目录 ``orca_env.sh`` 里 bootstrap 记录的 ``ORCA_ARTIFACTS_DIR``。
+
+        project-scoped artifacts 的 workflow（如 prof-opt：workflow.yaml 声明
+        ``<project_root>/artifacts/<wf>/``）产物**不落** per-run 目录，真实落点只
+        记录在 bootstrap 写下的 ``orca_env.sh``。纯文本逐行解析（值经 ``shlex``
+        去 quote），**不 exec**；多行取最后一条（与 shell source 语义一致）。
+
+        无文件 / 无该行 / 路径在**本机**不存在（异机场景，C3 内容通道兜底）→ None。
+        坏引号行（``shlex.split`` ``ValueError``）→ 该行忽略，继续解析后续行
+        （库内先例 ``orca/chart/_env.py:96-99`` 同款保守降级）。
+        """
+        try:
+            text = (run_dir / "orca_env.sh").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        value: str | None = None
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("export "):
+                continue
+            try:
+                tokens = shlex.split(stripped)
+            except ValueError:
+                continue
+            for token in tokens[1:]:
+                if token.startswith("ORCA_ARTIFACTS_DIR="):
+                    value = token.removeprefix("ORCA_ARTIFACTS_DIR=").strip()
+        if not value:
+            return None
+        path = Path(value)
+        return path if path.is_absolute() and path.is_dir() else None
+
     def resolve_artifacts_root(self, run_id: str) -> Path | None:
         """解析 run 的 artifacts 权威根（web SPEC §2.1 / 计划 S-8）。
 
-        根 = ``orca.chart._paths.artifacts_dir_for_run(runs_dir, run_id)``（共享纯函数，
-        与 exec/env 注入的 ``$ORCA_ARTIFACTS_DIR`` 同源——web SPEC §2.1 所述「run 记录
-        字段」不存在，S-8 拍板复用该函数派生，不做硬编码拼接也不加新字段）。
+        解析顺序（2026-09-07：project-scoped artifacts 支持）：
+
+        1. run 目录 ``orca_env.sh`` 记录的 ``ORCA_ARTIFACTS_DIR``（见
+           ``_recorded_artifacts_dir``）——prof-opt 等 project-scoped 产物真实落点，
+           本机可达时优先；
+        2. 回退 ``orca.chart._paths.artifacts_dir_for_run(runs_dir, run_id)``（共享
+           纯函数，per-run 产物的既有派生，S-8 语义）。
+
         ``runs_dir`` 取该 run tape 所在目录（``artifacts_dir_for_run`` 契约：tape 文件
         所在目录；in-process project run / attached run 与默认 ``_runs_dir`` 均覆盖），
         tape 路径不可得时回退 ``self._runs_dir``。
 
         - 未知 run_id → None（routes 层先 ensure_attached 再 404，web §2.1）
-        - 派生目录不存在 → None（404 fail loud，S-8 语义）
+        - 两处均不存在 → None（404 fail loud，S-8 语义）
         - 存在 → 返回未 resolve 的根目录 Path（相对路径守卫由 ``file_text.safe_resolve``
           在读取时执行）
         """
@@ -320,6 +359,9 @@ class RunManager:
             return None
         tp = _handle_tape_path(handle)
         runs_dir = tp.parent if tp is not None else self._runs_dir
+        recorded = self._recorded_artifacts_dir(runs_dir / run_id)
+        if recorded is not None:
+            return recorded
         root = artifacts_dir_for_run(runs_dir, run_id)
         if not root.is_dir():
             return None

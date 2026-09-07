@@ -47,6 +47,17 @@ export interface NodeState {
   inputTokens?: number;
   outputTokens?: number;
   reasoningTokens?: number;
+  /**
+   * B1（2026-09-07 #8）：该节点**自身执行**的 session_id 收集（node_started handler
+   * 维护；executor 每次真实执行产出一个新 session → retry 计入 R）。仅收非空 string
+   * session_id；in-session 路径 node_started 无 session_id → 缺席 → selectors 回退
+   * sessionCount 派生（诚实降级非回归）。
+   *
+   * **钉死 NodeState、禁入 nodesIndex**：nodesIndex 只收 CONVERSATION_TYPES 事件且
+   * 把缺席 session_id 转成 "main" 哨兵——node_started 入内会污染子代理计数（两口径
+   * 分开）。数组按首现序去重 → refold / fold-twice 幂等。
+   */
+  execSessions?: string[];
 }
 
 // 注：reasoningTokens 在 NodeState 内是 per-node（agent_usage.data.reasoning_tokens 累加）；
