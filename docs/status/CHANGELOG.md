@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-09-08] fix(workflows): 脚本 exec 位治本——git 索引 100755 + 守卫测试（commit `c8f4807`、`4bc8a2c`）
+
+Windows NTFS 下 exec 位进不了 git，163 个带 shebang 的 workflow 脚本（排除 deprecated）索引态翻转为 100755，Linux clone 后直接执行不再 Permission denied；新增索引级守卫测试（跨平台）防复发。详见 [release note](../releases/2026-09-08-workflow-scripts-exec-bit.md)。
+
 ## [2026-09-08] feat(prof-opt): 反馈批——文档内容事件通道 + web UX 四项 + rounds shadow 留档（commit `39f9214`）
 
 异机文档 404 根治（内容随清单走 chart 事件通道 + artifacts 根回退解析）；文档独立页签/图标网格、单图 560px 上限、R 徽标改数节点自身执行次数、帕累托补 baseline 锚点；gate 时每轮 shadow 源码幂等留档到 `rounds/<NNN>/<vid>/`。SDD loop：spec 评审 2 轮收敛、独立验证 PASS（后端 121 passed / 前端 635 passed / tsc clean；3 个 pytest 失败经 HEAD~1 对照实证为既有）。详见 [release note](../releases/2026-09-08-prof-opt-feedback-batch.md)。
