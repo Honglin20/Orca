@@ -129,7 +129,9 @@ documents only when validating them.
 
 ## Workflow
 
-### Step 0: Preconditions (fail loud, no repairs)
+### Step 0: Preconditions and setup
+
+#### Preconditions (fail loud, no repairs)
 
 Verify the upstream contract stage completed — all of: `contracts.json`,
 `readiness/readiness.json`, `train_device.json` (the training device
@@ -141,6 +143,17 @@ catching it here gives a cleaner error). Anything
 missing → emit `status="failed"` with
 `error="baseline prerequisites missing: <list> (contract stage did not complete)"`
 and stop.
+
+### Step 0a: Ensure chain script executable permission
+
+Before first invocation, ensure the chain driver has executable permission
+(the finalizer launch at step 5 uses `exec` which requires it):
+
+```bash
+chmod +x "$ORCA_AGENT_RESOURCES/scripts/run_baseline_chain.sh"
+```
+
+This is idempotent — safe to run every turn.
 
 ### Step 0b: Pick the training card (probe → judge → --device)
 
