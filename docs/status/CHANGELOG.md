@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-09-08] feat(prof-opt): mfu-analyzer v3 —— bound 判定矩阵 + 昇腾知识单文件共享（commit `ce616ee`）
+
+真机误判纠正：v2 把 cycles 最大的 MATMUL 判成计算瓶颈，漏掉 reduce/transpose/img2col 与 matmul 交替的格式切换税。v3 重写为三窗口时间轴 + bound 判定矩阵 + MFU 损耗分解（提 MFU 与降时延同位）；昇腾 9 铁律压缩进共享 `subagents/references/ascend.md`（po_propose 与 mfu-analyzer 经 `{{ subagents_root }}` 共用，旧薄版删除）；根因词汇表 4→5 类；哨兵 v2→v3 全量同步。洁净审查 4 MINOR 全收口、校验门三用例实测通过。已部署环境需 `tars install` 刷新。详见 [release note](../releases/2026-09-08-mfu-analyzer-v3.md)。
+
 ## [2026-09-08] fix(web): 文档 tab 数据驱动显隐 + static 重建补漏（commit `5ffc6eb`）
 
 「文档」tab 改为按 docs 清单实际存在（events/serverOverview）显隐——非 prof-opt run（如 mxint-analysis）不再显示误导性的「推送后显示」空态；顺带暴露流程缺口：39f9214 改前端源码但未重建 static，远程 clone 在窗口期拿旧 UI。vitest 643 passed / tsc clean。
