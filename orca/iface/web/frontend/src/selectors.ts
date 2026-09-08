@@ -622,6 +622,28 @@ function selectChartsFrom(
 /** 文档清单 chart 的 label（v6 §10.4 契约字面量）。 */
 export const DOCS_LABEL = "prof-opt/docs";
 
+/**
+ * run 是否携带 prof-opt docs 清单（RunDetailPage「文档」tab 的显示门，2026-09-08）。
+ *
+ * **数据驱动而非 workflow 名硬编码**：manifest 在窗口事件或 serverOverview 清单里
+ * 出现即显示——overview 覆盖窗口态（manifest 事件在窗外的情况）；两者都无（非
+ * prof-opt run）→ tab 隐藏（面板空态「推送后显示」对永不会有 docs 的 run 是误导，
+ * review 用户反馈 mxint-analysis）。
+ */
+export function selectHasDocsManifest(state: WorkflowState): boolean {
+  if (state.serverOverview?.charts?.some((c) => c.label === DOCS_LABEL)) {
+    return true;
+  }
+  return state.events.some((e) => {
+    if (e.type !== "custom") return false;
+    const d = e.data as { kind?: unknown; chart?: { label?: unknown } } | null;
+    if (!d || d.kind !== "chart" || !d.chart || typeof d.chart !== "object") {
+      return false;
+    }
+    return d.chart.label === DOCS_LABEL;
+  });
+}
+
 /** 规则组唯一合法 path（S-9：规则面板数据源 = run 内只读快照）。 */
 const RULES_SNAPSHOT_PATH = "base/accuracy_rules_snapshot.json";
 

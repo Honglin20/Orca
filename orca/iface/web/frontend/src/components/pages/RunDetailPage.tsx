@@ -19,7 +19,7 @@
 // SPEC audit-c §4.1：订阅 loadStatus/retryCount，按渲染表（idle/loading×2/error/loaded）
 // 决定中央区域——error 显示 RunLoadError + 重试按钮；loading + retryCount>0 叠加 retry-banner。
 
-import { Suspense, lazy, useCallback, useState } from "react";
+import { Suspense, lazy, useCallback, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { Loader2 } from "lucide-react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
@@ -28,6 +28,7 @@ import { useWebSocket } from "@/hooks/use-websocket";
 import { useStreamingText } from "@/hooks/use-streaming-text";
 import { useElapsedTickActive } from "@/hooks/use-elapsed-tick";
 import { useWorkflowStore, TAIL_WINDOW } from "@/stores/workflow-store";
+import { selectHasDocsManifest } from "@/selectors";
 import { TopBar } from "@/components/layout/TopBar";
 import { AgentsRail } from "@/components/layout/AgentsRail";
 import { LogStream } from "@/components/detail/LogStream";
@@ -75,6 +76,19 @@ export function RunDetailPage() {
 
   const [tab, setTab] = useState<Tab>("conversation");
   const selectedNode = useWorkflowStore((s) => s.selectedNode);
+  // 「文档」tab 显示门（2026-09-08）：数据驱动（events/serverOverview 里有 prof-opt
+  // docs 清单才显示）——非 prof-opt run（如 mxint-analysis）永远不会有分析文档，
+  // 显示「推送后显示」空态是误导。窄订阅防全 store 重渲染（C4.4 同款纪律）。
+  const events = useWorkflowStore((s) => s.events);
+  const serverOverview = useWorkflowStore((s) => s.serverOverview);
+  const showDocsTab = useMemo(
+    () =>
+      selectHasDocsManifest({
+        events,
+        serverOverview,
+      } as unknown as Parameters<typeof selectHasDocsManifest>[0]),
+    [events, serverOverview]
+  );
   // C4.2（SPEC 2026-08-28）：onChartClick 经 useCallback 稳定——内联箭头会让
   // ConversationView 全部 EntryRenderer 的 React.memo 失效（memo BLOCKER）。
   const handleChartClick = useCallback(() => setTab("charts"), []);
@@ -106,8 +120,10 @@ export function RunDetailPage() {
                     [
                       ["conversation", "会话"],
                       ["charts", "图表"],
-                      ["docs", "文档"],
-                    ] as const
+                      ...(showDocsTab
+                        ? ([["docs", "文档"]] as [Tab, string][])
+                        : []),
+                    ] as [Tab, string][]
                   ).map(([t, label]) => (
                     <button
                       key={t}
@@ -146,7 +162,8 @@ export function RunDetailPage() {
                         />
                       )}
                       {tab === "charts" && <ChartsView />}
-                      {tab === "docs" && (
+                      {/* showDocsTab 双保险：跨 run 切换 tab state 残留 "docs" 时不渲染面板 */}
+                      {tab === "docs" && showDocsTab && (
                         // B4：文档面板独占页签（不再与图表区同栏挤占）
                         <div className="flex h-full flex-col overflow-auto">
                           <ProfOptDocsPanel runId={runId} />
