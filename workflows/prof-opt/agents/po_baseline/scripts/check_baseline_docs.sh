@@ -12,7 +12,7 @@
 # present with non-empty body content:
 #   baseline/business_logic.md          business-logic-analyst, five sections
 #   base/information_analysis.md        information-analyst v2, four sections
-#   base/profile/mfu_bottleneck_report.md  mfu-analyzer v2, four sections
+#   base/profile/mfu_bottleneck_report.md  mfu-analyzer v3, five sections
 #
 # Findings -> stderr; exit 0 pass / 1 fail / 2 hard error.
 # Environment: ORCA_ARTIFACTS_DIR (required).
@@ -23,7 +23,7 @@ ART="${ORCA_ARTIFACTS_DIR:?FATAL: ORCA_ARTIFACTS_DIR not set (check_baseline_doc
 # ── the three sentinels (single source — this file) ──────────────────────────
 BL_SENTINEL="[subagent:business-logic-analyst v1 BLA7K4]"
 IX_SENTINEL="[subagent:information-analyst v2 IXA3N7]"
-MFU_SENTINEL="[subagent:mfu-analyzer v2 MBA7K2]"
+MFU_SENTINEL="[subagent:mfu-analyzer v3 MBA7K2]"
 
 fail=0
 
@@ -94,7 +94,7 @@ check_doc "base/information_analysis.md" \
 check_doc "base/profile/mfu_bottleneck_report.md" \
   "$ART/base/profile/mfu_bottleneck_report.md" \
   "$MFU_SENTINEL" \
-  "### 模型概况" "### 瓶颈根因" "### 算子级证据表（按显著性列行）" "### 评测异常与披露"
+  "### 模型概况" "### MFU 损耗分解" "### 瓶颈根因" "### 算子级证据表（按显著性列行）" "### 评测异常与披露"
 
 if [ "$fail" -ne 0 ]; then
   echo "FAIL: check_baseline_docs" >&2

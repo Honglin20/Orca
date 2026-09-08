@@ -351,7 +351,7 @@ PYEOF
 step_profile_report() {
   local report="$ART/base/profile/mfu_bottleneck_report.md"
   [ -s "$report" ] || { echo "FATAL: mfu-analyzer produced no $report" >&2; return 1; }
-  [ "$(head -n 1 "$report")" = "[subagent:mfu-analyzer v2 MBA7K2]" ] || {
+  [ "$(head -n 1 "$report")" = "[subagent:mfu-analyzer v3 MBA7K2]" ] || {
     echo "FATAL: $report sentinel mismatch" >&2; return 1; }
 }
 

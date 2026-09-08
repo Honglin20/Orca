@@ -753,8 +753,9 @@ _BL_MD = ("[subagent:business-logic-analyst v1 BLA7K4]\n## 任务语义\nclassif
 _IX_MD = ("[subagent:information-analyst v2 IXA3N7]\n## 信息成分拆解\nwhat each "
           "step computes\n## 最小信息核心\nthe core\n## 冗余与可近似项\nredundancy\n"
           "## 创新结构方向\nat least one substantive direction\n")
-_MFU_MD = ("[subagent:mfu-analyzer v2 MBA7K2]\n## MFU 时延瓶颈分析报告\n"
-           "### 模型概况\nsmall\n### 瓶颈根因\nroot cause one\n"
+_MFU_MD = ("[subagent:mfu-analyzer v3 MBA7K2]\n## MFU 时延瓶颈分析报告\n"
+           "### 模型概况\nsmall\n### MFU 损耗分解\ntwo factors\n"
+           "### 瓶颈根因\nroot cause one\n"
            "### 算子级证据表（按显著性列行）\nevidence rows\n"
            "### 评测异常与披露\n无\n")
 
@@ -1433,7 +1434,7 @@ def test_baseline_chain_mfu_mode_awaits_analyzer_then_reads_raw(tmp_path: Path):
         capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stderr
     (art / "base" / "profile" / "mfu_bottleneck_report.md").write_text(
-        "[subagent:mfu-analyzer v2 MBA7K2]\n\n## MFU 时延瓶颈分析报告\n",
+        "[subagent:mfu-analyzer v3 MBA7K2]\n\n## MFU 时延瓶颈分析报告\n",
         encoding="utf-8")
     second = subprocess.run(base_cmd, capture_output=True, text=True,
                             timeout=120, env=env)
@@ -1452,7 +1453,7 @@ def test_baseline_chain_mfu_mode_report_without_raw_is_fatal_no_fallback(tmp_pat
     pointing at the report; there is NO fallback profiling path."""
     art, env = _mfu_baseline_ws(tmp_path)
     (art / "base" / "profile" / "mfu_bottleneck_report.md").write_text(
-        "[subagent:mfu-analyzer v2 MBA7K2]\n\n## MFU 时延瓶颈分析报告\n"
+        "[subagent:mfu-analyzer v3 MBA7K2]\n\n## MFU 时延瓶颈分析报告\n"
         "评测失败：远程服务不可达\n", encoding="utf-8")
 
     proc = subprocess.run(
@@ -1640,10 +1641,10 @@ def test_check_baseline_docs_gate(tmp_path: Path):
     assert "逐模块职责与物理意义" in proc.stderr
     doc.write_text(_BL_MD, encoding="utf-8")
 
-    # wrong sentinel on the mfu report (v2 sentinel — document not authored
+    # wrong sentinel on the mfu report (v3 sentinel — document not authored
     # by the subagent, or a stale v1 report from an old workspace)
     mfu = art / "base" / "profile" / "mfu_bottleneck_report.md"
-    mfu.write_text(_MFU_MD.replace("v2 MBA7K2", "v1 MBA7K2"), encoding="utf-8")
+    mfu.write_text(_MFU_MD.replace("v3 MBA7K2", "v1 MBA7K2"), encoding="utf-8")
     proc = run()
     assert proc.returncode == 1
     assert "sentinel" in proc.stderr

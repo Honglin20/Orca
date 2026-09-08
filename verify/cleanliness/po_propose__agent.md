@@ -1,141 +1,57 @@
-# 洁净审查记录：workflows/agents/po_propose/agent.md
+# 洁净审查记录：workflows/prof-opt/agents/po_propose/agent.md
 
-- 审查对象：`D:\Projects\Orca\workflows\agents\po_propose\agent.md`（277 行）
-- 依据：`orca/skills/create-workflow/reference/agent-prompt-cleanliness-contract.md`（受众翻转通读法）+ `docs/specs/prof-opt-v4-spec.md` §4 po_propose 行（草稿 `prof-opt-v4-design-draft.md` v3 §3/D-V4-7/8/9/10 为语义权威）
-- 审查方式：全文通读 + 受众翻转逐段裁决 + 双词表 Grep（SPEC §6 v3.5 词表 + 增补退役物词表；另加补充词表 v3/v4/po_implement/po_verify/mnist/cifar/accuracy=//home//analogue/migrat/R2-/D-V4/迁移/懒补训/epoch-only）
-- 词表结果：**全部 0 命中**（两次 Grep 均无匹配）
-- 交付物盘面核对：`po_propose/{agent.md, scripts/run_latency_recheck.sh, references/structural-levers.md}` 与 SPEC §1 一致 ✅
+- 审查对象：`D:\Projects\Orca\workflows\prof-opt\agents\po_propose\agent.md`（v7 现行，140 行，per-wf 自包含布局）
+- 审查性质：mfu-analyzer v3 同批改动的洁净复审（2026-09-08）。本文件两处改动：Step1 硬件参考路径改 `{{ subagents_root }}/references/ascend.md`（L50）；Step3 mfu-analyzer 派发补 `<hardware_ref>`（L88-90）。plan：`docs/plans/2026-09-08-mfu-analyzer-v3.md` 改动清单 #3
+- 审查方法：全文通读 + 受众翻转逐段裁决 + 五组禁词 grep + 派发参数与 mfu-analyzer.md Inputs 表逐项对账
+- 参照：洁净契约 `orca/skills/create-workflow/reference/agent-prompt-cleanliness-contract.md`；SPEC `docs/specs/prof-opt-v7-spec.md` §3.3/§3.4/§5；共享硬件参考 `workflows/prof-opt/subagents/references/ascend.md`；本目录 `references/structural-levers.md`（338 行）
+- 审查日期：2026-09-08（本快照为 v7 全量重写版，取代 2026-08-26 的 v4 时代六轮记录——旧记录针对已不存在的平铺路径与 placeholder/mfu 双模机制，历史见 git）
 
 ## 一、逐段受众翻转结论表
 
-| 行号 | 段 | 受众翻转结论（假设我是只懂本业务、不懂 Orca 内部与 workflow 历史的执行 LLM） |
+| 行号 | 段 | 受众翻转结论 |
 |---|---|---|
-| 1-4 | frontmatter（description + tools） | CLEAN。description 是运行时职责总述（刷新报告→三 subagent→逐提案实现→机械 history→批量复测→打回），产品说明书式，零历史 |
-| 5-18 | 角色定义 + 语义铁律 | CLEAN。`exhausted` 合法性、`status == executed ⇔ error == ""` 均可独立执行；无 v4 已删机制措辞 |
-| 20-31 | Resource Anchors | CLEAN。`$ORCA_ARTIFACTS_DIR` / `$ORCA_AGENT_RESOURCES` 是运行时 env（契约 §5 允许）；配额常量（≤3/轮、修复 ≤2）指令式 |
-| 33-40 | 共享脚本部署检查 for 循环 | **FINDING-1**：多行 bash 循环+分支+exit 内联，命中契约 §4「确定性代码内联」类别（详见 findings） |
-| 42-46 | Path Handling Rules | CLEAN。运行时规则，可执行 |
-| 48-56 | Subagent Call Protocol | CLEAN。`{{ subagents_root }}` 渲染占位 + sentinel 首行协议 + Task 调用模板，均为运行时调用原语；"inlined as an absolute path at render time" 是执行者需要的路径来源说明 |
-| 58-64 | 失败矩阵 | CLEAN。(a) 哨兵缺失 / (b) 产物缺失 / (c) 校验败 → 重派 1 次 → error 披露；配额超额不重派走终态——与草稿 §3.1 Step 5「仍不过淘汰」及 D-V4-4 R2-18「重派 1 次后降级+披露」语义一致（spec §4 括号"超配额→重派 1 次"是粗粒度概括，agent.md 的细化更准确：配额耗尽是确定性状态，重派无意义；见核对表第 9 条） |
-| 66-71 | Lazy Loading | CLEAN。惰性读取规则，指令式 |
-| 73-76 | Workflow 总则 | CLEAN。checklist 0-6 + FINAL JSON only，可执行 |
-| 78-88 | Step 0（轮号 + reuse guard） | CLEAN。`.round_advanced` 是 advance_round 落盘机制（operational）；unparseable → fresh + stderr 是合理 fail-loud 增量 |
-| 90-98 | Step 1（刷新机械报告） | CLEAN。单行命令内联（契约允许类），fail loud 显式 |
-| 100-126 | Step 2（stamp 守卫 + ledger refresh） | CLEAN。stamp 计算纯 prose 描述；两条单行命令；"still faithful to this base" 是操作性 why（解释复用条件），非考古 |
-| 128-153 | Step 3（proposer + 机械校验） | CLEAN。准入项逐条可机械执行；去重对账（re-run 同一 history_lib CLI）；count==0 → 强制 exhausted；"a proposal set of zero is only honest with its reasons" 是带指令性的修辞（要求记原因），产品说明书语气可接受 |
-| 155-207 | Step 4（逐提案实现 + 机械 history IMPL 行） | CLEAN（边缘注明）。两段 `python3 -c` 为**无循环/分支/assert 的单函数顺序调用**（等价 `python <file>` 单行 operational 类，非契约 §4 禁的"循环·分支·assert 逻辑"）；"the single outcome row would lack round/change_sig — the dedup and the round advance read exactly those fields" 是操作性 why（解释两步 append 的必要性，指向盘面下游消费者），**无** po_implement 退役/计划轮号等考古；re-entry reconciliation 覆盖 crash-between-marker-and-row |
-| 209-244 | Step 5（真 profiler 守卫 + 批量复测 + 修复环） | CLEAN（边缘注明）。条件参数组装 `$( [ -n ... ] && printf ... )` 是**单行命令组装**（非独立确定性逻辑块），属允许类；"GPU contention ... would corrupt it" 是守卫的操作性 why；删 verdict.json 在复测前显式钉死 |
-| 246-264 | Step 6（emit） | CLEAN。十字段与 SPEC §2 po_propose schema required 逐一对应；失败路径同十字段 + 根因披露 |
-| 266-271 | Validation | CLEAN。emit 时机械校验清单，含 exhausted ⇒ rationale 非空（D-V4-9 进 Validation ✅） |
-| 273-277 | Output | CLEAN。FINAL = 单行 JSON，无前后文本 |
+| 1-11 | frontmatter + 引言（每轮三假设→融合一只→仅这只走评估/实现/mfu-analyzer） | CLEAN。产品说明书式职责总述；「A measured improvement … enters po_probe; reaching the frozen origin target is disclosure only」为运行时判定规则，零历史 |
+| 13-30 | Invariants（工作区边界 / 三份基线文档 / 写权限分域 / 禁 ONNX diff 作门 / lineage 字段集 / 禁孤立小改动 / 预测非准入） | CLEAN。全部可独立执行；「The MFU markdown is the only profiling analysis input; raw files listed by it are drill-down evidence」与 mfu-analyzer.md L66-68、SPEC §3.2 三方一致 |
+| 32-37 | Step 0 round/re-entry | CLEAN。round_state.py + proposals.json 复用判据具体；「never regenerate a completed selector result」fail-loud 语义 |
+| 39-56 | Step 1 三 candidate 并行派发（**本次改动 L50**） | CLEAN。`the shared hardware reference {{ subagents_root }}/references/ascend.md` 与 po_baseline L113 写法逐字一致；`{{ subagents_root }}` 是 render 层顶层变量（`orca/exec/render.py:61` 暴露、`orca/compile/layout.py:31-49` 双形态解析——新形态判据 `any(sub.glob("*.md"))` 在引入 `references/` 子目录后仍成立，路径可达）；candidate 侧自述吻合（hardware-architecture-proposer.md L11 "Read the Ascend hardware reference"、architecture-selector.md 同款泛指，具体路径由本文件派发时提供——point-to-file 协议一致）；「Each candidate must name the information invariant, measured root cause, …」与 v3 根因词汇表口径对齐 |
+| 58-80 | Step 2 selector 融合 + 提案字段集 + 机械校验 + 一次重派后 fail loud | CLEAN。字段集逐一可校验；「It must not contain `op_delta`」负向约束显式；「Re-dispatch the selector once on invalid output, then fail loud」重试可见 |
+| 82-119 | Step 3 实现与测量（**本次改动 L88-90**） | 见 FINDING-1（派发参数完备性）。L90 `pass <hardware_ref>={{ subagents_root }}/references/ascend.md` 本身 CLEAN：与 po_baseline 写法一致、与 mfu-analyzer.md Inputs 表 `<hardware_ref>` 占位名逐字对应；分析 stamp（key 三元组）/ 修复环（repair_count < 5 / == 5 终止写 direction.json）/「Never delete the fifth verdict or attempt a sixth measurement」全部可机械执行、fail loud |
+| 121-140 | Step 4 artifacts + emit | CLEAN。`## architecture/## latency/## accuracy` 三节、generated_artifacts 只列实存文件、`status == executed iff error == ""` 判定式；「push the docs manifest best-effort」best-effort 语义显式 |
 
-## 二、SPEC §4 po_propose 行逐条契约核对
+## 二、Findings
 
-| # | SPEC 要求 | agent.md 落点 | 结论 |
-|---|---|---|---|
-| 1 | Step 0 reuse：proposals.json 存在且可解析 → 跳过 Step 3 从 Step 4 续做（DONE marker 幂等）→ Step 5 照跑 | L83-88：resume at Step 4 + Step 5 as usual | ✅ 一致（agent.md 额外先跑 Step 1 幂等刷新 + Step 2 ledger refresh——兼容超集，不跳过任何 SPEC 钉死的步骤；同轮内 base 不变，stamp 复用成立） |
-| 2 | stamp 键 = base 版本标识（best.vid / base onnx sha）+ 机械报告内容指纹（非轮号） | L102-105：best.json vid（无 best 则 base/model.onnx sha256）+ bottleneck_report.json sha256 | ✅ 逐字一致 |
-| 3 | Step 3 机械闸过滤后 count==0 → exhausted 强制 true | L148-150 | ✅ |
-| 4 | exhausted=true ⇒ exhausted_rationale 结构化非空（≥1 已尝试方向条目）进 Validation | L151-153（enforce mechanically, never accept a bare true）+ L270-271（Validation） | ✅ 两处齐 |
-| 5 | 配额 4→3 显式 | L28（at most **3**）+ L139（at most 3）；无 "4" 字样（4→3 历史正确地留在 spec/commit，未进 prompt） | ✅ |
-| 6 | Step 4 每提案机械补写 history IMPL 行（append_implemented + terminal-skip 两步 append + reconciliation） | L161-204：DONE→append_implemented(implemented=True)；terminal-skip→两步（implemented=False + append_outcome）+ reconciliation（DONE 无行补写） | ✅；`append_implemented`/`append_outcome` 签名与 `_po_scripts/history_lib.py` L104/L135 逐参吻合 |
-| 7 | Step 5 run_latency_recheck 阈值实参 100/1/0.5 显式 + 打回后删 verdict.json | L228（--min-improvement 100 --min-pct 1 --min-ratio 0.5）+ L236-238（rm verdict.json，且钉明 verdict.json 存在性=skip key） | ✅；脚本侧（run_latency_recheck.sh L21-22/L42-45）自证同一语义 |
-| 8 | 真 profiler 条件守卫：profile_script_path 非空 → Step 5 前置等基线 worker 退出（placeholder 空不等） | L211-217：poll train_final.json（terminal）或 finalizer.pid（dead），bounded-wait + 每 turn status message；空 input 不等 | ✅ 与 D-V4-7/R2-11 一致 |
-| 9 | 三 subagent 失败矩阵（校验败/超配额/产物缺失 → 重派 1 次 → error 披露） | L58-64：(a)(b)(c) → 重派 1 次 → error 披露；配额超额 never re-dispatched → 终态 skip/淘汰 | ✅（超配额细化为不重派走终态——与草稿 §3.1 Step 5「仍不过淘汰」+ D-V4-4 R2-18 重派后降级披露同语义；spec 括号表述是粗概括，非冲突） |
+### FINDING-1（轻微 · 派发参数完备性；先于本轮存在，非本批改动引入）
 
-附加核对：准入三闸（D-V4-8）节点侧落点 = L139-144（predict_delta 严格负 / edited_files ⊆ shadow / op_delta 非零整数[= op_delta⊕change_spec 一致的机械面，与 structure-proposer.md L41-42 自述的 strictly-negative admission gate 同构]）+ 去重对账 + count ≤3 + rationale 校验 ✅；emit 十字段与 SPEC §2 schema required 全集一致 ✅。
+- **位置**：`workflows/prof-opt/agents/po_propose/agent.md:88-90`
+- **问题**：Step 3 的 mfu-analyzer 派发只显式给出两个产物路径 + `<hardware_ref>`，而 `mfu-analyzer.md` Inputs 表（L29-37）要求七个输入——`<chip>/<precision>/<core_num>` 的取值来源（workflow inputs → contracts.json `profile` block）在本文件全文无交代。对照方 `po_baseline/agent.md:108-113` 有完整对应交代（「substitute the chip / precision / core_num values you read from `contracts.json`'s `profile` block」）；SPEC §3.3 变体 profiling 行同样从简（未写参数来源）。执行 LLM 仍可从 subagent md 的 Inputs 表反推缺参，但取值出处无指引，存在猜测空间。
+- **引入性判定**：v3 改动只做了加法（补 `<hardware_ref>`），未删除任何既有说明；缺参出处说明是 v7 重写时已有的从简，SPEC 层同构。故不归咎本批改动。
+- **建议修法（一行级）**：L88-90 括注扩为 `(pass <hardware_ref>={{ subagents_root }}/references/ascend.md and chip/precision/core_num from contracts.json's profile block, as po_baseline does)`。
+- **处置**：🟢 非阻塞；待创作方与 F1/F2（见 subagent__mfu-analyzer.md 快照）一并顺手修。
 
-## 三、Findings 清单
+除 FINDING-1 外零 finding。两处改动 hunk（L50、L88-90）受众翻转通过：均为运行时路径/占位传参，无开发考古；`references/ascend.md` 相对 `{{ subagents_root }}` 的子目录引用是运行时可达路径（非仓库源码路径泄漏），契约 §5 判据 = operational。
 
-### FINDING-1（轻微 · 契约 §4「确定性代码内联」）
+## 三、词表 grep（五组，2026-09-08 口径）
 
-- **位置**：`workflows/agents/po_propose/agent.md:33-40`（Resource Anchors 内的部署完整性检查）
-- **问题**：7 行多行 bash——`for f in ...; do [ -f ... ] || { echo "FATAL..." >&2; exit 2; }; done`——循环 + 分支 + exit 的确定性逻辑内联在 prompt body。契约 §4 明列此类应抽到 `scripts/<name>.sh`、body 只留一行 `bash "$ORCA_AGENT_RESOURCES/scripts/<name>.sh"`；单行 operational 命令才豁免。执行 agent 每次重入都要重新逐 token 解析这段控制流，而它 100% 可机械化。
-- **建议修法**：抽为 `po_propose/scripts/check_prerequisites.sh`（本节点 resources 自带，与 run_latency_recheck.sh 同目录——不依赖被检查对象先部署，无鸡生蛋问题），agent.md 该块收敛为一行调用 + 一句 fail-loud 语义说明。
-- **非阻塞理由**：功能正确、fail loud、无残留；属形式违规（§4 类别命中），不影响本轮 E2E。
+对 `agents/po_propose/agent.md` + `references/structural-levers.md` 跑：
 
-除 FINDING-1 外：**零 finding**。词表双扫（SPEC §6 词表 + 任务词表 + 补充词表）均 0 命中；无 run_verify / baseline_proxy_acc / baseline_ref / mfu_adapter / perturb_ckpt / playbook / ref-input / auto-trained / 懒补训 / epoch-only proxy 等已删机制残留；无 MNIST/CIFAR/具体 accuracy 值等测试夹具硬编码（唯一 input 引用是模板 `{{ inputs.profile_script_path }}`，夹具防火墙合规）；无 SPEC/ADR/issue 编号、迁移出处词、事故叙事。
+| 组 | 词表 | 结果 |
+|---|---|---|
+| A 退役机制/测试夹具 | `mnist` `MNIST` `CIFAR` `playground` `model8` `pure_cnn` `feat_complex` `wireless` `mnist_kd` `profile_script_path` `placeholder_profiler` `bottleneck-analyst` `check_bottleneck` `predict_delta` `PROFILER_CONTRACT` `mfu_adapter` `baseline_proxy` `run_verify` `perturb_ckpt` `playbook` | **0 命中** |
+| B 迁移/版本考古 | `迁移` `前身` `前作` `legacy` `deprecated` `formerly` `used to` `analogue` `stall` `deepseek` `kill+retry` `TODO` `FIXME` | **0 命中** |
+| C 引擎源码/内部路径 | `orca/(exec\|compile\|run\|schema\|iface\|events\|gates)` `examples/` `D:\Projects` `/mnt/d` `docs/specs` `docs/plans` | **0 命中** |
+| D spec/plan 节号 | `§N.M` 形、`SPEC `、`ADR-N`、`phase-N`、`plan §` | **0 命中** |
+| E v2 残留/修订措辞 | `\bv2\b`、`修订记录`、`历史版本`、`不再` | **0 命中** |
 
-初审判定（已被 §四 复验取代）：VERDICT: ISSUES (1)
+（`structural-levers.md` 的 MobileNetV3/ALBERT 等含 `V3`/`V2` 子串为合法模型名，契约 §4 自注不伤；该文件本轮仅 L12-14 词汇表 4→5 同步，与 mfu-analyzer.md 五类逐字一致。）
 
-## 四、复验（2026-08-26，commit `24eb711`）
+## 四、单一真相源核对（ascend.md 共享）
 
-**修复核对**（`git diff 2de195e..24eb711 -- workflows/agents/po_propose/`）：
+- 唯一活跃副本：`workflows/prof-opt/subagents/references/ascend.md`；旧 `agents/po_propose/references/hardware/ascend.md` 已删（`find references -type f` 仅剩 structural-levers.md）；旧路径字串仅存于 `docs/specs/prof-opt-v7-spec.md:119`（删除记录）与 `docs/plans/2026-09-08-mfu-analyzer-v3.md:41`（改动清单）——均为开发文档，允许。
+- 本文件两处引用（L50、L90）与 po_baseline L113 三处写法逐字一致。
+- 职责边界：structural-levers L11-15「Structural priors live HERE and only here」与 ascend.md §3（设计倾向，proposer 用）实质不重叠——ascend.md 只陈述硬件事实与硬件映射先验（不点名 catalog 任何 lever 条目），structural-levers 只收结构药方（不陈述硬件事实，其 Shared hardware rationale 为泛化一句）；mfu-analyzer.md L199-201 三刀切（词汇表=诊断 / ascend §3=事前先验 / 结构方案=proposer）把三方职责钉死。措辞级微张力（"only here" 严格读 vs ascend §3 的先验地位）并入 mfu-analyzer 快照 F2 一并润色即可，不单列。
 
-- `agent.md:31-36`：原 7 行内联 for 循环（FINDING-1）收敛为契约 §4 标准形态——单行调用 `bash "$ORCA_AGENT_RESOURCES/scripts/check_prerequisites.sh"` + 一句指令式引导（"verify that on entry (fails loud when the entry stage is incomplete)"）。产品说明书语气 ✅。
-- 新增 `workflows/agents/po_propose/scripts/check_prerequisites.sh`（21 行），逐项核对：
-  - **功能零漂移**：检查清单与原内联完全一致（同 6 个共享脚本：analyze.py / predict_delta.py / history_lib.py / experiment_ledger.py / emit_result.py / check_bottleneck.py）；原 `cd "$ORCA_ARTIFACTS_DIR" || exit 2` 守卫移入脚本（`${ORCA_ARTIFACTS_DIR:?...}` env 未设 fail-loud + cd 失败 exit 2），且 body 顶部"cd before running any command"总指令（L23）仍在——无语义丢失。
-  - **脚本洁净**：任务词表 + 补充词表（v3/v4/po_implement/po_verify/mnist/cifar/R2-/D-V4/懒补训/epoch-only 等）Grep **0 命中**；注释全部 operational（检查什么 / exit code 语义 / fail-loud 理由）；"(flatten Step 1 deploys ...)" 是 workflow 内部署机制的运行时事实交叉引用，非开发考古。脚本属契约 §9 惰性 code 资产类（豁免），按更严的 prose 标准衡量也通过。
-  - **机械健全**：`bash -n` 通过；`set -euo pipefail`；exit 语义与头注释一致（0=全在场 / 1=env 未设 / 2=workspace 不可达或脚本缺失）；成功行走 stderr 不污染 stdout。
-- **无连带改动**：`git diff 24eb711..HEAD -- workflows/agents/po_propose/` 为空——盘面即修复后状态；SPEC §4 九项契约语义未被触碰（修复仅迁移守卫位置，初审核对表继续有效）。
-- 路径解析正确：`$ORCA_AGENT_RESOURCES/scripts/check_prerequisites.sh` = folder-agent resources（本 agent 目录）下 scripts/，与 run_latency_recheck.sh 同目录。
+## 五、裁决
 
-**FINDING-1 闭环确认：已修复。未解决项：无。**
+v3 同批两处改动（L50 硬件参考路径、L88-90 补传 `<hardware_ref>`）受众翻转通过、与派发对方/校验门/共享参考四方一致；全文五组禁词零命中。一条轻微 finding（FINDING-1：变体 mfu 派发的 chip/precision/core_num 出处未写，先于本轮存在）非阻塞，建议随下批顺手修。无洁净契约违规。
 
-前轮判定（被 §五 D-V4-20 复验取代）：VERDICT: CLEAN
-
-## 五、D-V4-20 复验（2026-08-26，code `6da08d7` + spec 回卷 `de2a723`，range `3d57c24..de2a723`）
-
-**范围**：`git diff 3d57c24..de2a723 -- workflows/agents/po_propose/`（agent.md 5 hunks + run_latency_recheck.sh 5 hunks）逐 hunk 审；同 range 的 spec/草稿/yaml 对照（SPEC §2 inputs 14 个、§3 propose dispatch 清单、§4 po_propose 行 D-V4-20 增量、§5 mfu-analyzer 行、§6 词表更新）。当前文件 317 行。
-
-### 5.1 逐 hunk 受众翻转表
-
-| hunk | 位置 | 内容 | 裁决 |
-|---|---|---|---|
-| 1 | agent.md:46-49 | Subagent Protocol 增 mfu-analyzer 条目（Step 5、per profiled variant、ONLY when `{{ inputs.npu_chip }}` non-empty） | CLEAN。条件显式、路径同 `{{ subagents_root }}` 机制；但暴露 F-D20-1（L56 计数残留） |
-| 2 | agent.md:209-215 | 守卫改 **mfu guard**：条件源 `npu_chip` 非空；poll train_final.json / finalizer.pid；空 chip 不等 | CLEAN。操作性 why（REAL numbers 被竞态污染）保留；"only then profile/recheck" 覆盖双模；无 profile_script_path 残留 |
-| 3 | agent.md:217-250 | 逐 DONE 变体双模 profiling：placeholder 免前置；mfu = dispatch mfu-analyzer（六输入）→ 3 条单行机械校验 → adapter 转换 → 失败矩阵重述 | CLEAN。校验块为**三条独立单行命令**（ls 探测 / `[ -s ]` / 首行哨兵比对），无循环/分支/exit 控制流——契约 §4 单行 operational 允许类，非 FINDING-1 同类；哨兵字面量与 mfu-analyzer.md L7/L135 **逐字一致**；六输入名与 mfu-analyzer.md Inputs 表（L24-29）逐一对应；"never hand-edit raw products" = 原始产物只读 ✅；"evaluation that failed on the service side still produces a report" 是 H5 的**行为式描述**（未引内部规则编号——正确处理） |
-| 4 | agent.md:252-265 | recheck 双调用形态：placeholder 裸调用 / mfu `--pre-profiled`，阈值实参均显式 | CLEAN。旧的条件参数组装 `$( [ -n ] && printf ... --profiler ... )` 随 profile_script_path 退役**整体删除**——比旧版更净；两模式各一条单命令 |
-| 5 | agent.md:270-279 | 修复环增 mfu 分支：rm verdict + **整删 profile/** → 修复后重派 analyzer + 重跑 adapter | CLEAN。wipe 的 why（analyzer 复用既有完整结果，与 mfu-analyzer.md L72 自述一致）+ 顺序 wipe→implementer→analyzer→adapter→recheck 无歧义；修复配额 ≤2 不变、analyzer 重派受统一失败矩阵约束 |
-| 6 | run_latency_recheck.sh 全部 hunks（代码资产，按更严 prose 标准顺检） | 双模注释块 / `--pre-profiled` 解析 + 互斥 fail loud / pre-profiled 缺四件套 hard error（文案指明先 dispatch analyzer + adapter）/ 显式空 `--profiler` 回落默认 / 分支重排 | CLEAN。注释全 operational（谁产四件套、两模式语义、为何互斥）；旧 "profile_script_path input" 注释措辞已随改 "empty npu_chip"；无任何残留词 |
-
-### 5.2 SPEC §4 po_propose 行 D-V4-20 增量一致性核对
-
-| # | 要求（SPEC §4 行 + 草稿 D-V4-20） | agent.md 落点 | 结论 |
-|---|---|---|---|
-| 1 | GPU 守卫条件源 profile_script_path → `npu_chip` 非空（placeholder 空不等） | L209-215 | ✅ |
-| 2 | mfu 模式 = 逐 DONE 变体 dispatch mfu-analyzer（variants/<vid>/onnx + profile/ + 报告路径 + 三参） | L217-229（`<onnx_path>`/`<profile_dir>`/`<report_path>`/`<chip>`/`<precision>`/`<core_num>`，与 mfu-analyzer.md Inputs 逐字对应） | ✅ |
-| 3 | `mfu_adapter.py` 产该 vid 四件套 | L241-244（部署件路径 `$ORCA_ARTIFACTS_DIR/scripts/mfu_adapter.py`；脚本实在 `_po_scripts/`，stderr 原文进 error） | ✅（引 F-D20-2 守卫未增补） |
-| 4 | recheck 对该 vid 跳过内联 profile 只做门判定；`--pre-profiled` 与 `--profiler` 互斥 | L254-265 + 脚本互斥检查（同 commit 落地） | ✅ |
-| 5 | 打回修复重测 = 重派 mfu-analyzer + 删旧四件套 | L272-279（rm verdict + 整删 profile/ + 重派 + adapter） | ✅ |
-| 6 | placeholder 模式行为完全不变 | L220-221 + L259-261（无前置、无守卫等待、裸调用） | ✅ |
-| 7 | mfu-analyzer 失败矩阵同款（评测失败按 H5 出报告；产物缺失重派 1 次 → error） | L246-250（矩阵自足重述 + H5 行为式描述） | ✅ |
-| 8 | Subagent Protocol 增 mfu-analyzer[仅 npu_chip 非空] | L46-49 | ✅（措辞残留见 F-D20-1） |
-| 9 | 阈值实参 100/1/0.5 调用行显式（两模式均持） | L260-264 | ✅ |
-| 10 | inputs 14 个（npu 三参 [advanced] 枚举校验） | `{{ inputs.npu_chip/npu_precision/npu_core_num }}` 模板引用；yaml 同 commit 落地（退役 profile_script_path、增三参 + 枚举 fail loud 描述） | ✅ |
-
-盘面核对：`workflows/subagents/prof-opt/mfu-analyzer.md` + `_po_scripts/mfu_adapter.py` 均在 ✅。
-
-### 5.3 词表复扫（SPEC §6 更新后口径）
-
-- 词表变更：**增** `profile_script_path`（退役）、**移** `mfu_adapter`（自 D-V4-20 起为正式交付物）。
-- po_propose 全目录（agent.md + scripts/ + references/）Grep：`profile_script_path` **0 命中**；全词表 + 补充词表（v3/v4/po_implement/po_verify/mnist/cifar/R2-/D-V4/懒补训/epoch-only 等）唯一命中 = `references/structural-levers.md:121` 的 "MobileNetV3"——`v3` 子串**误报**（合法模型名，契约 §4 自注 ResNet-50/ViT-14 同类不伤，且 references 属本轮范围外文件）。**有效命中 = 0** ✅。
-
-### 5.4 Findings（D-V4-20 增量）
-
-**F-D20-1（低 · 增量未波及汇总面）**
-- 位置：`agent.md:56`（"**Failure matrix, uniform across all three subagents**"）；关联 `agent.md:2`（frontmatter description 仅枚举三 subagent，未提条件性 profiling dispatch）。
-- 问题：D-V4-20 新增第四个（条件性）dispatch 目标，失败矩阵标题的 "all three" 计数成陈旧表述。执行无歧义——Step 5 L246 自足重述 "follows the uniform one" 并展开同款矩阵——属措辞级不一致，非语义缺陷。
-- 建议修法（一行级）：L56 改 "uniform across every subagent this node dispatches"；description 酌情补一短语（如 ", profiling each variant through the mfu-analyzer subagent when an NPU chip is configured"）。或 waive。
-
-**F-D20-2（低 · 部署前置守卫未随增补）**
-- 位置：`scripts/check_prerequisites.sh:17-19`（六文件清单未含 mfu_adapter.py / mfu_benchmark.py）；关联 `agent.md:242`（新增节点直调 `$ORCA_ARTIFACTS_DIR/scripts/mfu_adapter.py`）与 mfu-analyzer.md L37（依赖部署件 mfu_benchmark.py）。
-- 问题：守卫自述目的为"进入即验部署完整、绝不对半部署工作区作业"，但 mfu 模式新增的两个部署件依赖未入清单——缺件要到 Step 5 调用点才 fail loud。正确性无损（调用点同样 fail loud），完备性缺口。
-- 建议修法：清单增补两文件（无条件列入最简；或按 npu_chip 非空条件列）。
-
-两项均低严重度、非阻塞；不影响 D-V4-20 语义正确性与 fail-loud 底线。前四轮全部既有结论（§一-§四）在本次增量后继续有效——D-V4-20 未触碰 Step 0-4/6 及 Validation 的任何已审语义。
-
-上轮判定（被 §六 终验取代）：VERDICT: ISSUES (2)
-
-## 六、终验（2026-08-26，commit `fc6bb89`）
-
-`git show fc6bb89` 逐 hunk（3 文件，4+/3-）：
-
-- **F-D20-1 闭环 ✅**：`agent.md:56` 改 "**Failure matrix, uniform across every subagent this node dispatches**"——与建议修法逐字一致，数量词去三化，无新残留。关联点 frontmatter description（L2）按 §5.4 "或 waive" 选项保持不动——description 本就不含计数表述、作为摘要仍准确，非未闭环项。
-- **F-D20-2 闭环 ✅**：`check_prerequisites.sh:16-17` 清单增补 `mfu_adapter.py mfu_benchmark.py`（无条件列入，建议的最简形态）；`bash -n` 通过；两文件均实在 `_po_scripts/`（deploy_scripts.sh glob 全量部署源）——placeholder 模式下不会误报缺件，无新问题。
-- **测试联动 ✅**：`tests/test_po_scripts.py` `_PREREQ_FILES` fixture 同步增补两文件（与脚本清单一致；协调方报告 123 passed + tars validate 通过）。
-- **无越界改动**：commit 仅含上述三处，agent.md 其余 315 行未动——§一~§五 全部既有结论继续有效。
-
-**累计六轮审查（初审 → 24eb711 复验 → D-V4-20 增量复验 → fc6bb89 终验）全部 findings 闭环；未解决项：无。**
-
-VERDICT: CLEAN
+VERDICT: CLEAN（附 1 条 🟢 非阻塞完备性项，2026-09-08 v3 复审）

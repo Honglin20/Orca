@@ -97,8 +97,8 @@ base/model.onnx（step1 导出，不变）
   `variants/<VID>/profile/<onnx_stem>/schedule_result.json.parallel_cycles`；agent 只消费
   `variants/<VID>/profile/mfu_bottleneck_report.md`，需要证据下钻时再读报告列出的源文件。
 
-### 3.4 mfu-analyzer.md 重写（version 2）
-- frontmatter `version: 2`，哨兵行 `[subagent:mfu-analyzer v2 MBA7K2]`（哨兵码不变，
+### 3.4 mfu-analyzer.md 重写（version 2；2026-09-08 v3 修订）
+- frontmatter `version: 3`，哨兵行 `[subagent:mfu-analyzer v3 MBA7K2]`（哨兵码不变，
   版本号升级；所有引用方与测试同步更新）。
 - 报告模板重心反转：**「瓶颈根因」为主位**（1-3 个根因，区分表象与根因），算子级
   证据表降为「按显著性列行」（不固定 Top-5；说明列写「为什么它是/不是瓶颈」）。
@@ -112,6 +112,25 @@ base/model.onnx（step1 导出，不变）
   （H5）、哨兵协议、幂等复用。
 - 知识库收缩为「根因类型提示」四条（DMA 搬运 / 小算子碎片 / 子图串行化 / 算力利用率），
   只作诊断词汇，不开结构药方（结构先验归 structural-levers 单一来源）。
+- **v3 修订（2026-09-08，真机误判纠正）**：v2 把「cycles 最大的 MATMUL」判成计算瓶颈，
+  漏掉 reduce/transpose/img2col 与 matmul 交替的格式切换税。v3 引入：
+  - **共享硬件知识单文件化**：`subagents/references/ascend.md`（9 条昇腾铁律压缩 +
+    op 分类表 + proposer 设计倾向三节），po_propose 与 mfu-analyzer 经
+    `{{ subagents_root }}` 共用；`po_propose/references/hardware/ascend.md` 删除。
+    mfu-analyzer Inputs 增 `<hardware_ref>`（必读），两个派发方（po_baseline /
+    po_propose）同步传入。
+  - **诊断框架 = bound 判定矩阵**：时间轴按 op 分类表切 cube / vector / 搬运重排
+    三窗口 → 主导 bound 类型（cube 满载 / feed-bound / vector-bound /
+    memory-movement-bound / serialization-bound）；判定看「耗时算子的 MFU 状态 +
+    硬件语义」，禁止由单算子 cycles 排名直接得出（H2 扩充）。
+  - **MFU 主位**：新增报告段「MFU 损耗分解」——模型级 MFU = cube 窗口平均利用率 ×
+    cube 窗口占比，两因子各映射一类损耗；根因段每条标注「影响 MFU 的因素」与
+    「阻碍时延的因素」。提 MFU 与降时延同位（时延 = 计算量 ÷ (MFU × 峰值)）。
+  - **MFU 口径硬规则**：MFU 列只对 cube 类算子有诊断意义；vector 类用时间占比度量，
+    搬运重排类 MFU≈0/>100% 均无信息量，只按成本计价。
+  - 根因词汇表四条→五条（+格式/布局转换税）；证据表「是否瓶颈」列改「归因」语义；
+    校验门（check_baseline_docs.sh）节清单增 `### MFU 损耗分解`。
+  - 计划：`docs/plans/2026-09-08-mfu-analyzer-v3.md`。
 
 ---
 
@@ -159,7 +178,7 @@ base/model.onnx（step1 导出，不变）
 
 ### 5.1 Step1 瓶颈证据（简化）
 - 删除 placeholder 分支与 bottleneck-analyst 派发。Step1-pre 只做校验：
-  `base/profile/mfu_bottleneck_report.md` 存在且首行哨兵 = `[subagent:mfu-analyzer v2 MBA7K2]`
+  `base/profile/mfu_bottleneck_report.md` 存在且首行哨兵 = `[subagent:mfu-analyzer v3 MBA7K2]`
   （fail loud，缺失说明基线阶段未完成）。
 - proposer 输入 `<info_analysis>`、`<baseline_doc>` 等不再「when it exists」静默可选：
   三份基线文档（business_logic / information_analysis / mfu 报告）**必须在场**（§4.3

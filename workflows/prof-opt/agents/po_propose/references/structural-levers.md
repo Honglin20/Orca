@@ -8,10 +8,11 @@ actually reason from is the current run's mfu bottleneck report
 business-logic document. Raw source paths listed by the report may be opened
 for evidence drill-down; there is no secondary mechanical analysis report.
 This catalog tells you what kinds of structure
-changes exist, not which one to pick this round. Structural priors live
-HERE and only here — the mfu-analyzer's root-cause vocabulary (DMA 搬运 /
-小算子碎片 / 子图串行化 / 算力利用率) is diagnostic language, and each entry
-below is annotated with the root-cause types it typically addresses.
+changes exist, not which one to pick this round. Structure-change levers
+live HERE and only here — the mfu-analyzer's root-cause vocabulary (DMA 搬运 /
+格式/布局转换税 / 小算子碎片 / 子图串行化 / 算力利用率) is diagnostic
+language, and each entry below is annotated with the root-cause types it
+typically addresses.
 
 Training paradigm note: every variant trains FROM SCRATCH at a fixed seed —
 no weight is ever inherited, so a change may freely alter the parameter set.

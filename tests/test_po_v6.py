@@ -59,7 +59,7 @@ _ALLOC_PY = _SCRIPTS / "device_alloc.py"
 _LEDGER_AGG = _SCRIPTS / "ledger_aggregate.py"
 _LEDGER_PY = _SCRIPTS / "experiment_ledger.py"
 _DEPLOY_SH = _SCRIPTS / "deploy_scripts.sh"
-_MFU_REPORT = ("[subagent:mfu-analyzer v2 MBA7K2]\n"
+_MFU_REPORT = ("[subagent:mfu-analyzer v3 MBA7K2]\n"
                "## MFU latency bottleneck report\n"
                "### Source files\n- model/schedule_result.json\n")
 

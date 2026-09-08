@@ -12,7 +12,7 @@
 #      the pretrained-ckpt anchor is deleted in v7 — F2)
 #   4. stdlib collision: no shadow top-level name in sys.stdlib_module_names
 #   5. deployed tooling: orca_inject pair + scripts/{assert_shadow,render_run,
-#      emit_result,deploy_scripts,analyze,mfu_adapter} present
+#      emit_result,deploy_scripts} present
 #   6. project_manifest.md: pinned sections + EVERY listed ranking metric's
 #      direction marked (v7 F10: per-metric check, one spelling —
 #      higher_better / lower_better)

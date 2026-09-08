@@ -46,8 +46,8 @@ Dispatch these tasks in parallel, each after fully reading its subagent file:
 
 Provide the baseline documents, current `shadow/` source, current
 `base/incumbent.json` or origin baseline, prior analyses, prior variant MFU
-reports, history, accuracy rules, failed signatures, and
-`$ORCA_AGENT_RESOURCES/references/hardware/ascend.md`. Each candidate must name
+reports, history, accuracy rules, failed signatures, and the shared hardware
+reference `{{ subagents_root }}/references/ascend.md`. Each candidate must name
 the information invariant, measured root cause, affected source files,
 shape/operator strategy, latency mechanism, risks, and implementation sketch.
 Build failed signatures as the union of `failed_sigs` from every existing
@@ -86,7 +86,10 @@ For the sole proposal dispatch, in order:
 1. `variant-implementer` → source snapshot, declaration, ONNX, `DONE`
 2. `variant-assessor` → `variants/<vid>/assessment.md`
 3. `mfu-analyzer` → raw schedule result and
-   `variants/<vid>/profile/mfu_bottleneck_report.md`
+   `variants/<vid>/profile/mfu_bottleneck_report.md` (pass
+   `<hardware_ref>={{ subagents_root }}/references/ascend.md`, plus
+   chip / precision / core_num taken from `contracts.json`'s `profile`
+   block, as po_baseline does)
 
 No candidate document may bypass the selector. Use the existing bounded repair
 loop on the same selected architecture; never introduce a competing proposal.

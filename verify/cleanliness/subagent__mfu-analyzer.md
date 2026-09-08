@@ -1,58 +1,76 @@
-# 洁净审查记录 — workflows/subagents/prof-opt/mfu-analyzer.md
+# 洁净审查记录 — workflows/prof-opt/subagents/mfu-analyzer.md
 
-- 审查对象：`D:\Projects\Orca\workflows\subagents\prof-opt\mfu-analyzer.md`（v1，sentinel MBA7K2，D-V4-20 新增）
-- 审查方法：全文通读 + 受众翻转（假设读者 = 只懂 MFU/NPU 业务、不懂 Orca 内部与 workflow 历史的执行子代理）+ 禁词 grep + SPEC/草稿/骨架/脚本 docstring 事实核对
-- 参照：洁净契约 `orca/skills/create-workflow/reference/agent-prompt-cleanliness-contract.md`；SPEC `docs/specs/prof-opt-v4-spec.md` §5 mfu-analyzer 行；草稿 D-V4-20（`docs/specs/prof-opt-v4-design-draft.md` §0.2）；骨架对照 `workflows/subagents/prof-opt/memory-verifier.md`；事实基准 `workflows/agents/_po_scripts/mfu_benchmark.py` docstring CONTRACT
-- 审查日期：2026-08-26
+- 审查对象：`D:\Projects\Orca\workflows\prof-opt\subagents\mfu-analyzer.md`（**v3**，243 行，frontmatter `version: 3` / `sentinel: MBA7K2`；per-wf 自包含布局）
+- 审查性质：v2→v3 全量重写后的洁净复审（2026-09-08，bound 判定矩阵 + MFU 损耗分解 + 硬件参考单文件化；plan：`docs/plans/2026-09-08-mfu-analyzer-v3.md`，SPEC：`docs/specs/prof-opt-v7-spec.md` §3.4 含 v3 修订记录）
+- 审查方法：全文通读 + 受众翻转（假设读者 = 只懂 MFU/NPU 业务、不懂 Orca 内部与 workflow 历史的执行子代理）+ 五组禁词 grep + 事实核对（ascend.md / check_baseline_docs.sh / run_baseline_chain.sh / 派发方 agent.md ×2 / 测试锁定点）
+- 参照：洁净契约 `orca/skills/create-workflow/reference/agent-prompt-cleanliness-contract.md`（§0-§9 通读裁决法 + §5 operational 判据 + §9 references 二分）；共享硬件参考 `workflows/prof-opt/subagents/references/ascend.md`（168 行，本次同批新建）
+- 审查日期：2026-09-08
 
 ## ① 逐段受众翻转结论表
 
 | 段（行号） | 内容 | 受众翻转结论 |
 |---|---|---|
-| L1-8 | frontmatter（subagent/version/sentinel）+ 首行哨兵回显指令 | **PASS** — 与 memory-verifier 骨架同构；哨兵机制自包含，回显串逐字给出 |
-| L10-18 | purpose（4 步职责） | **PASS** — 纯 WHAT：调脚本→解析→识别瓶颈→报告落盘；无历史/出处叙事 |
-| L20-29 | Inputs 六参表（onnx_path/profile_dir/report_path/chip/precision/core_num） | **PASS** — 与 SPEC §5 输入列逐项对齐；每参含类型/取值域，独立可执行 |
-| L31-52 | 核心脚本用法 + 参数表 | **PASS** — `$ORCA_ARTIFACTS_DIR/scripts/mfu_benchmark.py` 是契约 §5 白名单 operational env 串（部署件路径非引擎源码）；CLI 实参样例完整可照抄 |
-| L54-66 | 输出产物清单 + 原始产物只读令 | **PASS** — 产物路径模式与脚本 CONTRACT 一致；L65-66「下游的确定性适配器与分析器都要按路径读它们」是约束执行所需的最小 why（防 agent 自作主张搬移产物），非设计考古（无内部路径/代号） |
-| L68-86 | 阶段 1 执行评测（幂等优先 + 失败路径） | **PASS** — 复用判定条件具体（schedule_result.json 等在场）；评测失败→仍进阶段 2 的分支与 H5 呼应，fail loud（无日志时如实写明失败，报告标注） |
-| L87-107 | 阶段 2.1/2.2（macs.csv + 时延 csv + 瓶颈识别四规则） | **PASS** — 列名（cycles/MFU/delay_cycles）与脚本 csv 契约一致；「见知识库条目」「见 H4/H5」均为本文档内部自包含引用 |
-| L109-127 | 阶段 2.3/2.4（subgraph json + schedule_result + log） | **PASS** — 字段归属事实核对通过（见④）；文件名模式 `6613_*.csv`/`1951_*.csv` 与 `<chip>_<stem>.csv` 契约一致 |
-| L129-157 | 阶段 3 报告模板（写 report_path + 首行哨兵） | **PASS** — 模板逐段可填；「并行 cycles 即下游判定使用的 canonical makespan」与脚本 docstring CANONICAL MAKESPAN 条款一致，属跨工具 operational 词汇 |
-| L159-196 | 优化建议知识库（6 条目） | **PASS** — 全部为 NPU/MFU 领域通用知识（Conv 分解/DMA/Reshape 碎片/注意力结构/L1D 4MB/MFU>100% 偏差）；**无项目内部方案代号**（ns3/psu/pure_cnn/feat_complex 等零命中）；建议为泛化句式（「可评估」「结构上」），非具体项目方案回放 |
-| L198-209 | 硬规则 H1-H6 | **PASS** — 六条全部可机械遵守；H6 写盘协议与 Constraints 双重钉死（只写 report_path，profile_dir 只读） |
-| L212-224 | Output（紧凑摘要 ≤10 行）+ Constraints | **PASS** — 返回协议明确（首行哨兵 + 状态 + 并行 cycles 一句话 + Top-3 + 根因 + 报告路径）；不产 PROFILER_CONTRACT 四件套（与 mfu_adapter.py 分工正交，见④） |
+| L1-8 | frontmatter 三键 + 首行哨兵回显指令（v3 MBA7K2） | **PASS** — 哨兵串逐字给出，自包含；frontmatter version 与正文哨兵、锁死点（gate/chain/tests）四方一致 |
+| L10-25 | purpose（4 步职责 + 「唯一 profiling 方式」宣言） | **PASS** — 纯 WHAT：「时延瓶颈与 MFU 瓶颈是同一诊断的两个面」是执行判定标准（改变 agent 看什么），非设计论证；「没有本地估算、没有环境嗅探、没有降级路径」是 fail-loud 边界，非退役物叙事 |
+| L27-37 | Inputs 七参表（新增 `<hardware_ref>`） | **PASS** — 七参与两个派发方实传逐项对应（po_baseline L113 全七参；po_propose L90 补传 hardware_ref）；`<hardware_ref>` 标注「开工前必须 Read」与阶段 0 呼应 |
+| L39-50 | 核心脚本用法 | **PASS** — `$ORCA_ARTIFACTS_DIR/scripts/mfu_benchmark.py` 为契约 §5 operational env 串；单次 bash 调用 = 契约 §4 允许类；「完整参数语义以 `--help` 为准，不要凭记忆传」防漂移 |
+| L52-68 | 输出产物清单 + 原始产物留置令 | **PASS** — 「latency gate 直接读取原始 schedule_result.json.parallel_cycles，不存在适配器或二次分析器」是下游消费事实（解释 H6 为何不许搬移产物），operational why 非考古 |
+| L70-76 | 阶段 0：读硬件参考 | **PASS** — 「其 §2 的 op 分类表是时间轴三分类的依据」为 ascend.md 文件内导航（该文件被明确指示 Read，契约 §5 判据 = operational，非 spec/plan 节号）；「实测与其判定冲突时信实测，在披露段记录反例」与 ascend.md 头部 fail-loud 前提互相印证 |
+| L78-86 | 阶段 1：幂等优先 + 失败路径 | **PASS** — 复用判据具体（schedule_result.json 等在场）；非零退出仍进阶段 2（H5）+ 无日志时如实写失败并标注 `评测失败`——fail loud 双分支显式 |
+| L88-141 | 阶段 2：读取优先级 + 三窗口 + MFU 损耗分解 + bound 判定矩阵 + 判断语言 | **PASS** — 三窗口分类与 ascend.md §2 op 分类表逐类对应（cube/vector/搬运重排）；bound 五标签（cube 满载/feed-bound/vector-bound/memory-movement-bound/serialization-bound）与报告模板 L178 枚举同集；「MFU 口径硬规则」（vector 用时间占比、搬运重排 MFU≈0/>100% 不作异常信号）与 ascend.md §2 利用率口径列/1.2/1.10 一致；「不存在 MFU<30% 固定阈值」= 相对同类判断语言，无历史包袱措辞。发现 **F1（L137 mfu-cost 裸术语）**、**F2（bound 标签字面微差）**，见 ② |
+| L143-195 | 阶段 3：报告模板（六节 + 首行哨兵） | **PASS** — `### 分析源文件` 列 hardware_ref 实读路径（H7 钉死）；`### MFU 损耗分解` 与 check_baseline_docs.sh L97 节清单同步（WSL 实测 exit 0，见 ③）；披露节显式列「MFU>100% 估算偏差/与硬件参考冲突的实测反例」，承接 L76/L137 的「在披露段告警/记录反例」——模板与硬规则零矛盾 |
+| L197-214 | 根因类型词汇表（五类） | **PASS** — 五类（DMA 搬运/格式布局转换税/小算子碎片/子图串行化/算力利用率）与 structural-levers.md L12-14 逐字同集；「本报告不开发结构方案、不给配置建议……硬件 reference 的 §3 是事前先验」三刀切职责（诊断/先验/药方），与 ascend.md 双受众头注、structural-levers「Structural priors live HERE and only here」口径闭合 |
+| L216-227 | 硬规则 H1/H2/H5/H6/H7 | **PASS** — 五条均可机械遵守；无 H3/H4 引用（编号断档为 v2 重写删除项的稳定编号，SPEC §3.4 保留行引用同组 H1/H2/H5/H6，重编号反而破坏跨文档引用——判定合法，见 ② 非计数 N2） |
+| L229-243 | Output（报告落盘 + ≤10 行紧凑摘要）+ Constraints | **PASS** — 哨兵回显、报告路径、只写 report_path 一个文件；与 Constraints「profile_dir 只读」（H6）双重钉死；「报告不开结构药方——那是调用方与 proposer 的职责」收口职责边界 |
 
 ## ② Findings
 
-**零 finding。** 受众翻转通读未发现任何开发期残留：无 plan/issue/§N.M 编号、无 Orca 引擎源码路径、无内部 examples 路径、无项目名/方案代号硬编码、无 v4 已删机制措辞、无迁移/版本考古、无事故复盘叙事、无确定性多行代码内联（唯一 bash 块是单次脚本调用实参样例，属合法 operational）。语气为产品说明书式指令体。
+### F1（轻微 · 可读性/可定位）
 
-### 信息性备注（非 finding，不阻断）
+- **位置**：`workflows/prof-opt/subagents/mfu-analyzer.md:137`
+- **问题**：「或 >100%（mfu-cost 对小 shape 的已知估算偏差）」——`mfu-cost` 是评测工具内部的成本模型名，全文无解释，运行时子代理无实底（ascend.md 1.2 陈述同一事实时未点名：「常爆 >100% 估算偏差」）。操作规则本身自洽（「两者都不作为异常信号，只按成本计价」），不构成洁净违规（非开发考古、非引擎路径）。
+- **建议修法**：改为「（评测工具的 mfu-cost 估算对小 shape 有已知偏差）」或径直删括注、只留「（定义使然、无信息量）」一层理由。
+- **处置**：🟢 非阻塞；待创作方顺手修。
 
-- **N1（L61-63）**：输出清单列出的 `gantt_chart_optimized.html` / `memory_usage_optimized.html` / `memory_allocation.html` 三个 HTML 产物不在当前部署的 placeholder `mfu_benchmark.py` docstring CONTRACT 内（grep 该脚本无任何 html 写出）。运行时零影响——阶段 1 复用判定与阶段 2.1-2.4 全部只依赖 CSV/JSON/LOG，不读 HTML；且 D-V4-20 明确该脚本是「用户真评测脚本载体，内容随用户提供替换」，清单描述的是真脚本行为。若追求与 placeholder 态严格一致可加「（真评测模式）」标注或删除三行，属可选润色。
-- **N2（L145）**：报告模板「串行 MFU / 并行 MFU / 内存占用」三字段未显式给出推导来源（数据在场：csv 的 mfu 列、macs.csv、subgraph json 的 memory；聚合公式留给判断）。非洁净问题（六输入/脚本路径/三阶段/H1-H6/写盘协议五项均明确），仅记录可执行性锐度。
+### F2（轻微 · 字面一致性）
 
-## ③ Grep 词表结果
+- **位置**：`workflows/prof-opt/subagents/mfu-analyzer.md:124`（`cube 满载`，空格形）vs `:178`（`cube满载`，无空格）；`workflows/prof-opt/subagents/references/ascend.md:24`（`vector bound`）、`:46`（`memory-movement bound`，空格形）vs `mfu-analyzer.md:126-128`（`vector-bound`/`memory-movement-bound`，连字形）。
+- **问题**：bound 标签是根因段的规范枚举（L178 为下游引用形），同一词汇集三处两种写法。无机械门解析这些串（check_baseline_docs.sh 只查节标题），纯字面锐化。
+- **建议修法**：以 L178 模板枚举为规范形，矩阵行（L124-128）与 ascend.md §1 诊断栏统一为连字形。
+- **处置**：🟢 非阻塞；待创作方顺手修。
 
-对目标文件跑（不区分大小写）：`mnist_kd / playground / prof_opt_demo / run_verify / baseline_proxy_acc / baseline_ref / profile_script_path / perturb_ckpt / playbook / ref-input / auto-trained / docs/specs / D:\Projects / D:/Projects / /mnt/d / spec-review / SPEC-R1 / ns3 / psu / kd-nas / nas-supernet / prof-opt-design-draft / pure_cnn / feat_complex`
+### 非计数观察（不构成 finding，备案）
 
-**全部零命中。** 补充宽口径（懒补训 / epoch-only / proxy / baseline / perturb / ckpt / § / issue / TODO / FIXME / D-V4 / v2 / v3 / v4 / 历史 / 迁移 / 前身 / 前作 / Orca）：唯一命中为 L65-66 的「适配器/分析器」约束说明（见①，判定合法 operational）。
+- **N1（L92）**：`6613_*.csv`/`1951_*.csv` 芯片前缀是 `<chip>` input 枚举（L36）对应的产物命名契约（领域事实），非 §6 测试夹具硬编码。
+- **N2（L216-227）**：H 编号断档（无 H3/H4）是 v2 删除项（MFU<30% 阈值/配置类建议）留下的稳定编号；全文零 H3/H4 引用，无 dangling；SPEC §3.4 保留行按同组编号引用——重编号会造成 spec 引用漂移，维持现状正确。
+- **N3（L74/L102/L201）**：`§2`/`§3` 均指 ascend.md 文件内节（agent 被明确指示 Read 该文件），契约 §5 判据 = operational；validator 的 spec/plan 节号 pattern（`N.M` 形）不命中，即使命中也属误报。
 
-## ④ 契约一致性核对
+## ③ 哨兵一致性 + 门实测（本次复审机械证据）
+
+- 全仓 v2 哨兵扫描：唯一命中 `docs/plans/2026-09-08-mfu-analyzer-v3.md:25`（D3 修订记录，开发文档，允许）；`docs/releases/2026-08-26-prof-opt-v4-refactor.md:36` 的 v1 提及为历史 release 记录，允许。运行时锁定点全部 v3：本文 L7/L146/L149/L233、`run_baseline_chain.sh:354`、`check_baseline_docs.sh:26`、`tests/test_po_scripts.py:756/1437/1456`（+ :1646 stale-replace 改 v3→v1）、`tests/test_po_v6.py:62`。
+- WSL 实测 `check_baseline_docs.sh` 三用例（合成报告，ORCA_ARTIFACTS_DIR 绝对路径）：
+  1. v3 哨兵 + 六节全 → **exit 0 PASS**；
+  2. stale v2 哨兵 → **exit 1**，报文同时给出期望（v3）与实得（v2）——旧工作区遗留报告被正确拒绝；
+  3. v3 哨兵缺 `### MFU 损耗分解` → **exit 1** 并点名该节——节清单同步生效。
+- `bash -n`：`run_baseline_chain.sh` / `check_baseline_docs.sh` 语法均通过。
+
+## ④ 契约一致性核对（SPEC §3.4 v3 修订行 + 派发方 + ascend.md）
 
 | 核对项 | 基准 | 结论 |
 |---|---|---|
-| 输入六参 | SPEC §5：onnx 路径 + profile_dir + report_path + chip/precision/core_num | **一致**（Inputs 表 L20-29 逐项对应） |
-| 输出 = 原始产物只读落 profile_dir + 报告首行哨兵 | SPEC §5 输出列；D-V4-20 | **一致**（L54-66 产物留置 + H6 只读 + L131-135 报告首行哨兵；报告文件名 `mfu_bottleneck_report.md` 由调用方经 `<report_path>` 传入，子代理侧正确不写死） |
-| 评测失败仍出报告（H5） | SPEC §5 输出列括注 | **一致**（L83-86 阶段 1 失败路径 + H5 L207-209） |
-| 紧凑摘要返回 | 草稿 D-V4-20（LLM 只做执行编排与定性分析） | **一致**（Output §2 ≤10 行摘要） |
-| 不产四件套（与 mfu_adapter.py 分工） | D-V4-20（analyzer=执行层，adapter=四件套转换） | **一致**——全文零提及四件套/PROFILER_CONTRACT/summary 产出；唯一写盘 = report_path |
-| 节点侧校验条款不在子代理文件 | SPEC §5 第 4 列（归 po_baseline/po_propose agent.md） | **一致**——本文件正确不含节点侧重派/error 逻辑 |
-| 骨架同构 memory-verifier.md | frontmatter 三键 + 首行哨兵回显 + Inputs + 报告落盘优先 + Constraints | **一致** |
-| **事实核对：§2.3 serial/parallel cycles 字段归属** | `mfu_benchmark.py` docstring：`schedule_result.json = {"schema_version":1,"chip":..,"precision":..,"core_num":..,"serial_cycles":S,"parallel_cycles":M,"subgraph_count":1}`；CANONICAL MAKESPAN = parallel_cycles | **一致**——L117-120：`serial_cycles`/`parallel_cycles` 归属 schedule_result.json、chip/precision/core_num 同文件可核对、并行 cycles = canonical makespan，全部与 docstring 逐字对上；§2.3 subgraph json 字段（cycles/delay_cycles/flops/memory/op_type）亦为 docstring tasks[] 契约子集 |
-| §2.1/2.2 CSV 列名与文件名模式 | docstring：`<chip>_<stem>.csv`（name,op_type,cycles,mfu,delay_cycles）、`<stem>.macs.csv`（name,op_type,macs） | **一致** |
+| frontmatter `version: 3` + 哨兵 `[subagent:mfu-analyzer v3 MBA7K2]`（哨兵码不变） | SPEC §3.4 L100-101 | **一致** |
+| Inputs 增 `<hardware_ref>`（必读），两个派发方同步传入 | SPEC §3.4 v3 修订；po_baseline L113 / po_propose L90 | **一致**（两处路径写法逐字同为 `{{ subagents_root }}/references/ascend.md`） |
+| 三窗口分类依据 = ascend.md §2 op 分类表 | ascend.md L120-131（cube/vector/搬运重排 + 利用率口径列） | **一致**（三类逐项对应；「不在表内按语义归入最近类别并说明理由」的兜底条款在 ascend.md 侧） |
+| bound 判定五标签 | SPEC §3.4 v3 修订 + 报告模板 L178 | **一致**（矩阵 L122-128 与模板枚举同集；字面微差见 F2） |
+| 报告节增「MFU 损耗分解」；check_baseline_docs.sh 节清单增同名节 | SPEC §3.4 v3 修订末条；check_baseline_docs.sh L94-97 | **一致**（门五节 = 模板六节中的五节必需，`### 分析源文件` 不入门属门侧从简，非矛盾；实测见 ③） |
+| MFU 口径硬规则（vector 占比 / 搬运重排不作异常信号） | SPEC §3.4 v3 修订；ascend.md §2 口径列 | **一致** |
+| 根因词汇表五类 | structural-levers.md L12-14 | **一致**（逐字同集，4→5 同步完成） |
+| 失败也分析（H5）+ 无日志时报告标注 `评测失败` | SPEC §3.4 保留行；po_baseline L237（gate 对失败报告仍验哨兵+节） | **一致**（`评测失败` 标注写进「模型概况」段 → 门节非空判定仍可过） |
+| 不开结构药方、不给配置建议 | SPEC §3.4 删除行；structural-levers 单一来源声明 | **一致**（L201/L243 两处收口） |
+| 硬件参考单文件、无第二副本 | `subagents/references/ascend.md` 唯一活跃副本；`agents/po_propose/references/hardware/ascend.md` 已删（find 证实目录仅剩 structural-levers.md） | **一致** |
 
 ## 结论
 
-mfu-analyzer.md 受众翻转通读通过、禁词零命中、SPEC §5 / D-V4-20 / 骨架 / 脚本 docstring 四方核对一致，两条信息性备注（N1 HTML 产物清单、N2 MFU 聚合来源）不构成洁净 finding。
+v3 全量重写后受众翻转通读通过：诊断框架（三窗口 + MFU 损耗分解 + bound 矩阵）自洽可执行、报告模板与硬规则/校验门/硬件参考三方对齐、哨兵与测试锁定点全量同步、五组禁词零命中。两条轻微 finding（F1 mfu-cost 裸术语、F2 bound 标签字面微差）均为非阻塞润色，待创作方顺手修；无洁净契约违规。
 
-VERDICT: CLEAN
+VERDICT: CLEAN（附 2 条 🟢 非阻塞润色项，2026-09-08 v3 复审）
