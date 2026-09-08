@@ -51,7 +51,11 @@ export function RunListPage() {
     staleProjects,
     loading,
     error,
+    hasMore,
+    loadingMore,
+    loadMoreError,
     refresh,
+    loadMore,
     deleteRun,
     deleteRuns,
     onRunChanged,
@@ -406,11 +410,35 @@ export function RunListPage() {
               </div>
             )}
 
-          {/* 0 命中（有数据但被筛光）行内提示（§5.2：不跳全屏空态） */}
+          {/* 0 命中（有数据但被筛光）行内提示（§5.2：不跳全屏空态）；
+              web-perf P1 review 修订（MAJOR-5）：分页后客户端搜索只覆盖已加载页 →
+              hasMore 时显式提示范围，防「未匹配」被误读为「不存在」 */}
           {runs.length > 0 && sorted.length === 0 && searching && (
             <p className="orca-text-muted mt-4 text-center text-xs">
               未匹配任何 run
+              {hasMore && `（仅搜索已加载的 ${runs.length} 条，可点下方加载更早后重试）`}
             </p>
+          )}
+
+          {/* web-perf P1（2026-09-08）：keyset 游标翻页入口——hasMore 才显示 */}
+          {hasMore && !showSkeleton && !showError && runs.length > 0 && (
+            <div className="mt-4 flex flex-col items-center gap-1">
+              <button
+                type="button"
+                data-testid="load-more"
+                onClick={() => void loadMore()}
+                disabled={loadingMore}
+                className="orca-text-muted hover:orca-text rounded border orca-border px-3 py-1.5 text-xs disabled:opacity-50"
+              >
+                {loadingMore ? "加载中…" : "加载更早的 run"}
+              </button>
+              {/* review MAJOR-4：翻页失败必须可见（单开关，下次成功自动清） */}
+              {loadMoreError && (
+                <span className="text-orca-failed text-xs" data-testid="load-more-error">
+                  加载更早的 run 失败，请重试
+                </span>
+              )}
+            </div>
           )}
 
           <StaleProjectsSection items={staleProjects} />
@@ -420,7 +448,8 @@ export function RunListPage() {
       {/* footer：显示数 + 选中数 + 全部展开/折叠（分组 ≥3 时） */}
       <footer className="orca-bg-surface orca-border orca-text-muted flex h-10 items-center justify-between border-t px-6 text-xs">
         <span>
-          显示 <span className="orca-text tabular-nums">{sorted.length}</span> / 共{" "}
+          显示 <span className="orca-text tabular-nums">{sorted.length}</span> /{" "}
+          {hasMore ? "已加载" : "共"}{" "}
           <span className="orca-text tabular-nums">{runs.length}</span>
           {selected.size > 0 && (
             <>

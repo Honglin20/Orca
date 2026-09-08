@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -28,6 +29,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import Response
 
+from orca.compile import catalog
 from orca.iface.web.routes import (
     build_approval_router,
     build_attach_router,
@@ -92,10 +94,29 @@ def create_app(manager: RunManager) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # web-perf P4（2026-09-08）：启动即后台预热 catalog 缓存 + runs discovery 索引，
+        # 把冷扫成本（catalog 全扫 + 逐 run stat）移出用户首访。
+        # **必须跑在事件循环线程**（``create_task`` 的 sync 段无 await 让出，与路由
+        # handler 天然互斥——满足 discover_runs 的单线程前提，见其 docstring；进线程池
+        # 会与请求并发重入 ``_defer_persist`` flag race）。失败仅 warn：预热是优化，
+        # 非正确性依赖（首访现扫兜底）。
+        async def _warmup() -> None:
+            try:
+                catalog.warmup_cache()
+                manager.discover_runs()
+            except Exception:  # noqa: BLE001 — 预热失败不阻断服务
+                logger.warning("启动预热失败（忽略，首访将现扫）", exc_info=True)
+
+        warmup_task = asyncio.create_task(_warmup())
         # startup：manager 无常驻 task（run task 在 start_run 时起），无需额外启动。
         try:
             yield
         finally:
+            warmup_task.cancel()
+            try:
+                await warmup_task
+            except asyncio.CancelledError:
+                pass  # 预热被 shutdown 打断即目的达成（不 await 会在 loop 关闭时噪音）
             # shutdown：approval broker 先清 pending（让 hook 早日 TCP 失败走 ask），
             # 再 manager.shutdown 等在跑 run 到终态 + stop 各自 gate_handler（无 leaked task）。
             try:

@@ -8,7 +8,8 @@
   - **run_id collision** → ValueError；**同 tape_path 重复 attach** → 幂等。
   - **security 6 samples**（AC §8.8）全 403 + allowlist 命中/未命中。
   - **partial 首行 5s** → ``corrupted``/not-orca-tape。
-  - **meta huge/overview**：``event_count > 50k`` → ``huge=true`` + overview 字段。
+  - **meta huge/overview**：``event_count > 50k`` → ``huge=true``；overview 对所有 run 返回
+    （web-perf P3 review 修订 2026-09-08，窗口态补偿通道）。
   - **events windowed**：``?since`` / ``?since&limit`` / ``?tail``。
   - **single registry**（AC §8.12）：``_runs`` 单 dict。
 """
@@ -427,7 +428,8 @@ def test_security_allowlist_hit_and_miss(tmp_path, monkeypatch):
 
 
 def test_meta_small_run_not_huge(tmp_path):
-    """小 tape：``huge=false``，无 overview。"""
+    """小 tape：``huge=false``，overview 照常返回（web-perf P3 review 修订 2026-09-08：
+    overview 对所有 run 返回——窗口态 run 的补偿通道依赖它，不再 gate 在 huge）。"""
     runs_dir = tmp_path / "runs"
     runs_dir.mkdir()
     tape_path = runs_dir / "small.jsonl"
@@ -444,7 +446,8 @@ def test_meta_small_run_not_huge(tmp_path):
         assert meta["huge"] is False
         assert meta["writable"] is False  # attached
         assert meta["source"] == "attached"
-        assert "overview" not in meta  # 仅 huge 模式返
+        # overview 对所有 run 返回（窗口态补偿通道；原契约「仅 huge 模式返」已修订）
+        assert "overview" in meta
         assert meta["event_count"] == 3
         assert meta["oldest_seq"] == 1
         assert meta["newest_seq"] == 3

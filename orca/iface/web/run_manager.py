@@ -22,6 +22,7 @@ gate_handler 全隔离），``RunManager`` 用 ``asyncio.Semaphore(max_concurren
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -1037,8 +1038,12 @@ class RunManager:
             "writable": not is_attached,
             "huge": huge,
         }
-        if huge and overview_data is not None:
-            # M4：huge 模式服务端 fold 派生 overview（同一 tape，非第二真相源）。
+        if overview_data is not None:
+            # M4 + web-perf P3 review 修订（2026-09-08）：overview 对**所有** run 返回
+            # （原来 gate 在 huge）。窗口态（P3 首屏 tail）run 的补偿通道依赖它——非 huge
+            # 的多事件 run 同样只有尾窗事件，agents/charts/docs 清单需服务端全量 fold
+            # 直构，否则派生视图静默失真（早期轮次图表缺失但界面呈现为完整）。overview
+            # 在 /meta 路径本就对每个 run 算过（_scan_meta_overview_cached），零额外成本。
             meta["overview"] = overview_data["overview"]
         return meta
 
@@ -1508,6 +1513,36 @@ class RunManager:
                 runs_dir = root / RUNS_DIRNAME
                 if not runs_dir.is_dir():
                     continue  # 项目无 runs/ → skip（stale）
+                # web-perf P2：目录指纹粗判命中 → 逐名缓存直构快速路径（零 per-file
+                # stat）；非 terminal / 无缓存 entry 的名字仍走 ``_discover_one_tape``
+                # 验证路径（tape 追加不改目录 mtime，粗判看不见，必须逐个 stat 兜住）。
+                names = self._scandir_tape_names(runs_dir)
+                if names is not None and self._coarse_cache_match(runs_dir, names):
+                    for fname in names:
+                        tape_path = runs_dir / fname
+                        summary = self._summary_from_cache_fast(
+                            runs_dir, fname,
+                            project_id=pid, project_name=name,
+                        )
+                        if (
+                            summary is None
+                            or summary.status not in self._TERMINAL_STATUSES
+                        ):
+                            summary = self._discover_one_tape(
+                                tape_path, None,
+                                project_id=pid, project_name=name,
+                            )
+                        if summary is None:
+                            continue
+                        # 内存 live run 优先；E2 显式 dedup（与慢路径同序语义：名字序）。
+                        if summary.run_id in self._runs:
+                            continue
+                        if summary.run_id in seen_ids:
+                            continue
+                        seen_ids.add(summary.run_id)
+                        summaries.append(summary)
+                        new_index[summary.run_id] = (pid, tape_path, name)
+                    continue
                 for tape_path, prestat in self._iter_runs_dir_tapes(runs_dir):
                     summary = self._discover_one_tape(
                         tape_path, prestat,
@@ -1523,6 +1558,10 @@ class RunManager:
                     seen_ids.add(summary.run_id)
                     summaries.append(summary)
                     new_index[summary.run_id] = (pid, tape_path, name)
+                # 慢路径收尾：写目录指纹（快速路径已 continue 跳过此处；names=None =
+                # scandir 失败，无可指纹）。标 dirty 由尾部统一 flush 落盘。
+                if names is not None:
+                    self._record_dir_fingerprint(runs_dir, names)
         finally:
             self._defer_persist = False
             # per-runs_dir 单次 os.replace flush（G2：避免 O(n²) 累计重写）
@@ -1705,6 +1744,99 @@ class RunManager:
                 )
                 continue
             yield (Path(entry.path), st)
+
+    # ── web-perf P2（2026-09-08）：runs 目录指纹粗判快速路径 ─────────────────────
+    # 慢路径每请求逐文件 stat（drvfs 单次 1~3ms，1626 runs 实测 ~1.7s）。粗判：tape
+    # **文件名集合 sha1** 与缓存记录一致 → 逐名直读持久缓存直构（**零 per-file stat**，
+    # scandir 名单本身一次 syscall）。
+    #
+    # **指纹刻意不含目录 mtime**：flush 持久缓存（os.replace）本身会更新 runs 目录
+    # mtime——含 mtime 则每次写缓存都自失效（指纹永远 miss）。目录 mtime 能反映的
+    # 变化（tape 增/删/改名）全部已由名字集合 hash 覆盖，mtime 分量无增量价值。
+    #
+    # **非 terminal 例外**：tape 追加只改文件 mtime、不改目录内容——名字集合不变，
+    # 粗判看不见。故 cached 状态非 terminal（running / live-pending）的 run 仍走
+    # ``_discover_one_tape`` 验证路径（小集合，通常仅 live 数个）；terminal
+    # （completed/failed/cancelled）则**信任缓存不再 stat**。
+    #
+    # **已知的显示级陈旧（接受 + 显式化，code-review MAJOR-3 2026-09-08）**：终态
+    # 写入与 chart/docs ingestor 的尾部追加存在竞态窗口（chart_ingestor 经 bus.emit
+    # 落 tape，daemon 的 2s poll 感知终态有滞后）——恰在该窗口被缓存固化的
+    # chart_count / event_count 会陈旧，直到该 runs/ 下任何 tape 增删触发重扫才自愈。
+    # 代价评估：窗口亚秒级、影响仅卡片计数（非状态/进度）、自愈有界——比回退逐请求
+    # per-file stat（P2 要消灭的成本）划算。终态后写 tape 本身不在任何 SPEC 契约内
+    # （tape append-only 指运行期）；若未来要根治，方向是 ingestor 终态屏障而非缓存。
+    # 失配方向保守：名单变化 / 指纹缺失 / scandir 失败 →
+    # 一律退慢路径（多一次 per-file stat，正确性不受损）。
+    _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+    @staticmethod
+    def _names_sha1(names: list[str]) -> str:
+        """sorted tape 文件名清单的 sha1（目录级指纹：增/删/改名必变）。"""
+        return hashlib.sha1("\n".join(names).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _scandir_tape_names(runs_dir: Path) -> list[str] | None:
+        """单次 scandir 取 ``*.jsonl`` 名单（**纯名字过滤，零 per-entry stat**）。
+
+        慢路径的 ``_iter_runs_dir_tapes`` 里 ``DirEntry.is_file()`` 在 drvfs 可能每项
+        触发一次 stat——快速路径禁用它（str 后缀过滤即可；万一同名目录混入，下游
+        ``_summary_from_tape`` 读失败自然 skip，与坏 tape 同语义）。OSError → None
+        （caller 退慢路径，其自带 glob 降级）。
+        """
+        try:
+            return sorted(
+                e.name for e in os.scandir(runs_dir) if e.name.endswith(".jsonl")
+            )
+        except OSError as e:
+            logger.warning("discover_runs: scandir 名单失败（%s）：%s", runs_dir, e)
+            return None
+
+    def _coarse_cache_match(self, runs_dir: Path, names: list[str]) -> bool:
+        """目录指纹是否命中（名字集合 sha1 与缓存记录一致）。"""
+        data = self._persistent_cache_loaded(runs_dir)
+        fp = data.get("dir_fingerprint")
+        return isinstance(fp, str) and fp == self._names_sha1(names)
+
+    def _record_dir_fingerprint(self, runs_dir: Path, names: list[str]) -> None:
+        """慢路径扫描结束后写目录指纹（随 ``_dirty_runs_dirs`` flush 落盘）。
+
+        全 cache-hit 的慢路径没有任何 entry writeback → 必须显式标 dirty，否则指纹只在
+        in-memory、重启即丢（每次进程首扫后退不回快速路径）。
+        """
+        data = self._persistent_cache_loaded(runs_dir)
+        data["dir_fingerprint"] = self._names_sha1(names)
+        self._dirty_runs_dirs.add(runs_dir)
+
+    def _summary_from_cache_fast(
+        self,
+        runs_dir: Path,
+        name: str,
+        *,
+        project_id: str | None,
+        project_name: str | None,
+    ) -> RunSummary | None:
+        """粗判路径：按文件名直读持久缓存 entry 直构 summary（**零 stat**）。
+
+        无 entry / count 非法 / overview 缺失 → None（caller 退 ``_discover_one_tape``
+        验证路径——与缓存 miss 同语义，不静默吞）。
+        """
+        data = self._persistent_cache_loaded(runs_dir)
+        entry = data.get("entries", {}).get(name)
+        if not isinstance(entry, dict):
+            return None
+        count = entry.get("count")
+        overview = entry.get("overview")
+        if not isinstance(count, int) or count <= 0 or not isinstance(overview, dict):
+            return None
+        return self._summary_from_overview(
+            Path(name).stem,
+            count,
+            overview,
+            project_id=project_id,
+            project_name=project_name,
+            source="attached",
+        )
 
     def _discover_one_tape(
         self,

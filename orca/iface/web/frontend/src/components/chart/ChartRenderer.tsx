@@ -90,18 +90,17 @@ function partitionCharts(
 }
 
 export function ChartRenderer({ nodeId }: ChartRendererProps) {
-  // 订阅收窄（SPEC 2026-08-28 C4.4，取消全 store 订阅）。六字段清单：events/huge/
+  // 订阅收窄（SPEC 2026-08-28 C4.4，取消全 store 订阅）。字段清单：events/
   // serverOverview/hugeFullyLoaded 是 selectCharts 全部输入；activeRunId + loadFull
-  // 供 huge 模式 load-full 按钮（漏订 activeRunId → 按钮静默失效）。
+  // 供窗口态 load-full 按钮（漏订 activeRunId → 按钮静默失效）。
   const events = useWorkflowStore((s) => s.events);
-  const huge = useWorkflowStore((s) => s.huge);
   const serverOverview = useWorkflowStore((s) => s.serverOverview);
   const hugeFullyLoaded = useWorkflowStore((s) => s.hugeFullyLoaded);
   const activeRunId = useWorkflowStore((s) => s.activeRunId);
   const loadFull = useWorkflowStore((s) => s.loadFull);
   const { groups } = useMemo(
-    () => selectCharts._from(events, huge, serverOverview, hugeFullyLoaded),
-    [events, huge, serverOverview, hugeFullyLoaded]
+    () => selectCharts._from(events, serverOverview, hugeFullyLoaded),
+    [events, serverOverview, hugeFullyLoaded]
   );
 
   // B2：整组滤除 docs 清单组——valid 与 huge placeholder 两分支同免（组级剔除，
@@ -142,8 +141,9 @@ export function ChartRenderer({ nodeId }: ChartRendererProps) {
     );
   }
 
-  // huge 模式（serverOverview 目录占位）→ 渲染目录 + load full 恢复入口
-  const isHuge = huge && !hugeFullyLoaded;
+  // 窗口态（serverOverview 目录占位在）→ 渲染目录 + load full 恢复入口
+  // （web-perf P3：非 huge 的截断 run 同样走此通道，huge 不再是前提）
+  const isWindowed = !hugeFullyLoaded && serverOverview !== null;
 
   return (
     <div className="space-y-4 p-3" data-testid="chart-renderer">
@@ -167,13 +167,13 @@ export function ChartRenderer({ nodeId }: ChartRendererProps) {
           </details>
         </div>
       )}
-      {isHuge && totalPlaceholders > 0 && (
+      {isWindowed && totalPlaceholders > 0 && (
         <div
           className="border orca-border orca-bg-surface rounded p-2 text-xs orca-text-muted"
           data-testid="huge-charts-placeholder"
         >
           <p>
-            超大 run（huge 模式）：图表仅显示目录（{totalPlaceholders} 张），
+            已按窗口加载（首屏仅最近事件）：图表仅显示目录（{totalPlaceholders} 张），
             完整数据需拉取全部事件。
           </p>
           <button

@@ -167,6 +167,10 @@ export interface ServerOverview {
   charts: OverviewChart[];
   cost_usd: number;
   run_status: string;
+  // web-perf P3 review 修订（MAJOR-1）：窗口态 run 的 workflow_started（seq 1）在窗外，
+  // workflowName 由 overview 补偿（loadRunWithMeta 写入 store）。optional：后端 capture
+  // 缺失 / corrupt timestamp 时为 undefined（fallback 到 client fold 结果 = 空）。
+  workflow_name?: string;
   // SPEC 2026-08-10-card-event-log-align §3.3 F8：huge 模式 meta overview 会带这两个 optional 字段
   // （从 v3 cache 起；旧 v2 cache 经 version gate 重建后才有）。前端不用即忽略——``log_event_count``
   // 后端语义=卡片 event_count 同口径（log 行数）；``chart_count`` 是去重数（前端 selectCharts

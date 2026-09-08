@@ -568,4 +568,123 @@ describe("run-list-store", () => {
       stopPolling();
     }).not.toThrow();
   });
+
+  // ── web-perf P1：头部权威刷新 + keyset 游标翻页（2026-09-08）──
+  // 断言意图：服务端默认分页后，refresh 只覆盖头部（最新页），已加载的更早页保留；
+  // 已删 run 不复活；loadMore 带末行游标、追加去重、短页收口；失败可见（loadMoreError）。
+
+  /** 构造 n 条 desc 排列的 run（ts = 1000-i，id = r{i}，i 越大越新）。 */
+  function mkPage(n: number, offset = 0): RunSummary[] {
+    return Array.from({ length: n }, (_, i) =>
+      mkRun({ run_id: `r${offset + i}`, started_at: 1000 - offset - i }),
+    );
+  }
+
+  /** 分页 fetch stub：scope=all 依次返回 pages 队列；带 before_ts 的请求取下一页。 */
+  function stubPagedFetch(pages: RunSummary[][]) {
+    let pageIdx = 0;
+    return vi.fn(async (url: string) => {
+      if (typeof url !== "string") url = (url as Request).url;
+      if (url.includes("/api/projects/stale")) {
+        return { ok: true, status: 200, json: async () => [] } as Response;
+      }
+      if (url.includes("/api/runs?scope=all")) {
+        const page = pages[Math.min(pageIdx, pages.length - 1)];
+        pageIdx += 1;
+        return { ok: true, status: 200, json: async () => page } as Response;
+      }
+      return { ok: false, status: 404, json: async () => ({}) } as Response;
+    });
+  }
+
+  it("P1：loadMore 带末行游标 + 追加去重 + 短页收口 hasMore", async () => {
+    // 服务端默认页 200 条（r199..r000）；下一页 2 条更早的（r-1/r-2）
+    const page2 = [mkRun({ run_id: "r-1", started_at: 799 }), mkRun({ run_id: "r-2", started_at: 798 })];
+    const fetchMock = stubPagedFetch([mkPage(200), page2]);
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+
+    await useRunListStore.getState().refresh();
+    let s = useRunListStore.getState();
+    expect(s.runs).toHaveLength(200);
+    expect(s.hasMore).toBe(true);
+
+    await useRunListStore.getState().loadMore();
+    s = useRunListStore.getState();
+    // 游标 = 末行（服务端序末元素 = r199, ts=801）——严格校验 URL
+    const loadMoreUrl = fetchMock.mock.calls.map((c) => String(c[0])).find((u) =>
+      u.includes("before_ts="),
+    );
+    expect(loadMoreUrl).toBeDefined();
+    expect(loadMoreUrl).toContain("before_ts=801");
+    expect(loadMoreUrl).toContain("before_id=r199");
+    // 追加不覆盖头部（数组序 = 服务端响应序）
+    expect(s.runs).toHaveLength(202);
+    expect(s.runs[0].run_id).toBe("r0");
+    expect(s.runs[201].run_id).toBe("r-2");
+    // 短页（2 < 200）→ 收口
+    expect(s.hasMore).toBe(false);
+
+    // 已收口 → 再 loadMore 不发请求
+    const callsBefore = fetchMock.mock.calls.length;
+    await useRunListStore.getState().loadMore();
+    expect(fetchMock.mock.calls.length).toBe(callsBefore);
+  });
+
+  it("P1：refresh 头部权威——保留更早已加载页、已删 run 不复活", async () => {
+    const fetchMock = stubPagedFetch([mkPage(200), [mkRun({ run_id: "r-1", started_at: 799 })]]);
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+
+    await useRunListStore.getState().refresh();
+    await useRunListStore.getState().loadMore();
+    expect(useRunListStore.getState().runs).toHaveLength(201);
+
+    // 深处删除 r-1（乐观移除 + DELETE 成功）
+    fetchMock.mockImplementation(async (url: string) => {
+      if (typeof url !== "string") url = (url as Request).url;
+      if (url.includes("/api/projects/stale")) {
+        return { ok: true, status: 200, json: async () => [] } as Response;
+      }
+      if (url.includes("/api/runs?scope=all")) {
+        return { ok: true, status: 200, json: async () => mkPage(200) } as Response;
+      }
+      if (url.includes("/api/runs/r-1") ) {
+        return { ok: true, status: 200, json: async () => ({ ok: true }) } as Response;
+      }
+      return { ok: false, status: 404, json: async () => ({}) } as Response;
+    });
+    await useRunListStore.getState().deleteRun("r-1");
+    // refresh 对账：头部 200 + 更早的 r-1 已删（不复活）
+    const s = useRunListStore.getState();
+    expect(s.runs).toHaveLength(200);
+    expect(s.runs.map((r) => r.run_id)).not.toContain("r-1");
+    expect(s.runs[0].run_id).toBe("r0");
+  });
+
+  it("P1：loadMore 失败 → loadMoreError 置位（可见）；refresh 成功清除", async () => {
+    const failing = vi.fn(async (url: string) => {
+      if (typeof url !== "string") url = (url as Request).url;
+      if (url.includes("/api/projects/stale")) {
+        return { ok: true, status: 200, json: async () => [] } as Response;
+      }
+      if (url.includes("before_ts=")) {
+        return { ok: false, status: 500, json: async () => ({}) } as Response;
+      }
+      if (url.includes("/api/runs?scope=all")) {
+        return { ok: true, status: 200, json: async () => mkPage(200) } as Response;
+      }
+      return { ok: false, status: 404, json: async () => ({}) } as Response;
+    });
+    vi.stubGlobal("fetch", failing as unknown as typeof fetch);
+
+    await useRunListStore.getState().refresh();
+    expect(useRunListStore.getState().loadMoreError).toBe(false);
+    await useRunListStore.getState().loadMore();
+    expect(useRunListStore.getState().loadMoreError).toBe(true);
+    expect(useRunListStore.getState().loadingMore).toBe(false);
+
+    // 下一次 refresh 成功 → 单开关清除（清 lastFetch 绕过节流，同 WS 重连路径）
+    useRunListStore.setState({ lastFetch: 0 });
+    await useRunListStore.getState().refresh();
+    expect(useRunListStore.getState().loadMoreError).toBe(false);
+  });
 });

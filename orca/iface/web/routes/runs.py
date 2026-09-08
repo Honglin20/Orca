@@ -33,6 +33,13 @@ from orca.iface.web.run_manager import RunSummary
 if TYPE_CHECKING:
     from orca.iface.web.run_manager import RunManager
 
+# web-perf P1（2026-09-08）：``scope=all`` 默认分页上限。全量返回曾实测 460KB/1.7s
+# （1626 runs，drvfs）——响应体与耗时随 run 数线性膨胀；列表首屏不需要全量。
+# 消费方：显式 ``?limit=`` 覆盖；``?limit<0`` = 不限制（逃生门）。
+# **跨层同步点**：前端 run-list-store.ts 的 PAGE_LIMIT 必须与本值一致（hasMore 启发
+# 式 = 末页长度是否达上限）——改动此处须同步彼处。
+DEFAULT_SCOPE_ALL_LIMIT = 200
+
 
 def build_router(manager: RunManager) -> APIRouter:
     """构造 ``/api/runs`` 路由（manager 注入，避免全局状态）。
@@ -49,6 +56,8 @@ def build_router(manager: RunManager) -> APIRouter:
         q: str | None = None,
         limit: int | None = None,
         offset: int | None = None,
+        before_ts: float | None = None,
+        before_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """run 列表（元数据，**无事件**）。SPEC §3.1 / §0.1 铁律 2 / §13 §5.2 D5。
 
@@ -56,6 +65,15 @@ def build_router(manager: RunManager) -> APIRouter:
         - 否则 → 内存 live run（向后兼容：``list[RunMeta]``）。
 
         过滤参数（仅 ``scope=all`` 生效）：``project`` / ``status`` / ``q`` / ``limit`` / ``offset``。
+
+        web-perf P1（2026-09-08）：``scope=all`` 走**稳定排序 + 默认分页**——
+          - 排序：``(started_at, run_id)`` desc（``started_at`` None 兜底 ``0.0`` 沉底；
+            run_id 唯一 ⇒ 全序），返回顺序确定且跨请求稳定。
+          - 默认 ``limit=DEFAULT_SCOPE_ALL_LIMIT``；显式 ``?limit=`` 覆盖；``limit<0`` =
+            不限制（逃生门，全量消费方用）。
+          - keyset 游标 ``before_ts`` / ``before_id``：只返回排在其后的行（严格小于元组）。
+            用游标而非纯 offset 翻页——offset 在两次翻页之间发生删除时会**跳行**，游标
+            天然免疫。``offset`` 保留（向后兼容），与游标可叠加（先游标后 offset）。
         """
         if scope == "all":
             summaries = manager.discover_runs()
@@ -72,12 +90,36 @@ def build_router(manager: RunManager) -> APIRouter:
                         if ql in s.run_id.lower()
                         or ql in (s.workflow_name or "").lower()
                     ]
-            # offset/limit
+            # 稳定排序（P1）：(started_at, run_id) desc——None started_at 兜底 0.0 沉底；
+            # run_id 唯一 ⇒ 元组比较即全序，keyset 游标不重不漏。
+            summaries.sort(
+                key=lambda s: (
+                    s.started_at if s.started_at is not None else 0.0,
+                    s.run_id,
+                ),
+                reverse=True,
+            )
+            # keyset 游标：只保留严格排在游标之后的行（先游标后 offset，游标语义不受影响）。
+            if before_ts is not None:
+                cursor = (before_ts, before_id or "")
+                summaries = [
+                    s
+                    for s in summaries
+                    if (
+                        s.started_at if s.started_at is not None else 0.0,
+                        s.run_id,
+                    )
+                    < cursor
+                ]
+            # offset/limit（P1：limit 未传 → 默认分页上限；<0 = 不限制逃生门）
             start = offset or 0
             if start:
                 summaries = summaries[start:]
-            if limit is not None:
-                summaries = summaries[:limit]
+            effective_limit = (
+                DEFAULT_SCOPE_ALL_LIMIT if limit is None else limit
+            )
+            if effective_limit >= 0:
+                summaries = summaries[:effective_limit]
             # response_model_exclude_unset=True（M-5）：让 legacy run 省略 project_id 等未设字段。
             return [
                 s.model_dump(exclude_unset=True, exclude_none=False)

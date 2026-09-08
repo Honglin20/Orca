@@ -6,9 +6,11 @@
 
 当前无进行中任务。
 
-**最近完成**：prof-opt 反馈批（2026-09-08，commit `39f9214`，release note：`docs/releases/2026-09-08-prof-opt-feedback-batch.md`）；workflow 脚本 exec 位治本（2026-09-08，commit `c8f4807`+`4bc8a2c`，release note：`docs/releases/2026-09-08-workflow-scripts-exec-bit.md`）。
+**最近完成**：web 列表性能止血 + 治本 P1~P4（2026-09-08，release note：`docs/releases/2026-09-08-web-list-perf.md`，plan：`docs/plans/2026-09-08-web-runs-list-perf.md`）——后端改动需**重启 `tars serve`** 生效。
 
 **挂账小项（非阻塞，下次顺手）**：
 - HEAD 既有 pytest 失败 3 个：`test_gate_node_sh_parses_after_quote_fix`（陈旧断言）、`test_baseline_chain_*` ×2（状态机 failed≠running）
 - run 卡片 chart_count 口径含 docs 清单
-- prof-opt 首次真机 in-session 短跑时人工核验：第二次 docs 推送后面板内容仍可读、`rounds/<NNN>/<vid>/shadow` 存在（单测盲区，见 release note 披露）
+- web 列表性能挂账（见 release note）：窗口态拓扑补偿（overview 需 capture topology）、q/status 服务端下推、P2 terminal 尾窗竞态的显示级陈旧（已显式化取舍）
+- **测试卫生债**：部分 tests/iface/web 套件不隔离 ORCA_HOME/注册表——跑全量即往真实 runs 写 demo/slow 残留 + 往真实注册表写 /tmp 项目（本批已三度清理）；根治 = conftest autouse 隔离
+- prof-opt 首次真机 in-session 短跑时人工核验：第二次 docs 推送后面板内容仍可读、`rounds/<NNN>/<vid>/shadow` 存在（单测盲区，见 2026-09-08 release note）

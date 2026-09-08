@@ -65,8 +65,19 @@ interface RunListState {
   loading: boolean;
   error: string | null;
   lastFetch: number;
+  /** web-perf P1：服务端还有更早的 run（末页满 PAGE_LIMIT 即假定有）。 */
+  hasMore: boolean;
+  loadingMore: boolean;
+  /**
+   * web-perf P1 review 修订（MAJOR-4）：loadMore 失败单开关（**不复用全局 error**——
+   * 那会改变 showError/showEmptyState 的既有语义；仿 HistoryBanner 的
+   * historyLoadError 模式：UI 行内提示 + 下次成功自动清）。
+   */
+  loadMoreError: boolean;
 
   refresh: () => Promise<void>;
+  /** web-perf P1：keyset 游标翻页（before_ts/before_id），追加更早的 run。 */
+  loadMore: () => Promise<void>;
   deleteRun: (runId: string) => Promise<void>;
   deleteRuns: (ids: string[]) => Promise<DeleteRunsResult>;
   onRunChanged: (frame: { run_id: string; action: string }) => void;
@@ -77,6 +88,20 @@ const REFRESH_THROTTLE_MS = 2000;
 // SPEC 2026-08-10-home-list-lazy-index §3.5：4s→8s（保守拉长，不依赖 WS 重连可靠性前置确认；
 // WS run_changed 仍是主要增量源，8s 作断连兜底）。后端索引化后单次 refresh <300ms，轮询本身已轻。
 const POLL_INTERVAL_MS = 8000;
+// web-perf P1（2026-09-08）：与后端 DEFAULT_SCOPE_ALL_LIMIT 一致（routes/runs.py）——
+// 服务端默认分页上限；末页长度 = 此值即假定还有更早的 run。
+const PAGE_LIMIT = 200;
+
+// 服务端稳定排序键 (started_at ?? 0, run_id) 的严格升序比较（keyset 游标 + 头部刷新
+// 合并共用；与 routes/runs.py 的排序键定义严格同源）。
+function isStrictlyBefore(
+  a: RunSummary,
+  b: RunSummary,
+): boolean {
+  const at = a.started_at ?? 0;
+  const bt = b.started_at ?? 0;
+  return at < bt || (at === bt && a.run_id < b.run_id);
+}
 
 // 单例：mount/unmount 多次复用同一 store。轮询在组件 effect 里启停（避免 orphan task）。
 let pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -103,6 +128,9 @@ export const useRunListStore = create<RunListState>((set, get) => ({
   loading: false,
   error: null,
   lastFetch: 0,
+  hasMore: false,
+  loadingMore: false,
+  loadMoreError: false,
 
   refresh: async () => {
     // 节流（§13 I-16）：距上次 fetch < 2s → 跳过（防多 tab 风暴）。
@@ -140,12 +168,29 @@ export const useRunListStore = create<RunListState>((set, get) => ({
       for (const id of [...pendingDeletes]) {
         if (!liveIds.has(id)) pendingDeletes.delete(id);
       }
+      // web-perf P1：服务端默认分页 → data = 最新一页（**头部权威**）。本地经 loadMore
+      // 累积的更早 run：凡严格排在页尾之前的保留（头部刷新不抹掉已加载历史）；新页
+      // 内的不重复入（freshIds 去重）；已删除的（pendingDeletes / WS 已移除）不复活。
+      const fresh = data.filter((r) => !pendingDeletes.has(r.run_id));
+      const freshIds = new Set(fresh.map((r) => r.run_id));
+      const olderPool =
+        fresh.length > 0
+          ? get().runs.filter(
+              (r) =>
+                !pendingDeletes.has(r.run_id) &&
+                !freshIds.has(r.run_id) &&
+                isStrictlyBefore(r, fresh[fresh.length - 1]),
+            )
+          : [];
       set({
         // pendingDeletes 守卫：删除期间不让 WS refresh 复活 run（D1 M4）。
-        runs: data.filter((r) => !pendingDeletes.has(r.run_id)),
+        runs: [...fresh, ...olderPool],
         staleProjects: stale,
         loading: false,
         lastFetch: Date.now(),
+        // 末页满页 → 假定还有更早的 run（恰满页误判 → loadMore 拉空一页自然收口）。
+        hasMore: data.length >= PAGE_LIMIT,
+        loadMoreError: false, // 头部刷新成功 → 清翻页错误（单开关语义）
       });
     } catch (e) {
       // inflightSeq gate 出口（错误路径也要守）：过期响应的错误不覆盖更新鲜的状态。
@@ -154,6 +199,42 @@ export const useRunListStore = create<RunListState>((set, get) => ({
         loading: false,
         error: e instanceof Error ? e.message : String(e),
       });
+    }
+  },
+
+  loadMore: async () => {
+    const st = get();
+    if (st.loadingMore || !st.hasMore || st.runs.length === 0) return;
+    const last = st.runs[st.runs.length - 1];
+    // epoch guard（review MINOR-1，对齐 deleteRun）：reset（unmount）后到达的迟到
+    // 响应不得写回已清空的 store。
+    const myEpoch = epoch;
+    set({ loadingMore: true, loadMoreError: false });
+    try {
+      // keyset 游标：严格排在末行 (started_at, run_id) 之后的下一页——删除场景不跳行
+      // （offset 翻页在两次翻页之间发生删除时会漏行，游标免疫）。
+      const r = await fetch(
+        `/api/runs?scope=all&before_ts=${last.started_at ?? 0}&before_id=${encodeURIComponent(last.run_id)}`,
+      );
+      if (!r.ok) {
+        throw new Error(`HTTP ${r.status}`);
+      }
+      const page = (await r.json()) as RunSummary[];
+      // 游标语义保证与服务端全序无重叠；dedup 仅防删除漂移的极端边界（fail-soft）。
+      const fresh = page.filter(
+        (x) => !pendingDeletes.has(x.run_id),
+      );
+      if (myEpoch !== epoch) return; // reset 后丢弃，不写回
+      set({
+        loadingMore: false,
+        runs: [...get().runs, ...fresh],
+        hasMore: page.length >= PAGE_LIMIT,
+      });
+    } catch {
+      // review MAJOR-4：失败必须用户可见——写 loadMoreError 单开关（UI 行内提示），
+      // **不复用全局 error**（那会翻转 showError/showEmptyState 既有语义）。
+      if (myEpoch !== epoch) return;
+      set({ loadingMore: false, loadMoreError: true });
     }
   },
 
@@ -294,6 +375,9 @@ export const useRunListStore = create<RunListState>((set, get) => ({
       loading: false,
       error: null,
       lastFetch: 0,
+      hasMore: false,
+      loadingMore: false,
+      loadMoreError: false,
     });
   },
 }));

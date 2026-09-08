@@ -121,19 +121,12 @@ interface Selection {
 export function ProfOptDocsPanel({ runId }: { runId: string }) {
   // 订阅收窄：selectDocRowsWithContent 全部输入（与 ChartRenderer 同面）。
   const events = useWorkflowStore((s) => s.events);
-  const huge = useWorkflowStore((s) => s.huge);
   const serverOverview = useWorkflowStore((s) => s.serverOverview);
   const hugeFullyLoaded = useWorkflowStore((s) => s.hugeFullyLoaded);
 
   const { rows, invalid, malformed, placeholder, empty } = useMemo(
-    () =>
-      selectDocRowsWithContent._from(
-        events,
-        huge,
-        serverOverview,
-        hugeFullyLoaded
-      ),
-    [events, huge, serverOverview, hugeFullyLoaded]
+    () => selectDocRowsWithContent._from(events, serverOverview, hugeFullyLoaded),
+    [events, serverOverview, hugeFullyLoaded]
   );
 
   const rowByPath = useMemo(

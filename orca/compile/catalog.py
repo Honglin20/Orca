@@ -334,6 +334,17 @@ def _reset_cache() -> None:
         _CACHE = None
 
 
+def warmup_cache() -> None:
+    """预热进程内 catalog 缓存（web-perf P4：web lifespan startup 后台调用）。
+
+    首调即全量扫描建缓存，之后请求走 O(stat) 校验——把冷扫成本移出用户首访。
+    公开薄 wrapper（server 层不得触私有 ``_catalog_entries``）；失败语义同直扫
+    （per-yaml fail-soft，OSError 降级不缓存），不额外吞错——预热是优化非正确性
+    依赖，caller（server 预热任务）自行兜底 log。
+    """
+    _catalog_entries()
+
+
 def list_workflows() -> list[dict[str, Any]]:
     """扫描 catalog 目录，返回 workflow 元信息列表（SPEC §5.6 / §2.2）。
 

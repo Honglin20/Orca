@@ -91,6 +91,19 @@ def catalog_dir(tmp_path, monkeypatch):
 # ── list_workflows ───────────────────────────────────────────────────────────
 
 
+def test_warmup_cache_populates_cache(catalog_dir):
+    """web-perf P4：``warmup_cache()`` 首调即全扫建缓存（之后请求走 O(stat) 校验）——
+    公开预热入口的契约是「调用后缓存非空」，server lifespan 后台任务依赖此语义。"""
+    (catalog_dir / "simple.yaml").write_text(SIMPLE_WF, encoding="utf-8")
+    assert catalog_module._CACHE is None  # 前置：缓存空（autouse fixture 已 reset）
+
+    catalog_module.warmup_cache()
+
+    assert catalog_module._CACHE is not None
+    # 预热结果与直调 list_workflows 一致（同一缓存）
+    assert [w["name"] for w in list_workflows()] == ["simple"]
+
+
 def test_list_workflows_empty_dir(catalog_dir):
     """空 catalog 目录 → 返空列表（不 raise）。"""
     assert list_workflows() == []

@@ -27,7 +27,7 @@ import { useRunEvents } from "@/hooks/use-run-events";
 import { useWebSocket } from "@/hooks/use-websocket";
 import { useStreamingText } from "@/hooks/use-streaming-text";
 import { useElapsedTickActive } from "@/hooks/use-elapsed-tick";
-import { useWorkflowStore } from "@/stores/workflow-store";
+import { useWorkflowStore, TAIL_WINDOW } from "@/stores/workflow-store";
 import { TopBar } from "@/components/layout/TopBar";
 import { AgentsRail } from "@/components/layout/AgentsRail";
 import { LogStream } from "@/components/detail/LogStream";
@@ -133,6 +133,8 @@ export function RunDetailPage() {
                     重试中 第 {retryCount} 次…
                   </div>
                 )}
+                {/* web-perf P3：首屏 tail 窗口 → 「加载更早」条带（窗口态且未到顶才显示） */}
+                <HistoryBanner runId={runId} />
                 <div className="flex-1 overflow-auto">
                   {/* SPEC audit-c M18：idle（首 mount）与 loading 同视觉（骨架），不闪烁空白 */}
                   {loadStatus === "loaded" ? (
@@ -188,6 +190,49 @@ function TabFallback({ label }: { label: string }) {
     >
       <Loader2 size={14} strokeWidth={1.5} className="animate-spin" aria-hidden />
       <span>{label}</span>
+    </div>
+  );
+}
+
+// web-perf P3（2026-09-08）：首屏 tail 窗口的「加载更早」条带。
+// 显示条件 = 窗口态（!hugeFullyLoaded）且未到顶（oldestSeqInWindow > 1）；到顶 / 全量
+// 态自然隐藏。chunk 复用 TAIL_WINDOW（store 导出，单一真相源）。historyLoadError 单开
+// 关提示（M14 语义：非关键路径失败不阻断，下次成功自动清）。
+function HistoryBanner({ runId }: { runId: string }) {
+  const hugeFullyLoaded = useWorkflowStore((s) => s.hugeFullyLoaded);
+  const oldestSeqInWindow = useWorkflowStore((s) => s.oldestSeqInWindow);
+  const historyLoadError = useWorkflowStore((s) => s.historyLoadError);
+  const loadStatus = useWorkflowStore((s) => s.loadStatus);
+  const loadEarlierChunk = useWorkflowStore((s) => s.loadEarlierChunk);
+  const [loading, setLoading] = useState(false);
+
+  if (loadStatus !== "loaded" || hugeFullyLoaded || oldestSeqInWindow <= 1) {
+    return null;
+  }
+  const loadEarlier = async () => {
+    setLoading(true);
+    try {
+      await loadEarlierChunk(runId, TAIL_WINDOW);
+    } finally {
+      setLoading(false);
+    }
+  };
+  return (
+    <div
+      className="orca-border flex items-center justify-center gap-2 border-b py-1"
+      data-testid="history-banner"
+    >
+      <button
+        type="button"
+        onClick={() => void loadEarlier()}
+        disabled={loading}
+        className="orca-text-muted text-xs hover:orca-text disabled:opacity-50"
+      >
+        {loading ? "加载中…" : "加载更早的事件"}
+      </button>
+      {historyLoadError && (
+        <span className="orca-text-faint text-xs">历史加载失败，请重试</span>
+      )}
     </div>
   );
 }

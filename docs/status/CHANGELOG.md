@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-09-08] perf(web): 列表性能止血 + 治本 P1~P4（scope=all 分页游标 / 目录指纹粗判 / 详情 tail 窗口 / 启动预热）（commit `10e4c28`）
+
+1626 残留 run + 2045 死注册条目致 `scope=all` 每请求 1.7~3.9s——清理归零后落四项结构修复：稳定排序 + 默认 200 分页 + keyset 游标、runs 目录指纹粗判（非 terminal 仍逐文件验证）、详情首屏 `?tail=500` 窗口 + serverOverview 全窗口态补偿、lifespan 启动预热。code-reviewer 2 轮 6 MAJOR 全闭环（keyset 替代 offset、补偿通道、fallback 回整、terminal 陈旧显式化、失败可见、store 测试补齐）。pytest 105 passed / vitest 643 passed / tsc clean；Playwright 22 failed 经干净树对照实证为环境既有。详见 [release note](../releases/2026-09-08-web-list-perf.md)。
+
 ## [2026-09-08] fix(workflows): 脚本 exec 位治本——git 索引 100755 + 守卫测试（commit `c8f4807`、`4bc8a2c`）
 
 Windows NTFS 下 exec 位进不了 git，163 个带 shebang 的 workflow 脚本（排除 deprecated）索引态翻转为 100755，Linux clone 后直接执行不再 Permission denied；新增索引级守卫测试（跨平台）防复发。详见 [release note](../releases/2026-09-08-workflow-scripts-exec-bit.md)。

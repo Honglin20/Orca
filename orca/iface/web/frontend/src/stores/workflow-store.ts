@@ -47,6 +47,13 @@ interface InflightEntry {
 }
 const inflightLoads = new Map<string, InflightEntry>();
 
+// ── web-perf P3（2026-09-08）：首屏 tail 窗口 ────────────────────────────────
+// 所有 run 首屏只拉最近 TAIL_WINDOW 条（后端 tail 走反向字节块扫描，O(窗口)与 tape
+// 总大小无关）；更早历史经 loadEarlierChunk 按需 prepend。满窗即视为截断（恰满窗
+// 误判 → 「加载更早」拉空一页自然失效，方向安全）；未满窗 = 全量，行为与旧全量加载
+// 一致。修复「点进大 run（如 prof-opt 多轮 docs/chart 推送）全量 replay 卡顿」。
+export const TAIL_WINDOW = 500;
+
 // ── 模块级 moduleEpoch counter（SPEC audit-c C4，**非 store 字段**）──────────────────
 // 防 A→B→A 同 runId 不同实例串话：第一次 load(A) 的迟到 fetch 在切回 A 后 resolve，
 // 仅靠 activeRunId===A 校验会通过（同 runId），moduleEpoch 区分同 runId 不同实例。
@@ -965,12 +972,20 @@ export const useWorkflowStore = create<WorkflowState>()(
      * **SPEC audit-c E7 显式不变量**：本 action 是 WS resume-fallback
      * （use-websocket ``triggerResumeFallback``）专用，**签名与 loadStatus 行为保持不变
      * （不 touch loadStatus）**——loaders 走私有 ``_refoldAndCommit`` helper，不调本 action。
+     *
+     * web-perf P3 review 修订（MAJOR-2）：全量重拉意味着窗口已被全量事件覆盖 → **必须
+     * 回整窗口簿记**（hugeFullyLoaded=true / oldestSeqInWindow=1 / serverOverview=null），
+     * 否则 resume fallback 后 HistoryBanner 仍显示、loadEarlierChunk 会把窗外已存在
+     * 的事件重复并入（events 数组含重复 seq → 图表双计 / 会话双渲染）。
      */
     loadFromEvents: (events) => {
       // 重置 events 数组 → sort + refold（D7：序无关）。
       set((state) => {
         state.events = [...events].sort((a, b) => a.seq - b.seq);
         refold(state);
+        state.hugeFullyLoaded = true;
+        state.oldestSeqInWindow = 1;
+        state.serverOverview = null;
       });
     },
 
@@ -1015,9 +1030,13 @@ export const useWorkflowStore = create<WorkflowState>()(
     /**
      * SPEC web-attach §3 huge-mode 入口。先 GET /meta → 据 meta.huge 置信息位。
      *
-     * - **huge 与否皆全量**：GET /events → loadFromEvents + hugeFullyLoaded=true（用户偏好：
-     *   huge 不弹「加载全部」gate，直接全量加载）。huge 标记据 meta 置位仅作"大 run"信息。
-     * - ``/meta`` 失败 silent fallback（INV-1 qualifier M9）；full 也失败 → 错误态。
+     * web-perf P3（2026-09-08）：首屏一律 ``?tail=TAIL_WINDOW`` 窗口（后端 O(窗口) 反向
+     * 扫描，与 tape 总大小无关）——大 run（huge 或非 huge 的多事件 run）不再全量 replay。
+     * - 满窗（length ≥ TAIL_WINDOW）= 截断：``hugeFullyLoaded=false`` + ``oldestSeqInWindow``
+     *   置窗内最旧 seq → 「加载更早」/``loadFull`` 可用；huge run 同时启用 serverOverview
+     *   （SPEC §3 服务端 fold 直构，选择器免全量 client-fold）。
+     * - 未满窗 = 全量：行为与旧全量加载等价（``hugeFullyLoaded=true``、窗口顶 1）。
+     * - ``/meta`` 失败 silent fallback（INV-1 qualifier M9）；窗口拉取失败 → 错误态。
      * - ``writable=false``（attached run）：gate 模态禁提交。
      */
     loadRunWithMeta: async (runId) => {
@@ -1042,23 +1061,35 @@ export const useWorkflowStore = create<WorkflowState>()(
         }
       }
 
-      // 全量路径（huge run 亦直接全量加载——不弹「加载全部」gate；用户偏好直接加载，
-      // 接受大 run 较慢的代价）。huge 标记仍据 meta 置位（信息位），但 hugeFullyLoaded
-      // 恒 true → ChartRenderer 占位/按钮分支（huge && !hugeFullyLoaded）永不触发。
       try {
         const events = (await fetchEventsWithBackoff(
           runId,
           entry,
-          `/api/runs/${encodeURIComponent(runId)}/events`
+          `/api/runs/${encodeURIComponent(runId)}/events?tail=${TAIL_WINDOW}`
         )) as WebEvent[];
         if (get().activeRunId !== null && get().activeRunId !== runId) return;
         if (moduleEpoch !== myEpoch) return;
+        // 满窗即视为截断（恰满窗误判 → loadEarlierChunk 拉空一页自然失效，方向安全）。
+        const windowed = events.length >= TAIL_WINDOW;
+        const oldestSeq =
+          events.length > 0
+            ? Math.min(...events.map((e) => e.seq))
+            : 1;
         set((state) => {
+          // web-perf P3 review 修订（MAJOR-1）：窗口态一律启用 serverOverview（后端
+          // /meta 已对所有 run 返回 overview）——agents/charts/docs 全量清单来自服务端
+          // fold，补偿「client 只 fold 到尾窗」的派生失真；workflowName 同理（seq 1 的
+          // workflow_started 必在窗外）。loadFull 后 serverOverview 清 → 回退全量 client-fold。
+          const overview = windowed ? (meta?.overview ?? null) : null;
           _refoldAndCommit(state, runId, events, {
             huge: meta?.huge ?? false,
-            hugeFullyLoaded: true,
-            serverOverview: null,
+            hugeFullyLoaded: !windowed,
+            serverOverview: overview,
             writable: meta?.writable ?? true,
+            oldestSeqInWindow: windowed ? oldestSeq : 1,
+            ...(overview?.workflow_name
+              ? { workflowName: overview.workflow_name }
+              : {}),
           });
         });
       } catch (err) {
@@ -1079,7 +1110,9 @@ export const useWorkflowStore = create<WorkflowState>()(
      */
     loadEarlierChunk: async (runId, chunkSize) => {
       const state0 = get();
-      if (!state0.huge) return false;
+      // web-perf P3：窗口态（!hugeFullyLoaded）即可用——非 huge 的多事件 run 首屏也走
+      // tail 窗口，向上翻页不再以 huge 为前提；全量态（hugeFullyLoaded）无更早历史。
+      if (state0.hugeFullyLoaded) return false;
       if (state0.oldestSeqInWindow <= 1) return false; // 已到顶
       const since = Math.max(0, state0.oldestSeqInWindow - 1 - chunkSize);
       const originatingEpoch = moduleEpoch; // 持当前 epoch（C2 写时校验）
@@ -1112,14 +1145,19 @@ export const useWorkflowStore = create<WorkflowState>()(
         if (get().activeRunId !== runId) return false;
         if (moduleEpoch !== originatingEpoch) return false;
         set((state) => {
-          // 合并：旧 events + chunk（seenSeqs/refold 内部 seq 去重，安全）
-          const merged = [...state.events, ...chunk];
+          // 合并：旧 events + chunk。**数组级 seq 去重**（防御：refold 只重建 seenSeqs、
+          // 不去重数组；重叠 chunk 会造成重复 fold——游标语义正常时不重叠，此处是
+          // resume-fallback 回整之外的保险，code-review MAJOR-2）。
+          const seen = new Set(state.events.map((e) => e.seq));
+          const fresh = chunk.filter((c) => !seen.has(c.seq));
+          if (fresh.length === 0) return;
+          const merged = [...state.events, ...fresh];
           merged.sort((a, b) => a.seq - b.seq);
           state.events = merged;
           refold(state); // 末尾重建 seenSeqs（N1）
           state.oldestSeqInWindow = Math.min(
             state.oldestSeqInWindow,
-            chunk[0].seq
+            fresh[0].seq
           );
           state.historyLoadError = false; // 下次成功自动清（M14）
         });

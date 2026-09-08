@@ -78,10 +78,12 @@ export function formatElapsed(
 }
 
 export function selectAgents(state: WorkflowState): AgentRow[] {
-  // SPEC web-attach §3 / M3：huge 模式下若 ``serverOverview`` 在（尚未 ``load full``），
-  // overview 优先（信任服务端 fold）；否则 client-fold（同 v2）。``loadFull`` 清
-  // ``serverOverview`` → 此分支自然回退到 client-fold（M4 可验）。
-  if (state.huge && state.serverOverview && !state.hugeFullyLoaded) {
+  // SPEC web-attach §3 / M3 + web-perf P3 review 修订（2026-09-08）：**窗口态**（
+  // ``serverOverview`` 在且尚未 ``load full``）overview 优先（信任服务端 fold）——
+  // 前提不再要求 ``state.huge``：P3 首屏 tail 窗口化对非 huge run 同样生效，其
+  // agents 全量清单只能来自服务端 overview（client 只 fold 到尾窗）。``loadFull``
+  // 清 ``serverOverview`` → 此分支自然回退到 client-fold（M4 可验）。
+  if (state.serverOverview && !state.hugeFullyLoaded) {
     return state.serverOverview.agents.map((a) => ({
       node: a.name,
       status: (a.status as NodeState["status"]) ?? "pending",
@@ -538,26 +540,25 @@ export function selectCharts(state: WorkflowState): {
 } {
   return selectChartsFrom(
     state.events,
-    state.huge,
     state.serverOverview,
     state.hugeFullyLoaded
   );
 }
 
 /**
- * 四参变体（SPEC 2026-08-28 C4.4）：ChartRenderer 订阅收窄到
- * events/huge/serverOverview/hugeFullyLoaded 四字段后，selector 不再组装完整 state。
+ * 三参变体（SPEC 2026-08-28 C4.4）：ChartRenderer 订阅收窄后，selector 不再组装完整
+ * state。（原四参 ``huge`` 已删——web-perf P3 review 修订：窗口态门只看
+ * ``serverOverview && !hugeFullyLoaded``，huge 不再是前提。）
  */
 function selectChartsFrom(
   events: WebEvent[],
-  huge: boolean,
   serverOverview: WorkflowState["serverOverview"],
   hugeFullyLoaded: boolean
 ): { groups: { group: string; entries: ChartEntry[] }[] } {
-  // SPEC web-attach §3 / M3：huge 模式 + serverOverview → 信任服务端 fold（仅 label/title/
+  // SPEC web-attach §3 / M3：窗口态 + serverOverview → 信任服务端 fold（仅 label/title/
   // chart_type 清单，无完整 payload）→ 渲染为占位 entry（点击触发 ``loadFull`` 拉真实 payload）。
   // ``loadFull`` 后 serverOverview 清，回退 client-fold（M4 可验：与展开后一致）。
-  if (huge && serverOverview && !hugeFullyLoaded) {
+  if (serverOverview && !hugeFullyLoaded) {
     const entries: ChartEntry[] = serverOverview.charts.map((c, i) => ({
       seq: -i - 1, // 负 seq 占位（避免与真实 seq 冲突；loadFull 后清）
       node: null,
@@ -721,25 +722,23 @@ export interface DocRowsSelection {
 export function selectDocRowsWithContent(state: WorkflowState): DocRowsSelection {
   return docRowsFrom(
     state.events,
-    state.huge,
     state.serverOverview,
     state.hugeFullyLoaded
   );
 }
 
 /**
- * 四参变体（订阅收窄直调，同 ``selectCharts._from`` 消费模式：面板订阅
- * events/huge/serverOverview/hugeFullyLoaded 四字段后不走全 state）。私有（非
+ * 三参变体（订阅收窄直调，同 ``selectChartsFrom`` 消费模式：面板订阅
+ * events/serverOverview/hugeFullyLoaded 后不走全 state）。私有（非
  * ``select`` 前缀导出——selectX 第一参数必须 state，huge-mode AST 守门）。
  */
 function docRowsFrom(
   events: WebEvent[],
-  huge: boolean,
   serverOverview: WorkflowState["serverOverview"],
   hugeFullyLoaded: boolean
 ): DocRowsSelection {
-  // huge 模式：沿用既有 placeholder 语义（目录占位，无 data）——不扫事件产半份清单。
-  if (huge && serverOverview && !hugeFullyLoaded) {
+  // 窗口态：沿用既有 placeholder 语义（目录占位，无 data）——不扫事件产半份清单。
+  if (serverOverview && !hugeFullyLoaded) {
     const has = serverOverview.charts.some((c) => c.label === DOCS_LABEL);
     return {
       rows: [],
