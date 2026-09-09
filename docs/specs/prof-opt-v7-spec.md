@@ -237,6 +237,18 @@ base/model.onnx（step1 导出，不变）
   variant-implementer（DONE/terminal-skip 返回语义）、mfu-analyzer、accuracy-analyst
   五个派发面全部补全契约描述。
 
+### 5.6 每轮 docs manifest 推送（emit 门随推）
+- `check_propose_emit.py` 校验全过后、emit 前，随门 best-effort 执行
+  `scripts/push_curves.py --artifacts . --docs`：round 的 analysis / candidates /
+  architecture_decision 当轮即时上板，不再等 report 终推。push 失败只 stderr note
+  （fail-soft），绝不阻塞 emit；gate 拒绝路径不推。
+- push_curves 的 `--docs` 触发点由两处变三处：baseline 首推（§4.5）/ propose emit 门
+  每轮（本节）/ report `(final)` 终推。内容通道的 per-run state 去重不变——重复推幂等，
+  三触发点在串行 DAG 节点上，无并发写面。
+- 披露：push_curves 单次调用会顺带刷新 curves/pareto 两图（幂等 REPLACE）并追加一条
+  `.chart_push.log` 审计行——随门推送后 curves 不再只有 baseline/report 两推，排查
+  日志量时按此口径。
+
 ---
 
 ## 6. 设备分配：agent 判定 + 账本锁（device_alloc.py）

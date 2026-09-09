@@ -1086,6 +1086,91 @@ def test_emit_gate_green_on_both_ending_paths(tmp_path):
         assert json.loads(proc.stdout)["ok"] is True
 
 
+def test_emit_gate_pushes_docs_manifest_on_pass_only(tmp_path):
+    """v7 §5.6: a passing gate fires the per-round --docs push (the fail-soft
+    note from the refused socket proves the push ran and never blocked the
+    emit); a rejected gate exits 1 BEFORE any push."""
+    if sys.platform == "win32":
+        # no AF_UNIX for the chart socket (repo-wide skipif convention)
+        pytest.skip("AF_UNIX chart socket (non-Windows verification face)")
+    env = dict(os.environ, ORCA_CHART_SOCK=str(tmp_path / "absent.sock"),
+               ORCA_NODE="po_propose", ORCA_SESSION_ID="s-docs-push")
+    env.pop("ORCA_RUN_ID", None)
+
+    art = _emit_ws(tmp_path / "push")
+    shutil.copy(_SCRIPTS / "push_curves.py", art / "scripts" / "push_curves.py")
+    proc = _run_cli([sys.executable, str(_CHECK_EMIT),
+                     "--artifacts", str(art)], env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["ok"] is True
+    assert "push failed for prof-opt/docs" in proc.stderr
+
+    art2 = _emit_ws(tmp_path / "nopush")
+    shutil.copy(_SCRIPTS / "push_curves.py",
+                art2 / "scripts" / "push_curves.py")
+    (art2 / "rounds" / "001" / "analysis.md").unlink()
+    proc2 = _run_cli([sys.executable, str(_CHECK_EMIT),
+                      "--artifacts", str(art2)], env=env)
+    assert proc2.returncode == 1
+    assert "push failed for prof-opt/docs" not in proc2.stderr
+
+
+def test_emit_gate_docs_push_success_keeps_emit_contract(tmp_path):
+    """v7 §5.6 success face: with a live daemon the gate's per-round push
+    delivers the docs manifest table (content channel included) while the
+    gate itself still exits 0 with its single-line JSON stdout untouched."""
+    import socket
+    import threading
+
+    if sys.platform == "win32":
+        pytest.skip("AF_UNIX chart socket (non-Windows verification face)")
+
+    sock_path = tmp_path / "chart.sock"
+    sock_path.unlink(missing_ok=True)
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(str(sock_path))
+    srv.listen(4)
+    srv.settimeout(30)
+    messages: list[dict] = []
+
+    def serve() -> None:
+        for _ in range(3):  # pareto + docs (curves stays empty in this ws)
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            with conn:
+                data = b""
+                while not data.endswith(b"\n"):
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                if data:
+                    messages.append(json.loads(data))
+                    conn.sendall(b'{"ok": true}\n')
+        srv.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+
+    art = _emit_ws(tmp_path / "live")
+    shutil.copy(_SCRIPTS / "push_curves.py", art / "scripts" / "push_curves.py")
+    env = dict(os.environ, ORCA_CHART_SOCK=str(sock_path),
+               ORCA_NODE="po_propose", ORCA_SESSION_ID="s-docs-live")
+    env.pop("ORCA_RUN_ID", None)
+    proc = _run_cli([sys.executable, str(_CHECK_EMIT),
+                     "--artifacts", str(art)], env=env)
+
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["ok"] is True   # single JSON line, unpolluted
+    docs = [m for m in messages
+            if m.get("payload", {}).get("label") == "prof-opt/docs"]
+    assert docs, [m.get("payload", {}).get("label") for m in messages]
+    rows = docs[0]["payload"]["data"]
+    analysis = next(r for r in rows if r["path"] == "rounds/001/analysis.md")
+    assert "## latency" in analysis["content"]   # content channel carries the body
+
+
 def test_emit_gate_requires_all_architecture_documents(tmp_path):
     for relative in (
             "rounds/001/candidates/semantic.md",

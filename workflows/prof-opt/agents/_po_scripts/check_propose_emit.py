@@ -25,6 +25,8 @@ the node emits:
      repair_count == len(attempts) and repair_count <= 5.
   6. rounds/<R>/analysis.md exists, is non-empty, and carries the
      `## latency` section — required on BOTH ending paths.
+  7. On success (and only then) it fires the per-round docs-manifest push
+     (§5.6) — fail-soft, never blocks the emit.
 
 This is structural completeness only; proposal quality, verdicts, and the
 soft-alignment judgment ("does the variant still make sense vs the
@@ -35,6 +37,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -152,6 +155,33 @@ def _check_repair_trace(path: Path, vid: str, problems: list[str]) -> None:
             f"{vid} repair_trace repair_count={count} exceeds the repair "
             f"budget of {REPAIR_MAX} — the 6th repair must be "
             "intercepted, never emitted")
+
+
+def _push_docs_manifest(art: Path) -> None:
+    """Per-round docs-manifest push (v7 §5.6): once the gate passes, the
+    round's analysis / candidates / decision docs go live on the web panel
+    immediately instead of waiting for the report's final pass. push_curves
+    is fail-soft by contract — a dead daemon must never block the emit —
+    but its stderr notes are relayed so a push failure stays visible."""
+    script = art / "scripts" / "push_curves.py"
+    if not script.is_file():
+        sys.stderr.write("check_propose_emit: docs push skipped "
+                         "(push_curves.py not deployed)\n")
+        return
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(script), "--artifacts", str(art), "--docs"],
+            capture_output=True, text=True, timeout=30)
+    except Exception as exc:  # noqa: BLE001 — fail-soft by contract
+        sys.stderr.write(f"check_propose_emit: docs push failed "
+                         f"(best-effort, ignored): {exc}\n")
+        return
+    if proc.stderr.strip():
+        sys.stderr.write("check_propose_emit: docs push notes:\n"
+                         + proc.stderr)
+    if proc.returncode != 0:
+        sys.stderr.write(f"check_propose_emit: docs push rc={proc.returncode} "
+                         "(best-effort, ignored)\n")
 
 
 def main() -> int:
@@ -344,6 +374,7 @@ def main() -> int:
         for p in problems:
             print(f"check_propose_emit: FAIL {p}", file=sys.stderr)
         return 1
+    _push_docs_manifest(art)
     print(json.dumps({"ok": True, "round": r}))
     return 0
 

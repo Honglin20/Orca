@@ -138,8 +138,10 @@ incumbent/variant cycles, improvement result, origin-target disclosure, MFU
 report, and next direction. Empty rounds record the exhausted rationale.
 
 For `latency_improved`, seed the ledger shard with that status, refresh the
-derived ledger, and push the docs manifest best-effort. Refresh the accuracy
-rules snapshot when present. Run `check_propose_emit.py` before success emit.
+derived ledger, and refresh the accuracy rules snapshot when present. Run
+`check_propose_emit.py` before emitting on BOTH ending paths — on success it
+also pushes the analysis-docs manifest best-effort, so each round's documents
+reach the web panel immediately (a push failure never blocks the emit).
 
 List only files that exist in `generated_artifacts`. Include candidate files,
 `architecture_decision.md`, `proposals.json`, `analysis.md`, assessment, stamp,

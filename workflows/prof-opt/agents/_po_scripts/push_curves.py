@@ -23,9 +23,10 @@ label+title on every push -> the front end replaces the previous chart):
     ``content_omitted`` ("true" when the body was too large or the aggregate
     budget was spent). The whitelist is the run's own artifacts tree (every
     listed path is a constructed constant, never a discovered absolute path).
-    Trigger points: the baseline chain's first push (run_baseline_chain.sh)
-    and the report node's final pass (``--title "(final)"``) — the two
-    existing ``--docs`` call sites; the push frequency is unchanged.
+    Trigger points: the baseline chain's first push (run_baseline_chain.sh),
+    the propose emit gate's per-round push (check_propose_emit.py, fired
+    after the gate passes), and the report node's final pass
+    (``--title "(final)"``) — the three ``--docs`` call sites.
 
 Fail-soft by contract — this sidecar must never stall or fail a worker:
   * ``ORCA_CHART_SOCK`` unset           -> silent exit 0;
@@ -46,8 +47,8 @@ Usage:
 ``--title`` is a TITLE SUFFIX (default empty) applied to every chart; the
 report's finalize push passes ``(final)`` so the terminal charts are visibly
 distinct from the live ones. ``--docs`` additionally pushes the analysis-docs
-manifest with the content channel (triggers: the baseline chain's first push
-and the report node's final pass — the only two call sites).
+manifest with the content channel (triggers: the baseline chain's first push /
+the propose emit gate's per-round push / the report node's final pass).
 """
 from __future__ import annotations
 
@@ -549,7 +550,8 @@ def main() -> int:
     ap.add_argument("--docs", action="store_true",
                     help="also push the analysis-docs manifest table with the "
                          "content channel (triggers: baseline chain first "
-                         "push / report final push)")
+                         "push / propose emit gate per round / report final "
+                         "push)")
     ns = ap.parse_args()
 
     sock_path = os.environ.get("ORCA_CHART_SOCK", "")

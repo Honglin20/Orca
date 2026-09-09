@@ -212,7 +212,9 @@ nodes:
   #   三个 architecture proposer 并行生成业务/硬件/SOTA 候选，selector 融合为
   #   唯一架构；只有 selector 产物进入 assessor/implementer/mfu。预测仅披露，
   #   实测严格优于 incumbent 才进入 probe；origin target 保持冻结。op_delta
-  #   不再是契约字段，parent_vid + source snapshot 记录谱系。
+  #   不再是契约字段，parent_vid + source snapshot 记录谱系。emit 门通过后
+  #   随门 best-effort 推送 docs manifest——每轮 round 文档即时上板（不等
+  #   report 终推）。
   #   executed → po_probe；catch-all → po_report。
   # ───────────────────────────────────────────────────────────────────────────
   - name: po_propose
