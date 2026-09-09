@@ -14,6 +14,11 @@
     - dead pid 检测：``effective_status`` 把 status=running + pid 死 → crashed（fail loud）。
     - argv 构造：``build_child_argv`` 重 exec ``tars run <yaml>`` / ``python -m orca.iface.cli.commands run``（不带 --background）。
     - 非 Unix 拒绝：无 ``os.fork`` → RuntimeError。
+    - **导入期平台安全**（spec 2026-09-08 D6）：``fork_fn``/``setsid_fn`` 默认参数不在
+      def 期求值 ``os.fork``——Windows 无该属性也不崩 import（``tars ps/wait/logs/doctor``
+      的 lazy import 依赖此）。
+    - **pid_alive 零杀伤**（D6）：探活前后目标进程 ``poll()`` 状态不变（win32 走
+      OpenProcess；旧 ``os.kill(pid, 0)`` 在 Windows = TerminateProcess）。
 """
 
 from __future__ import annotations
@@ -227,7 +232,7 @@ class TestPidAliveAndEffectiveStatus:
     """``pid_alive`` + ``effective_status`` —— ``ps`` 标 crashed 的核心逻辑。"""
 
     def test_pid_alive_self_pid_exists(self):
-        """当前进程的 pid 当然存活（os.kill(self, 0) 不抛）。"""
+        """当前进程的 pid 当然存活（POSIX os.kill(self,0) / win32 OpenProcess）。"""
         assert pid_alive(os.getpid()) is True
 
     def test_pid_alive_invalid_pid_false(self):
@@ -239,6 +244,59 @@ class TestPidAliveAndEffectiveStatus:
         """一个几乎不可能在用的超大 pid → ProcessLookupError → False。"""
         # 取一个远超 /proc/sys/kernel/pid_max 的值（Linux 默认 4194304）。
         assert pid_alive(99999999) is False
+
+    def test_pid_alive_does_not_kill_target_process(self):
+        """D6 零杀伤回归：``pid_alive(长活子进程)`` 前后目标 ``poll() is None`` 不变。
+
+        INTENT：Windows 上 ``os.kill(pid, 0)`` 语义是 ``TerminateProcess``（实测根因 6：
+        ``tars ps`` 一跑就把 running 的 bg run 杀了）。win32 分支必须走 ctypes
+        OpenProcess 零杀伤探；POSIX 分支 ``os.kill(pid, 0)`` 本就不杀。两平台同一断言。
+        """
+        import subprocess
+
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            assert proc.poll() is None, "前置：子进程应存活"
+            assert pid_alive(proc.pid) is True, "探活必须报 True"
+            # 探活绝不能有杀伤副作用——进程仍活着（poll() is None）。
+            assert proc.poll() is None, (
+                "pid_alive 杀掉了目标进程！（win32 误走 os.kill(pid,0)=TerminateProcess）"
+            )
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+
+
+class TestDaemonizeImportSafety:
+    """D6：模块导入平台安全——默认参数不在 def 期求值 ``os.fork``。
+
+    旧默认 ``fork_fn: Callable = os.fork`` 在**模块导入期**（def 语句求值默认参数）就
+    访问 ``os.fork`` 属性：Windows 无此属性 → ``tars ps/wait/logs/doctor`` 的 lazy
+    import bg_runner 直接崩（实测根因 3，AttributeError: module 'os' has no attribute
+    'fork'）。现默认 ``None`` + 函数体内兜底。
+    """
+
+    def test_module_imports_without_os_fork_attribute(self, monkeypatch):
+        """无 ``os.fork`` 属性的环境（模拟 Windows）import bg_runner 不崩。"""
+        import importlib
+
+        monkeypatch.delattr(os, "fork", raising=False)
+        import orca.iface.cli.bg_runner as bg_runner_mod
+
+        reloaded = importlib.reload(bg_runner_mod)  # def 期求值会在此爆（若有）
+        assert hasattr(reloaded, "daemonize")
+
+    def test_daemonize_defaults_are_none(self):
+        """``fork_fn`` / ``setsid_fn`` 签名默认值 = None（不在 def 期碰 os.fork）。"""
+        import inspect
+
+        sig = inspect.signature(daemonize)
+        assert sig.parameters["fork_fn"].default is None
+        assert sig.parameters["setsid_fn"].default is None
 
     def test_effective_status_terminal_unchanged(self):
         """status 已 terminal（completed/failed/crashed）→ 原样返回，不查 pid。"""
@@ -287,7 +345,9 @@ class TestBuildChildArgv:
         """
         argv = build_child_argv(Path("/abs/x.yaml"), [])
         assert "run" in argv
-        assert "/abs/x.yaml" in argv
+        # str(Path) 平台原生形态（POSIX "/abs/x.yaml" / win 反斜杠形态）——
+        # build_child_argv 原样透传 str(yaml_path)，断言用同源派生不锁分隔符。
+        assert str(Path("/abs/x.yaml")) in argv
         # 关键：argv 不含 --background / -b（child 不再 detach）。
         assert "--background" not in argv
         assert "-b" not in argv
@@ -350,9 +410,19 @@ class TestBuildChildArgv:
 # ── daemonize seam：parent 分支 ────────────────────────────────────────────────
 
 
+# daemonize 真 fork/setsid detach 语义是 Unix-only（Windows 由 ``_assert_unix``
+# 拒绝，test_daemonize_rejects_non_unix 在两平台天然覆盖该路径）；注入 seam 的四个
+# 行为测试在 win32 会被 _assert_unix 先行拦截 → skip（spec 2026-09-08 skipif 清点）。
+requires_os_fork = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="daemonize fork/setsid 语义 Unix-only（win32 拒绝路径另有覆盖）",
+)
+
+
 class TestDaemonizeParentBranch:
     """parent 分支：fork 返回 pid>0 → 立即返回 pid + 写 metadata（含真 pid）。"""
 
+    @requires_os_fork
     def test_daemonize_parent_returns_pid_and_writes_meta(self, _isolated_runs_dir):
         """fork_fn 返回 12345 → daemonize 返回 12345 + metadata.pid=12345 + status=running。"""
         # parent 分支：fork 立即返回 pid，不进 child 路径。
@@ -378,6 +448,7 @@ class TestDaemonizeParentBranch:
         assert restored.started_at == 1000.0
         assert restored.yaml_path == "/abs/x.yaml"
 
+    @requires_os_fork
     def test_daemonize_parent_creates_log_dir(self, _isolated_runs_dir):
         """parent 在 fork 前就 mkdir log_dir（保证 child 一 setsid 就能 open log）。"""
         daemonize(
@@ -403,6 +474,7 @@ class TestDaemonizeParentBranch:
 class TestDaemonizeChildBranch:
     """child 分支：fork 返回 0 → setsid → redirect stdio → set env → execv。"""
 
+    @requires_os_fork
     def test_daemonize_child_calls_setsid_redirect_env_execv(self, _isolated_runs_dir, monkeypatch):
         """fork 返回 0（child）→ setsid/redirect/execv 都被调，env 含 ORCA_BG_RUN_ID。
 
@@ -453,6 +525,7 @@ class TestDaemonizeChildBranch:
         argv = argv_call.split(":", 1)[1]
         assert "/abs/x.yaml" in argv and "k=v" in argv
 
+    @requires_os_fork
     def test_daemonize_child_env_propagates_run_id(self, _isolated_runs_dir, monkeypatch):
         """run_id 经 ENV_BG_RUN_ID 传 child —— OrcaApp 据 env 复用，保 tape/metadata 一致。"""
         monkeypatch.setenv(ENV_BG_RUN_ID, "stale-should-be-overwritten")

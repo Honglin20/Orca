@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Any, Iterator, Literal
 from pydantic import BaseModel, ConfigDict
 
 from orca.chart._limits import SOCK_PATH_MAX
-from orca.chart._paths import artifacts_dir_for_run, chart_sock_path
+from orca.chart._paths import artifacts_dir_for_run, chart_port_file_path, chart_sock_path
 from orca.compile import ConfigurationError, load_workflow
 from orca.iface.cli.config import apply_kb_requirement
 from orca.iface.web.file_text import safe_resolve
@@ -2443,13 +2443,20 @@ class RunManager:
                 pass
             except Exception:  # noqa: BLE001 — ingestor task 异常不应阻塞 teardown
                 logger.warning("run %s chart ingestor 异常退出", handle.run_id, exc_info=True)
-        # 兜底 unlink socket 文件（crash 重起 task 的 cleanup 不依赖此，但保证 run 结束无残留）。
+        # 兜底 unlink 端点文件（crash 重起 task 的 cleanup 不依赖此，但保证 run 结束无残留）。
         # §7.7 短路径化：socket 在 <tmp>/orca-<hash>.sock（chart_sock_path），与 runs 目录解耦。
+        # Windows TCP 模式：端口 sidecar（<sock>.port）一并清（spec 2026-09-08 D1；POSIX
+        # 恒不存在，unlink no-op）。
         sock_path = chart_sock_path(handle.run_id)
         try:
             Path(sock_path).unlink(missing_ok=True)
         except OSError as e:  # noqa: BLE001
             logger.warning("run %s sock unlink 失败 %s: %r", handle.run_id, sock_path, e)
+        port_path = chart_port_file_path(sock_path)
+        try:
+            Path(port_path).unlink(missing_ok=True)
+        except OSError as e:  # noqa: BLE001
+            logger.warning("run %s port file unlink 失败 %s: %r", handle.run_id, port_path, e)
 
         if handle._gate_started:
             try:

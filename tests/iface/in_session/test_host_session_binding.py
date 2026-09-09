@@ -13,6 +13,8 @@ test_marker.py 守门，本文件不复测）。
 """
 from __future__ import annotations
 
+import sys
+
 import json
 import os
 import shutil
@@ -99,6 +101,7 @@ def test_host_session_env_fallback_to_claude():
         assert _host_session_from_env() == "cc-sess-2"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="CC hook 脚本经 bash+python3 执行（Windows 解析到 Store stub；spec 2026-09-08 根因 5 明示 out-of-scope）")
 def test_host_session_env_neither_returns_none():
     """两个 env 都无 → None（手 CLI / 未注入）。"""
     with mock.patch.dict(os.environ, {}, clear=True):
@@ -334,6 +337,7 @@ def _write_tape(runs: Path, run_id: str, host_session: str | None,
 
 
 @_pytestmark_nudge
+@pytest.mark.skipif(sys.platform == "win32", reason="CC hook 脚本经 bash+python3 执行（Windows 解析到 Store stub；spec 2026-09-08 根因 5 明示 out-of-scope）")
 def test_cc_nudge_blocks_when_host_session_matches(tmp_path: Path):
     """host_session == current → block（本 session 的 run）。"""
     runs = tmp_path / "runs"
@@ -352,6 +356,7 @@ def test_cc_nudge_blocks_when_host_session_matches(tmp_path: Path):
 
 
 @_pytestmark_nudge
+@pytest.mark.skipif(sys.platform == "win32", reason="CC hook 脚本经 bash+python3 执行（Windows 解析到 Store stub；spec 2026-09-08 根因 5 明示 out-of-scope）")
 def test_cc_nudge_skips_when_host_session_differs(tmp_path: Path):
     """host_session != current → 跳过（别的 session 的 run，不 block，§2.5）。"""
     runs = tmp_path / "runs"
@@ -369,6 +374,7 @@ def test_cc_nudge_skips_when_host_session_differs(tmp_path: Path):
 
 
 @_pytestmark_nudge
+@pytest.mark.skipif(sys.platform == "win32", reason="CC hook 脚本经 bash+python3 执行（Windows 解析到 Store stub；spec 2026-09-08 根因 5 明示 out-of-scope）")
 def test_cc_nudge_skips_when_host_session_none_in_tape(tmp_path: Path):
     """tape host_session 为 None（手 CLI 起）→ 跳过（无法证明归属，§2.5）。"""
     runs = tmp_path / "runs"
@@ -385,6 +391,7 @@ def test_cc_nudge_skips_when_host_session_none_in_tape(tmp_path: Path):
 
 
 @_pytestmark_nudge
+@pytest.mark.skipif(sys.platform == "win32", reason="CC hook 脚本经 bash+python3 执行（Windows 解析到 Store stub；spec 2026-09-08 根因 5 明示 out-of-scope）")
 def test_cc_nudge_tape_first_line_not_workflow_started(tmp_path: Path):
     """tape 首行非 workflow_started（异常 tape）→ host_session None → 跳过（§6.4 fail-safe）。"""
     runs = tmp_path / "runs"
@@ -402,6 +409,7 @@ def test_cc_nudge_tape_first_line_not_workflow_started(tmp_path: Path):
 
 
 @_pytestmark_nudge
+@pytest.mark.skipif(sys.platform == "win32", reason="CC hook 脚本经 bash+python3 执行（Windows 解析到 Store stub；spec 2026-09-08 根因 5 明示 out-of-scope）")
 def test_cc_nudge_tape_missing_returns_none(tmp_path: Path):
     """tape 文件不存在（marker 孤儿）→ _host_session_from_tape fail-safe None → 跳过。"""
     runs = tmp_path / "runs"
@@ -417,6 +425,7 @@ def test_cc_nudge_tape_missing_returns_none(tmp_path: Path):
 
 
 @_pytestmark_nudge
+@pytest.mark.skipif(sys.platform == "win32", reason="CC hook 脚本经 bash+python3 执行（Windows 解析到 Store stub；spec 2026-09-08 根因 5 明示 out-of-scope）")
 def test_cc_nudge_per_session_throttle_separate_keys(tmp_path: Path):
     """per-session 限流分键：A nudge 后 B 仍被提醒自己的 run（§2.4 / 评审 C1）。"""
     runs = tmp_path / "runs"
@@ -452,6 +461,7 @@ def test_cc_nudge_per_session_throttle_separate_keys(tmp_path: Path):
 
 
 @_pytestmark_nudge
+@pytest.mark.skipif(sys.platform == "win32", reason="CC hook 脚本经 bash+python3 执行（Windows 解析到 Store stub；spec 2026-09-08 根因 5 明示 out-of-scope）")
 def test_cc_nudge_no_env_with_active_marker_warns(tmp_path: Path):
     """current=None + 有活跃 marker → stderr warn（区分手 CLI 与 env 注入 bug，评审 C10）。"""
     runs = tmp_path / "runs"
@@ -470,6 +480,7 @@ def test_cc_nudge_no_env_with_active_marker_warns(tmp_path: Path):
 
 
 @_pytestmark_nudge
+@pytest.mark.skipif(sys.platform == "win32", reason="CC hook 脚本经 bash+python3 执行（Windows 解析到 Store stub；spec 2026-09-08 根因 5 明示 out-of-scope）")
 def test_cc_nudge_no_env_no_marker_silent(tmp_path: Path):
     """current=None + 无 marker → 静默放行（无 warn，无 block）。"""
     script = _write_nudge(tmp_path)
@@ -483,6 +494,7 @@ def test_cc_nudge_no_env_no_marker_silent(tmp_path: Path):
 
 
 @_pytestmark_nudge
+@pytest.mark.skipif(sys.platform == "win32", reason="CC hook 脚本经 bash+python3 执行（Windows 解析到 Store stub；spec 2026-09-08 根因 5 明示 out-of-scope）")
 def test_cc_nudge_mixed_sessions_only_nudges_own(tmp_path: Path):
     """多 session 共存：A 的 run + B 的 run 同时活跃，sess-A idle 只 block A 的（§5.1）。"""
     runs = tmp_path / "runs"
@@ -505,6 +517,7 @@ def test_cc_nudge_mixed_sessions_only_nudges_own(tmp_path: Path):
 
 
 @_pytestmark_nudge
+@pytest.mark.skipif(sys.platform == "win32", reason="CC hook 脚本经 bash+python3 执行（Windows 解析到 Store stub；spec 2026-09-08 根因 5 明示 out-of-scope）")
 def test_cc_nudge_orca_env_priority_over_claude(tmp_path: Path):
     """cc_nudge.sh 的 _host_session_from_env：ORCA_HOST_SESSION_ID 优先于 CLAUDE_CODE_SESSION_ID。
 
@@ -529,6 +542,7 @@ def test_cc_nudge_orca_env_priority_over_claude(tmp_path: Path):
 
 
 @_pytestmark_nudge
+@pytest.mark.skipif(sys.platform == "win32", reason="CC hook 脚本经 bash+python3 执行（Windows 解析到 Store stub；spec 2026-09-08 根因 5 明示 out-of-scope）")
 def test_cc_nudge_tape_first_line_corrupt_json(tmp_path: Path):
     """tape 首行是损坏 JSON（非合法）→ _host_session_from_tape 的 except JSONDecodeError → None → 跳过。
 

@@ -11,6 +11,8 @@
 """
 from __future__ import annotations
 
+import sys
+
 import json
 from pathlib import Path
 
@@ -108,6 +110,7 @@ def test_read_workflow_inputs_consistent_with_read_workflow_name(tmp_path: Path)
 # ── _resolve_artifacts_dir ──────────────────────────────────────────────────
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="project_root 用 POSIX 路径字面 '/abs/proj'（win32 非绝对路径，产品按契约正确拒绝）")
 def test_resolve_artifacts_dir_project_scoped_absolute(tmp_path: Path):
     """有 wf_name + 绝对 project_root → ``<proj>/artifacts/<wf>/``。"""
     tape = tmp_path / "runs" / "r.jsonl"
@@ -163,6 +166,7 @@ def test_resolve_artifacts_dir_raises_on_relative_project_root(tmp_path: Path):
         _resolve_artifacts_dir(tape, run_id="r-aaa")
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="project_root 用 POSIX 路径字面 '/abs/proj'（win32 非绝对路径，产品按契约正确拒绝）")
 def test_resolve_artifacts_dir_isolates_workflows(tmp_path: Path):
     """同 project_root + 不同 wf_name → 不同 wf 子目录（多 wf 隔离契约）。"""
     proj = "/abs/proj"

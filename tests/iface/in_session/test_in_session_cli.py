@@ -23,6 +23,7 @@ from unittest import mock
 import pytest
 from typer.testing import CliRunner
 
+from orca.iface.in_session import _flock  # flock shim（D4）：与 SUT 同锁 API
 from orca.iface.in_session.cli import app, _validate_inputs
 
 
@@ -230,7 +231,6 @@ def test_bootstrap_lock_released_before_spawn_daemons(cwd_tmp, wf_path, monkeypa
 
     dupe-check 不变量不变：锁仍包 dupe check + gen run_id + advance + write_marker。
     """
-    import fcntl
     runner = CliRunner()
     from orca.iface.in_session import cli as cli_mod
 
@@ -243,10 +243,10 @@ def test_bootstrap_lock_released_before_spawn_daemons(cwd_tmp, wf_path, monkeypa
         fd = open(bootstrap_lock, "w")
         try:
             try:
-                fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                _flock.flock(fd.fileno(), _flock.LOCK_EX | _flock.LOCK_NB)
                 captured["lock_available_at_spawn"] = True
                 # 释放，免影响后续
-                fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+                _flock.flock(fd.fileno(), _flock.LOCK_UN)
             except BlockingIOError:
                 captured["lock_available_at_spawn"] = False
         finally:
@@ -1416,7 +1416,6 @@ def test_next_busy_when_lock_held(cwd_tmp, wf_path):
     SPEC §3 O4：busy 信封含 ``retry_after_ms``（500ms），主 session 据它等待重试。
     SPEC §3 O4 AC：busy reply 不重发 prompt（reply 无 prompt / node 字段）。
     """
-    import fcntl
     from orca.iface.in_session.cli import _BUSY_RETRY_AFTER_MS
     runner = CliRunner()
     boot = _bootstrap(runner, wf_path)
@@ -1425,7 +1424,7 @@ def test_next_busy_when_lock_held(cwd_tmp, wf_path):
     # 持锁
     lock_path = Path(str(tape) + ".lock")
     fd = open(lock_path, "w")
-    fcntl.flock(fd.fileno(), fcntl.LOCK_EX)
+    _flock.flock(fd.fileno(), _flock.LOCK_EX)
     try:
         reply = _next(runner, tape, run_id, "--output", "out_a")
         assert reply["done"] is False
@@ -1441,7 +1440,7 @@ def test_next_busy_when_lock_held(cwd_tmp, wf_path):
         lines = Path(tape).read_text(encoding="utf-8").strip().split("\n")
         assert len(lines) == 2
     finally:
-        fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+        _flock.flock(fd.fileno(), _flock.LOCK_UN)
         fd.close()
 
 
@@ -1662,7 +1661,6 @@ def test_stop_busy_when_tape_flock_held(cwd_tmp, wf_path):
 
     SPEC §3 O4：busy 信封含 ``retry_after_ms``（与 next 路径一致）。
     """
-    import fcntl
     from orca.iface.in_session.cli import _BUSY_RETRY_AFTER_MS
     runner = CliRunner()
     boot = _bootstrap(runner, wf_path)
@@ -1670,7 +1668,7 @@ def test_stop_busy_when_tape_flock_held(cwd_tmp, wf_path):
 
     lock_path = Path(str(tape) + ".lock")
     fd = open(lock_path, "w")
-    fcntl.flock(fd.fileno(), fcntl.LOCK_EX)
+    _flock.flock(fd.fileno(), _flock.LOCK_EX)
     try:
         result = runner.invoke(app, ["stop", run_id])
         reply = json.loads(result.output.splitlines()[-1])
@@ -1678,7 +1676,7 @@ def test_stop_busy_when_tape_flock_held(cwd_tmp, wf_path):
         assert reply["reason"] == "busy"
         assert reply["retry_after_ms"] == _BUSY_RETRY_AFTER_MS
     finally:
-        fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+        _flock.flock(fd.fileno(), _flock.LOCK_UN)
         fd.close()
 
 

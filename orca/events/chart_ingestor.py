@@ -28,10 +28,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from orca.chart._limits import MAX_MESSAGE_BYTES
+from orca.chart._paths import (
+    chart_port_file_path,
+    write_chart_port_file,
+)
 
 if TYPE_CHECKING:
     from orca.events.bus import EventBus
@@ -42,44 +48,65 @@ logger = logging.getLogger(__name__)
 # 两端同源常量：``orca.chart._limits.MAX_MESSAGE_BYTES``。
 _MAX_INCOMING_BYTES = MAX_MESSAGE_BYTES
 
+_IS_WINDOWS = sys.platform == "win32"
+
 
 async def chart_ingestor(sock_path: Path, bus: "EventBus", run_id: str) -> None:
-    """per-run Unix socket listener（SPEC §3.1 / §3.2）。
+    """per-run chart listener（SPEC §3.1 / §3.2）。
 
-    RunHandle 启动时 ``asyncio.create_task``；run 终态时 cancel + socket 文件由调用方
+    传输层平台分支（协议字节级不变：单行 JSON + ack，短连接）：
+      - POSIX：Unix socket ``<sock_path>``（现状，零改动）。
+      - Windows：Python 不暴露 ``AF_UNIX`` → TCP ``127.0.0.1:<临时端口>``（
+        ``asyncio.start_server``）。端口 bind 期确定，原子写 ``<sock_path>.port``
+        sidecar（``chart_port_file_path``）；cancel/异常 finally 删除。
+
+    RunHandle 启动时 ``asyncio.create_task``；run 终态时 cancel + 端点文件由调用方
     unlink（``RunHandle._teardown_handle``）。
 
     Args:
-        sock_path: ``runs/<run_id>.sock`` 绝对路径。函数内 mkdir parent + 清 stale socket。
+        sock_path: ``<tmp>/orca-<sha1(run_id)[:10]>.sock`` 绝对路径（POSIX 用；Windows
+            仅作端口文件派生源）。函数内 mkdir parent + 清 stale socket（POSIX）。
         bus: 该 run 的 EventBus（emit 走 Tape 单一写路径）。
         run_id: 仅用于日志（路由不需要——sock_path 已含 run_id 寻址）。
 
     Lifecycle:
       - ``serve_forever`` 永不返回（正常情况）。
-      - ``CancelledError``（teardown）→ 静默退出，finally ``unlink(missing_ok=True)``。
-      - 其它异常 → 抛给 ``add_done_callback``（``_on_ingestor_crash`` 重起）。
+      - ``CancelledError``（teardown）→ 静默退出，finally 清端点文件。
+      - 其它异常 → 抛给 ``add_done_callback``（``make_crash_callback`` 限流重起）。
     """
-    sock_path.parent.mkdir(parents=True, exist_ok=True)
-    if sock_path.exists():
-        # stale socket（前次 run crash 残留）。SPEC §3.2 注释：先 unlink 再 bind，
-        # 否则 ``start_unix_server`` 报 AddressAlreadyInUse。
-        logger.info("run %s: 清理 stale socket %s", run_id, sock_path)
-        sock_path.unlink()
+    port_file: Path | None = None
+    if _IS_WINDOWS:
+        port_file = chart_port_file_path(sock_path)
+        server = await asyncio.start_server(
+            _make_handler(bus, run_id),
+            host="127.0.0.1",
+            port=0,  # 内核分配临时端口，写 sidecar 供两端发现
+            limit=MAX_MESSAGE_BYTES + 1024,
+        )
+        port = server.sockets[0].getsockname()[1]
+        write_chart_port_file(port_file, port)
+    else:
+        sock_path.parent.mkdir(parents=True, exist_ok=True)
+        if sock_path.exists():
+            # stale socket（前次 run crash 残留）。SPEC §3.2 注释：先 unlink 再 bind，
+            # 否则 ``start_unix_server`` 报 AddressAlreadyInUse。
+            logger.info("run %s: 清理 stale socket %s", run_id, sock_path)
+            sock_path.unlink()
 
-    server = await asyncio.start_unix_server(
-        _make_handler(bus, run_id),
-        path=str(sock_path),
-        # SPEC §5.2：单条消息上限 2MB。asyncio ``StreamReader.readline`` 默认 64KB，
-        # 必须显式提到 ``MAX_MESSAGE_BYTES``——否则 ~64KB-2MB 区间的合法 chart payload 会被
-        # asyncio 误拒（LimitOverrunError）。设为 2MB+1024 后：
-        #   - ≤ 2MB 合法 payload：handler 内 size check 放行（< MAX_MESSAGE_BYTES）
-        #   - 2MB < payload ≤ 2MB+1024：handler 内 size check reject（ack ok=False "too large"）
-        #   - > 2MB+1024：readline 抛 LimitOverrunError → handler 通用 except catch → ack
-        #     可能因 stream 异常对 client 不可读（client 看到 EOF/timeout，仍 fail loud 在
-        #     ``_render.py`` 的 ``ack_raw==b""`` / ``socket.timeout`` 路径）。SPEC §5.2 核心
-        #     契约「不写 tape」始终满足。
-        limit=MAX_MESSAGE_BYTES + 1024,
-    )
+        server = await asyncio.start_unix_server(
+            _make_handler(bus, run_id),
+            path=str(sock_path),
+            # SPEC §5.2：单条消息上限 2MB。asyncio ``StreamReader.readline`` 默认 64KB，
+            # 必须显式提到 ``MAX_MESSAGE_BYTES``——否则 ~64KB-2MB 区间的合法 chart payload 会被
+            # asyncio 误拒（LimitOverrunError）。设为 2MB+1024 后：
+            #   - ≤ 2MB 合法 payload：handler 内 size check 放行（< MAX_MESSAGE_BYTES）
+            #   - 2MB < payload ≤ 2MB+1024：handler 内 size check reject（ack ok=False "too large"）
+            #   - > 2MB+1024：readline 抛 LimitOverrunError → handler 通用 except catch → ack
+            #     可能因 stream 异常对 client 不可读（client 看到 EOF/timeout，仍 fail loud 在
+            #     ``_render.py`` 的 ``ack_raw==b""`` / ``socket.timeout`` 路径）。SPEC §5.2 核心
+            #     契约「不写 tape」始终满足。
+            limit=MAX_MESSAGE_BYTES + 1024,
+        )
     try:
         async with server:
             await server.serve_forever()
@@ -87,11 +114,14 @@ async def chart_ingestor(sock_path: Path, bus: "EventBus", run_id: str) -> None:
         # teardown：正常退出路径（RunHandle cancel）。
         pass
     finally:
-        # 兜底 unlink（即使 serve_forever 因异常退出，socket 文件也应清理）。
+        # 兜底清端点文件（即使 serve_forever 因异常退出）。
         try:
-            sock_path.unlink(missing_ok=True)
+            if port_file is not None:
+                port_file.unlink(missing_ok=True)
+            else:
+                sock_path.unlink(missing_ok=True)
         except OSError as e:  # noqa: BLE001 — unlink 失败不应阻塞收尾
-            logger.warning("run %s: sock unlink 失败 %s: %r", run_id, sock_path, e)
+            logger.warning("run %s: 端点文件清理失败 %s: %r", run_id, sock_path, e)
 
 
 def _make_handler(bus: "EventBus", run_id: str):
@@ -171,8 +201,11 @@ async def _ack(
     await writer.drain()
 
 
-def make_crash_callback(sock_path: Path, bus: "EventBus", run_id: str):
-    """构造 ``add_done_callback``（SPEC §3.4 crash 恢复）。
+def make_crash_callback(
+    sock_path: Path, bus: "EventBus", run_id: str,
+    *, max_restarts: int = 5, window_seconds: float = 60.0,
+):
+    """构造 ``add_done_callback``（SPEC §3.4 crash 恢复 + **限流熔断**）。
 
     用法（RunHandle 启动时）::
 
@@ -181,11 +214,20 @@ def make_crash_callback(sock_path: Path, bus: "EventBus", run_id: str):
 
     行为：
       - task 正常 cancel（teardown）→ 静默返回。
-      - task 抛异常 → log warning + ``unlink`` stale socket + 创建新 task 重起 ingestor
-        + 重新挂 callback（递归，下次 crash 再重起）。
+      - task 抛异常 → log warning + 清 stale 端点 + 创建新 task 重起 ingestor
+        + 把**本闭包**挂上新 task（重起链全链共享同一 ``crash_times``，计数不随重起清零）。
+      - **熔断**（2026-09-08）：滚动窗口（默认 60s）内 crash > ``max_restarts``（默认 5）次
+        → 放弃重起 + ``logger.error`` fail loud。旧实现无限重起，Windows 上
+        ``start_unix_server`` 缺失这类「恒崩」错误会以每秒数千次的速度空转饿死事件循环
+        （run 停摆 + 日志刷盘），熔断保证最坏退化 = chart 不可用而非整个 run 不可用。
       - **重起窗口期 in-flight chart 会丢**（SPEC §0.1 #4：socket 仅传输，不保证 exactly-once）。
       - **重起不更新 RunHandle 字段**（teardown 走 sock unlink + name 找 task 兜底）。
+
+    熔断状态粒度（D3 修订）：``crash_times`` 是**本工厂调用的闭包变量**——web 与
+    in-session 均为每 run 一次工厂调用，per-run 链共享同一列表（run A 的 crash 计数
+    不污染 run B；重起链经同一闭包自挂接，计数跨重起持续）。禁模块级全局。
     """
+    crash_times: list[float] = []  # 闭包滚动窗口（monotonic 秒；重起链共享同一列表）
 
     def _on_crash(task: asyncio.Task) -> None:
         if task.cancelled():
@@ -195,9 +237,22 @@ def make_crash_callback(sock_path: Path, bus: "EventBus", run_id: str):
             # serve_forever 永不返回，正常退出不应发生；记 debug 不重起（防无限循环）。
             logger.debug("run %s: ingestor 正常退出（不应发生），不重起", run_id)
             return
+        now = time.monotonic()
+        while crash_times and now - crash_times[0] > window_seconds:
+            crash_times.pop(0)
+        crash_times.append(now)
+        if len(crash_times) > max_restarts:
+            logger.error(
+                "run %s: chart_ingestor %ss 内 crash %d 次（上限 %d）——熔断，不再重起。"
+                "chart 推送对本 run 不可用（不影响 run 推进）；根因见最后一条 crash 日志：%r",
+                run_id, window_seconds, len(crash_times), max_restarts, exc,
+                exc_info=exc,  # 恒崩根因定位依赖 traceback（fail loud，非静默限流）
+            )
+            return
         logger.warning(
-            "run %s: chart_ingestor crash: %r — 重起中（in-flight chart 可能丢）",
-            run_id, exc, exc_info=True,
+            "run %s: chart_ingestor crash: %r — 重起中（%d/%d，in-flight chart 可能丢）",
+            run_id, exc, len(crash_times), max_restarts,
+            exc_info=exc,
         )
         try:
             sock_path.unlink(missing_ok=True)
@@ -215,6 +270,8 @@ def make_crash_callback(sock_path: Path, bus: "EventBus", run_id: str):
             chart_ingestor(sock_path, bus, run_id),
             name=f"orca-chart-ingestor-{run_id}-restart",
         )
-        new_task.add_done_callback(make_crash_callback(sock_path, bus, run_id))
+        # D3 修订：挂**本闭包**（不重新走工厂）——重起链共享同一 ``crash_times``，
+        # 否则每代重起新建闭包/列表，计数永远清零，熔断成为死代码。
+        new_task.add_done_callback(_on_crash)
 
     return _on_crash

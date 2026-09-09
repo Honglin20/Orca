@@ -53,6 +53,7 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Footer
 
 from orca.chart._limits import SOCK_PATH_MAX
+from orca.chart._paths import chart_port_file_path
 from orca.events.bus import EventBus
 from orca.events.chart_ingestor import chart_ingestor, make_crash_callback
 from orca.events.tape import Tape
@@ -670,6 +671,12 @@ class OrcaApp(App):
                 self._chart_sock_path.unlink(missing_ok=True)
             except OSError as e:  # noqa: BLE001
                 logger.warning("sock unlink 失败 %s: %r", self._chart_sock_path, e)
+            # Windows TCP 模式端口 sidecar 一并清（spec 2026-09-08 D1；POSIX 恒无，no-op）。
+            _port_path = chart_port_file_path(self._chart_sock_path)
+            try:
+                _port_path.unlink(missing_ok=True)
+            except OSError as e:  # noqa: BLE001
+                logger.warning("port file unlink 失败 %s: %r", _port_path, e)
             # orchestrator.run() 已 close bus；这里只确认 broadcaster 停（无 in-flight gate/interrupt）。
             try:
                 await self.gate_handler.stop()

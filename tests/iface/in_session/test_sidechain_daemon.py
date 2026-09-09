@@ -108,6 +108,7 @@ def test_pidfile_alive_stale_pid(tmp_path):
         pidfile.unlink(missing_ok=True)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pidfile cmdline 校验前提（D5/U2-A：win32 OpenProcess-only 无 cmdline 校验，pid 复用假阳性已声明）")
 def test_pidfile_alive_wrong_cmdline(tmp_path):
     """pidfile 存在 + pid 活但 cmdline 不含 sidechain_daemon → False（防 pid 复用）。
 
@@ -556,6 +557,7 @@ def test_e2e_daemon_ingests_cc_sidechain(tmp_path, monkeypatch):
         _sidechain_pidfile_path(run_id).unlink(missing_ok=True)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pidfile cmdline 校验前提（D5/U2-A：win32 OpenProcess-only 无 cmdline 校验，pid 复用假阳性已声明）")
 def test_e2e_daemon_with_family_argv_reads_cac_dotdir(tmp_path, monkeypatch):
     """SPEC §P4：daemon argv ``--family cac`` → 读 ``~/.cac/projects/<enc>/<host>/subagents``。
 

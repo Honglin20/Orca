@@ -2352,6 +2352,14 @@ def main() -> None:
     install/validate/mcp/executor/list/open。旧 ``orca`` 入口已迁到
     ``orca.iface.in_session.cli:main``（in-session 7 命令，LLM-facing）。
     """
+    # D7（spec 2026-09-08）：Windows 管道/重定向下 stdout 默认 cp936 → 中文 mojibake。
+    # 强制 UTF-8；try/except 包裹——stream 非 TextIO / 平台差异时保持原状（Linux 无感）。
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except (AttributeError, OSError, ValueError):
+            pass
+
     # 函数内 import（保模块导入零副作用，对齐 commands.py:17-18 的 textual 延迟 import 纪律）：
     # 把 ~/.orca/config.json 的 binary override 注入对应 env var，之后所有 orca run 生效。
     from orca.iface.cli.config import bootstrap_config

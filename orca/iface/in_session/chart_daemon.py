@@ -22,7 +22,8 @@ chart socket + 跑 ``chart_ingestor`` 收 script 推来的 chart，经 bus 落 t
   ① 本守护（script 推 chart → ``bus.emit("custom", ...)``）；
   ② ``orca next`` / ``orca stop`` CLI（emit ``node_completed`` / ``route_taken`` / ``workflow_completed`` 等）。
 时序上几乎不重叠（subagent 完成后 host 才 next），但**正确性靠互斥**：本守护用
-``_FlockSafeTape``（``Tape`` 子类）在每次 ``append`` 前 ``fcntl.flock(LOCK_EX)`` 阻塞抢
+``_FlockSafeTape``（``Tape`` 子类）在每次 ``append`` 前经 ``_flock`` shim（POSIX
+``fcntl.flock`` / Windows msvcrt，spec 2026-09-08 D4）``LOCK_EX`` 阻塞抢
 ``<tape>.lock`` + 从 disk 刷新 ``_last_seq``，与 ``cli._try_acquire_flock`` 同锁文件、同路径。
 Web/tars-run 路径继续用基类 ``Tape``（零改动，OCP：扩展不修改核心）。
 
@@ -30,14 +31,14 @@ Web/tars-run 路径继续用基类 ``Tape``（零改动，OCP：扩展不修改�
 零改动；本守护仅提供「正确 tape 写者」+「生命周期守护」，协议常量同源 ``orca.chart._limits``。
 
 依赖单向：本模块依赖 ``orca.events.{bus,tape,chart_ingestor}`` + ``orca.chart._paths`` +
-stdlib（asyncio/fcntl/json/...）。是 iface 层，符合 schema→compile→exec→run→events→iface 铁律。
+``orca.iface.in_session._flock``（flock shim，同包子模块）+ stdlib（asyncio/json/...）。
+是 iface 层，符合 schema→compile→exec→run→events→iface 铁律。
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import fcntl
 import json
 import logging
 import signal
@@ -45,10 +46,12 @@ import sys
 import time
 from pathlib import Path
 
-from orca.chart._paths import chart_sock_path
+from orca.chart._paths import chart_port_file_path, chart_sock_path
 from orca.events.bus import EventBus
 from orca.events.chart_ingestor import chart_ingestor, make_crash_callback
 from orca.events.tape import Tape, read_last_complete_lines
+# flock shim（spec 2026-09-08 D4）：``import fcntl`` 在 Windows 模块级即崩。
+from orca.iface.in_session import _flock
 
 logger = logging.getLogger(__name__)
 
@@ -95,12 +98,12 @@ class _FlockSafeTape(Tape):
     async def append(self, event_data: dict) -> int:
         lock_fd = open(self._flock_path, "w")
         try:
-            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)  # 阻塞；CLI 持锁时等
+            _flock.flock(lock_fd.fileno(), _flock.LOCK_EX)  # 阻塞；CLI 持锁时等
             self._last_seq = self._read_max_seq_from_disk()
             return await super().append(event_data)
         finally:
             try:
-                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+                _flock.flock(lock_fd.fileno(), _flock.LOCK_UN)
             finally:
                 lock_fd.close()
 
@@ -108,12 +111,12 @@ class _FlockSafeTape(Tape):
         # 守护只走单条 ``append``（chart ingestor 每消息一 emit），但 batch 也正确覆写以保完整。
         lock_fd = open(self._flock_path, "w")
         try:
-            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+            _flock.flock(lock_fd.fileno(), _flock.LOCK_EX)
             self._last_seq = self._read_max_seq_from_disk()
             return await super().append_batch(items)
         finally:
             try:
-                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+                _flock.flock(lock_fd.fileno(), _flock.LOCK_UN)
             finally:
                 lock_fd.close()
 
@@ -299,8 +302,8 @@ async def _run_daemon(
             loop.add_signal_handler(sig, _on_signal)
             signal_handlers_registered.append(sig)
         except (NotImplementedError, RuntimeError):
-            # Windows / 非主线程：``add_signal_handler`` 不支持。本守护依赖 POSIX
-            # （fcntl.flock / unix socket），Windows 本就不支持；best-effort 跳过。
+            # Windows / 非主线程：``add_signal_handler`` 不支持（Windows 无该 API）。
+            # best-effort 跳过——守护退出另有终态/TTL 兜底（传输层已平台分支，见 D1）。
             pass
 
     signal_waiter = asyncio.create_task(signal_event.wait())
@@ -347,10 +350,16 @@ async def _run_daemon(
                 logger.debug("run %s: ingestor 收尾抛异常（已由 crash callback 处理）",
                              run_id, exc_info=True)
         # ``chart_ingestor`` 的 finally 已 unlink socket；此处幂等兜底（crash 重起路径可能漏）。
+        # Windows TCP 模式：端口 sidecar（``<sock>.port``）一并清（POSIX 恒不存在，no-op）。
         try:
             sock_path.unlink(missing_ok=True)
         except OSError as e:  # noqa: BLE001
             logger.warning("run %s: 守护退出 unlink %s 失败: %r", run_id, sock_path, e)
+        try:
+            chart_port_file_path(sock_path).unlink(missing_ok=True)
+        except OSError as e:  # noqa: BLE001
+            logger.warning("run %s: 守护退出 unlink %s 失败: %r",
+                           run_id, chart_port_file_path(sock_path), e)
         try:
             bus.close()
         except Exception:  # noqa: BLE001
@@ -405,11 +414,13 @@ def main() -> int:
         # 兜底清理 socket 即可（守护退出码不参与 CI 契约，无人检查）。
         pass
     finally:
-        # 进程退出前最终兜底：socket 文件清理（即便协程 finally 漏跑）。
-        try:
-            sock_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        # 进程退出前最终兜底：端点文件清理（socket + Windows port sidecar；即便协程
+        # finally 漏跑）。
+        for endpoint_path in (sock_path, chart_port_file_path(sock_path)):
+            try:
+                endpoint_path.unlink(missing_ok=True)
+            except OSError:
+                pass
     return 0
 
 

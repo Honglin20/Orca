@@ -11,15 +11,27 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import sys
 import time
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from orca.chart._paths import chart_sock_path
 from orca.iface.web.run_manager import RunManager
 from orca.run.orchestrator import Orchestrator
 
 from tests.iface.web.conftest import demo_linear_yaml, run_async
+
+
+# Unix-socket 传输生命周期测试（sock 文件创建/删除 + AF_UNIX connect）：win32 走 TCP
+# + port sidecar，sock 文件恒不存在 → skip（spec 2026-09-08 skipif 清点；win32 传输
+# 由 tests/chart/test_tcp_transport.py 覆盖）。resume 边界测试传输无关，两平台跑。
+requires_unix_socket = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Unix-socket 传输生命周期（win32 走 TCP + port sidecar）",
+)
 
 
 def _runs_dir(tmp_path: Path) -> Path:
@@ -45,6 +57,7 @@ def _wait_sock(sock_path: Path, timeout: float = 5.0) -> bool:
 # ── 非 resume：起 ingestor + 创建 sock 文件 ─────────────────────────────────
 
 
+@requires_unix_socket
 def test_start_run_creates_chart_socket_file(tmp_path):
     """非 resume 模式 start_run → runs/<run_id>.sock 存在（ingestor task 起）。
 
@@ -81,6 +94,7 @@ def test_start_run_creates_chart_socket_file(tmp_path):
 # ── run 完成 → teardown → sock 文件删 ────────────────────────────────────────
 
 
+@requires_unix_socket
 def test_run_teardown_deletes_chart_socket(tmp_path):
     """run 完成（teardown 触发）→ runs/<run_id>.sock 文件被删。
 
@@ -137,6 +151,7 @@ def test_resume_mode_skips_chart_ingestor(tmp_path):
 # ── cancel_run 也清理 sock（teardown 路径覆盖）──────────────────────────────
 
 
+@requires_unix_socket
 def test_cancel_run_deletes_chart_socket(tmp_path):
     """cancel_run 触发 teardown → sock 文件删。
 

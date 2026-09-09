@@ -91,6 +91,13 @@ def build_env_overlay(
     for key, value in os.environ.items():
         if any(key.startswith(prefix) for prefix in prefixes):
             overlay[key] = value
+    # D7（spec 2026-09-08）：Python 子进程 UTF-8 模式。Windows 子进程管道/stdio 默认随
+    # 系统 ANSI 代码页（cp936）→ script 的中文 stdout 经 ``exec/script.py`` 的 UTF-8
+    # 硬解码变 U+FFFD 入 tape。``PYTHONUTF8=1`` 让整条 spawn 链上的 Python 子进程
+    # （agent → script）统一 UTF-8；Linux/macOS 本就 UTF-8，实际无感（PEP 540 下
+    # UTF-8 locale 与该开关行为一致）。仅当调用方未显式设置时注入（不覆盖用户显式关）。
+    if "PYTHONUTF8" not in os.environ:
+        overlay["PYTHONUTF8"] = "1"
     # phase-13 §2：chart 路由 ORCA_* 注入（缺省空串 → 不注，backward compat）。
     if run_id:
         overlay["ORCA_RUN_ID"] = run_id

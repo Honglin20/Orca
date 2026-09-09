@@ -23,11 +23,12 @@ import sys
 import textwrap
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
 
-from orca.chart._paths import chart_sock_path
+from orca.chart._paths import chart_port_file_path, chart_sock_path
 from orca.events.tape import Tape
 from orca.iface.in_session.cli import app
 
@@ -144,6 +145,16 @@ def _wait_sock_ready(env_path: Path, *, timeout: float = 10.0) -> None:
 # ── 基础：bootstrap 起 daemon + 写 env 文件 + socket 就绪 ─────────────────────
 
 
+# POSIX 传输形态断言（ORCA_CHART_SOCK=sock 路径字面）+ 测试侧 bash source/GBK 解码
+# 假设：win32 端点是 tcp://（U1-A）、bash 引号/编码行为不同 → skip（spec 2026-09-08
+# skipif 清点；win32 闭环由 tests/chart/test_tcp_transport.py + E2E 验收 2/3 覆盖）。
+requires_unix_transport = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX sock-path 传输断言（win32 走 tcp://，另有专测）",
+)
+
+
+@requires_unix_transport
 def test_bootstrap_spawns_daemon_and_writes_env(cwd_tmp, cleanup_leftover_sockets):
     """bootstrap 后：env 文件含 5 var（folder-agent 含 ORCA_AGENT_RESOURCES）+ socket 存在。"""
     # folder-agent workflow（验证 ORCA_AGENT_RESOURCES 也写进 env 文件）
@@ -224,6 +235,7 @@ def test_inline_prompt_node_unsets_resources(cwd_tmp, cleanup_leftover_sockets):
 # ── 核心验收 1：render_chart → tape ─────────────────────────────────────────
 
 
+@requires_unix_transport
 def test_in_session_chart_lands_in_tape(
     cwd_tmp, chart_push_script, cleanup_leftover_sockets,
 ):
@@ -294,6 +306,7 @@ def test_in_session_chart_lands_in_tape(
 # ── 核心验收 3：并行 run 不串台 ───────────────────────────────────────────────
 
 
+@requires_unix_transport
 def test_parallel_in_session_runs_no_cross_talk(
     cwd_tmp, chart_push_script, cleanup_leftover_sockets,
 ):
@@ -367,6 +380,7 @@ def test_parallel_in_session_runs_no_cross_talk(
 # ── 核心验收 5：folder-agent + ORCA_AGENT_RESOURCES 资源定位 ─────────────────────
 
 
+@requires_unix_transport
 def test_folder_agent_resources_accessible_via_env(
     cwd_tmp, cleanup_leftover_sockets,
 ):
@@ -629,6 +643,7 @@ def test_next_does_not_respawn_when_terminal(
 # ── AC9（SPEC 2026-07-23 §6）：ORCA_NODE 漂移 invariant ──────────────────────
 
 
+@requires_unix_transport
 def test_next_rewrites_env_file_with_next_node_name(cwd_tmp, cleanup_leftover_sockets):
     """AC9：``orca next`` 推进后，env 文件 ``ORCA_NODE`` 行 == 返回的下一节点名。
 
@@ -733,4 +748,115 @@ def _wait_sock_gone(sock_path: Path, *, timeout: float = 10.0) -> None:
     pytest.fail(
         f"chart 守护在终态后 {timeout}s 内未自退 + 清理 socket（{sock_path}）。"
         f"可能原因：_watch_terminal 漏检终态事件 / partial-line race / daemon crash。"
+    )
+
+
+# ── U1-A：env 端点分支 + bootstrap 顺序（spec 2026-09-08，平台无关，两平台跑）────
+
+
+def test_write_orca_env_windows_branch_writes_tcp_endpoint(cwd_tmp):
+    """U1-A/D2：win32 分支（IS_WINDOWS 可 patch）→ env 文件写 ``tcp://`` 端点。
+
+    意图：in-session 子代理的 chart 通道在 Windows 上靠这一行 env——端点值必须来自
+    port sidecar 的单一真相源（chart_endpoint），不得复刻路径字面。
+    """
+    import orca.chart._paths as paths_mod
+    from orca.iface.in_session import cli as cli_mod
+
+    # tmp_path 派生 sock（chart_endpoint 对路径形态零要求）——port 文件随 pytest 清理，
+    # 不往共享 tempdir 残留（N-2）。
+    sock = cwd_tmp / "env-branch-check.sock"
+    chart_port_file_path(sock).write_text("41234", encoding="utf-8")
+    env_path = cwd_tmp / "runs" / "env-branch-check" / "orca_env.sh"
+
+    with patch.object(paths_mod, "IS_WINDOWS", True):
+        cli_mod._write_orca_env(
+            env_path,
+            run_id="env-branch-check", node="worker", session_id="sess-x",
+            sock_path=sock, resources_root=None,
+            artifacts_dir=cwd_tmp / "runs" / "env-branch-check" / "artifacts",
+        )
+
+    content = env_path.read_text(encoding="utf-8")
+    assert "export ORCA_CHART_SOCK=tcp://127.0.0.1:41234" in content
+
+
+def test_write_orca_env_empty_endpoint_unsets_with_warning(cwd_tmp, caplog):
+    """win32 port 文件缺失/损坏 → ``unset ORCA_CHART_SOCK`` + warning 记因。
+
+    意图：spec 失败路径节——空端点不注 env（子代理按「缺 ORCA_CHART_SOCK」fail loud），
+    Orca 侧 warning 记因防 script 端「不在 Orca run 上下文」误导归因。
+    """
+    import logging as _logging
+
+    import orca.chart._paths as paths_mod
+    from orca.iface.in_session import cli as cli_mod
+
+    sock = cwd_tmp / "env-empty-check.sock"  # 故意不写 port 文件（tmp_path 派生，N-2）
+    env_path = cwd_tmp / "runs" / "env-empty-check" / "orca_env.sh"
+
+    with patch.object(paths_mod, "IS_WINDOWS", True), caplog.at_level(_logging.WARNING):
+        cli_mod._write_orca_env(
+            env_path,
+            run_id="env-empty-check", node="worker", session_id="sess-x",
+            sock_path=sock, resources_root=None,
+            artifacts_dir=cwd_tmp / "runs" / "env-empty-check" / "artifacts",
+        )
+
+    content = env_path.read_text(encoding="utf-8")
+    assert "unset ORCA_CHART_SOCK" in content
+    assert any("chart 端点不可用" in r.getMessage() for r in caplog.records), (
+        "空端点必须 warning 记因（fail loud 防误归因）"
+    )
+
+
+def test_bootstrap_writes_env_after_daemon_ready(cwd_tmp, monkeypatch):
+    """U1-A 顺序不变量：spawn → wait_for_sock → 写 env（Windows 端点依赖 bind 后 port 文件）。
+
+    意图：Windows 端点 = port sidecar（daemon bind 后才存在）；env 若写在 spawn/wait
+    之前，entry 节点子代理拿到的 env 恒缺 ORCA_CHART_SOCK。POSIX 端点确定性，顺序无
+    语义影响——本测试同时守两平台的顺序不回归。
+    """
+    from orca.iface.in_session import cli as cli_mod
+
+    (cwd_tmp / "agents" / "worker").mkdir(parents=True)
+    (cwd_tmp / "agents" / "worker" / "agent.md").write_text(
+        "---\ndescription: worker\n---\n你是 worker。\n", encoding="utf-8",
+    )
+    wf = cwd_tmp / "wf_order.yaml"
+    wf.write_text(textwrap.dedent("""
+        name: order_check_wf
+        description: bootstrap order check
+        entry: worker
+        nodes:
+          - name: worker
+            kind: agent
+            agent: worker
+            model: deepseek/deepseek-v4-flash
+            routes:
+              - to: $end
+    """), encoding="utf-8")
+
+    order: list[str] = []
+    real_env = cli_mod._write_orca_env
+
+    def _spy_env(*args, **kwargs):
+        order.append("env")
+        return real_env(*args, **kwargs)
+
+    monkeypatch.setattr(cli_mod, "_write_orca_env", _spy_env)
+    monkeypatch.setattr(
+        cli_mod, "_spawn_chart_daemon", lambda *a, **kw: order.append("spawn")
+    )
+    monkeypatch.setattr(
+        cli_mod, "_wait_for_sock", lambda *a, **kw: order.append("wait") or True
+    )
+    monkeypatch.setattr(
+        cli_mod, "_spawn_sidechain_daemon", lambda *a, **kw: None
+    )
+
+    _bootstrap(CliRunner(), wf)
+
+    assert order == ["spawn", "wait", "env"], (
+        f"bootstrap 顺序必须是 spawn→wait→env（U1-A：Windows 端点依赖 port sidecar），got {order}"
     )

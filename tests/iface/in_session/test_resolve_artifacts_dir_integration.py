@@ -25,6 +25,8 @@ helper ``_resolve_artifacts_dir`` 自洽（已由 ``test_resolve_artifacts_dir.p
 
 from __future__ import annotations
 
+import sys
+
 import json
 import re
 from pathlib import Path
@@ -146,6 +148,7 @@ def _env_file_path(run_id: str) -> Path:
 # ── 契约 1：project-scoped 正路径 ─────────────────────────────────────────────
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="project_root 用 POSIX 路径字面（win32 非绝对路径，产品按契约正确拒绝）")
 def test_project_scoped_bootstrap_mkdirs_and_writes_env(
     cwd_tmp: Path, wf_project_root: Path, monkeypatch: pytest.MonkeyPatch,
 ):
@@ -208,6 +211,7 @@ def test_project_scoped_bootstrap_mkdirs_and_writes_env(
     )
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="project_root 用 POSIX 路径字面（win32 非绝对路径，产品按契约正确拒绝）")
 def test_project_scoped_env_value_is_absolute_resolved_path(
     cwd_tmp: Path, wf_project_root: Path, monkeypatch: pytest.MonkeyPatch,
 ):
@@ -344,6 +348,7 @@ def test_relative_project_root_tape_has_workflow_failed(
 # ── 契约 3：per-run 回落（无 project_root input）────────────────────────────
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="断言锁 POSIX 相对路径子串（win32 resolve 为反斜杠绝对路径形态）")
 def test_no_project_root_input_falls_back_to_per_run_env(
     cwd_tmp: Path, wf_no_inputs: Path, monkeypatch: pytest.MonkeyPatch,
 ):

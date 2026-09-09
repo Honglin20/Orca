@@ -26,7 +26,6 @@ open(resume=True) → flock → emit_batch → close，flock 随进程退出释�
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import json
 import logging
 import os
@@ -43,13 +42,16 @@ from typing import Any
 
 import typer
 
-from orca.chart._paths import chart_sock_path
+from orca.chart._paths import chart_endpoint, chart_port_file_path, chart_sock_path
 from orca.iface.cli.config import apply_kb_requirement, resolve_kb_dir
 from orca.compile import ConfigurationError, catalog, load_workflow
 from orca.events.bus import EventBus
 from orca.events.replay import replay_state
 from orca.events.tape import Tape
 from orca.schema.workflow import InputInvariant
+# flock shim（spec 2026-09-08 D4）：``fcntl`` 直 import 在 Windows 模块级即崩；本模块
+# 8 处 flock 调用 + 常量全部经 shim（POSIX 分支语义逐字保留）。
+from orca.iface.in_session import _flock
 from orca.iface.in_session._step_io import (
     _emit_workflow_failed,
     advance_with_scripts,
@@ -207,7 +209,9 @@ def _spawn_chart_daemon(run_id: str, tape_path: Path) -> None:
     bootstrap 后无 tty，必须重定向；DEVNULL 会丢排查信息）。
 
     不等待：``Popen`` 返回即视为派发完成；socket bind 就绪由 ``_wait_for_sock`` 兜底。
-    POSIX-only：项目已 fcntl.flock 前提 POSIX（CLAUDE.md / ADR I3.3）。
+    平台（spec 2026-09-08）：tape 互斥经 ``_flock`` shim（D4）、chart 传输 Windows 走
+    TCP + port sidecar（D1），Windows 原生可跑；``start_new_session=True`` 在 Windows
+    被 Popen 忽略（无 process group 语义，守护退出由终态/TTL 兜底）。
     """
     run_dir = _run_dir_for(tape_path, run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -484,7 +488,7 @@ def _write_orca_env(
         export ORCA_PROJECT_ROOT=<resolve_runs_dir().resolve().parent>  # 项目根锚点（per-run 常量）
         export ORCA_NODE=<当前节点名>
         export ORCA_SESSION_ID=<本次 dispatch 的 uuid>
-        export ORCA_CHART_SOCK=<chart_sock_path(run_id)>
+        export ORCA_CHART_SOCK=<chart_endpoint(chart_sock_path(run_id))>  # POSIX sock 路径 / win32 tcp://
         export ORCA_AGENT_RESOURCES=<folder-agent resources_root>   # 或 ``unset`` 清 stale
         export ORCA_ARTIFACTS_DIR=<runs/<run_id>/artifacts/>        # P8 权威产物目录
         export ORCA_KB_DIR=<resolve_kb_dir(wf)>                     # plan §1.2 KB 根（空则不注；wf 透传启用 per-wf 来源）
@@ -511,12 +515,26 @@ def _write_orca_env(
     # next 重写 env 时主 session 仍在项目根（CWD=project_root 或已设 ORCA_PROJECT_ROOT），重算一致。
     from orca.runtime import resolve_runs_dir
     project_root = resolve_runs_dir().resolve().parent
+    # chart 端点单一真相源（U1-A / spec 2026-09-08 D1+D2）：POSIX → Unix socket 绝对路径
+    # （与旧 ``str(sock_path)`` 等价——``chart_sock_path`` 恒绝对）；Windows → 读 port
+    # sidecar 得 ``tcp://127.0.0.1:<port>``。缺失/损坏 → 空串 → 不注（unset 清 stale），
+    # script 端按既有「缺 ORCA_CHART_SOCK」fail loud + Orca 侧 warning 记因（防误归因）。
+    endpoint = chart_endpoint(sock_path)
+    if endpoint:
+        chart_sock_line = f"export ORCA_CHART_SOCK={shlex.quote(endpoint)}"
+    else:
+        logger.warning(
+            "run %s: chart 端点不可用（Windows port 文件缺失/损坏，sock=%s）——本次不注 "
+            "ORCA_CHART_SOCK；子代理 render_chart 将按「缺 ORCA_CHART_SOCK」fail loud。",
+            run_id, sock_path,
+        )
+        chart_sock_line = "unset ORCA_CHART_SOCK"
     lines = [
         f"export ORCA_RUN_ID={shlex.quote(run_id)}",
         f"export ORCA_PROJECT_ROOT={shlex.quote(str(project_root))}",
         f"export ORCA_NODE={shlex.quote(node)}",
         f"export ORCA_SESSION_ID={shlex.quote(session_id)}",
-        f"export ORCA_CHART_SOCK={shlex.quote(str(sock_path))}",
+        chart_sock_line,
     ]
     if resources_root:
         lines.append(f"export ORCA_AGENT_RESOURCES={shlex.quote(str(resources_root))}")
@@ -1003,7 +1021,7 @@ def _try_acquire_flock(tape_path: Path) -> tuple[Any, Path] | None:
     lock_path = _flock_path(tape_path)
     fd = open(lock_path, "w")
     try:
-        fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _flock.flock(fd.fileno(), _flock.LOCK_EX | _flock.LOCK_NB)
     except BlockingIOError:
         # busy（F5 闭环）：另一 CLI 持锁，本调用方下一轮 idle 重试。
         fd.close()
@@ -1014,7 +1032,7 @@ def _try_acquire_flock(tape_path: Path) -> tuple[Any, Path] | None:
 def _release_flock(fd: Any) -> None:
     """释放 flock + close fd（try/finally 兜底；进程退出 OS 也会回收）。"""
     try:
-        fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+        _flock.flock(fd.fileno(), _flock.LOCK_UN)
     finally:
         fd.close()
 
@@ -1217,7 +1235,7 @@ def bootstrap(
     bootstrap_lock = rundir / ".orca-bootstrap.lock"
     mlock_fd = open(bootstrap_lock, "w")
     try:
-        fcntl.flock(mlock_fd.fileno(), fcntl.LOCK_EX)
+        _flock.flock(mlock_fd.fileno(), _flock.LOCK_EX)
 
         # dupe check（§7.3 m12）：扫活跃 marker + 读 tape workflow_name。
         # 注：按 ``wf.name`` 匹配（SPEC §7.3 字面是 yaml realpath，但 marker 只 3 字段不存
@@ -1308,7 +1326,7 @@ def bootstrap(
         # 释放后第二个 bootstrap 能立刻进 dupe check（看到本 run 的 marker → fail loud），
         # 不必等本 run spawn + socket wait。
         try:
-            fcntl.flock(mlock_fd.fileno(), fcntl.LOCK_UN)
+            _flock.flock(mlock_fd.fileno(), _flock.LOCK_UN)
         finally:
             mlock_fd.close()
 
@@ -1399,6 +1417,15 @@ def bootstrap(
             "run %s: artifacts 目录 %s mkdir 失败（workflow 写产物时自 fail loud）",
             run_id, artifacts_dir, exc_info=True,
         )
+    # U1-A / spec 2026-09-08 D1：Windows 端点 = port sidecar（daemon bind 后才存在），
+    # 故**先 spawn + 等就绪，再写 env 文件**——否则 entry 节点的 ``ORCA_CHART_SOCK`` 缺失
+    # （POSIX 端点是确定性 sock 路径，与 spawn 顺序无关，重排零语义变化）。
+    _spawn_chart_daemon(run_id, tape_path)
+    if not _wait_for_sock(sock_path):
+        logger.warning(
+            "run %s: chart 守护 socket %s 在 %.1fs 内未就绪（host 派 subagent 期间可能补上）",
+            run_id, sock_path, _SOCK_READY_TIMEOUT,
+        )
     _write_orca_env(
         env_path,
         run_id=run_id,
@@ -1410,12 +1437,6 @@ def bootstrap(
         # wf_obj 透传 → per-wf KB 来源参与解析（R4'；bootstrap :1145 已加载，零额外 I/O）。
         kb_dir=resolve_kb_dir(wf_obj),
     )
-    _spawn_chart_daemon(run_id, tape_path)
-    if not _wait_for_sock(sock_path):
-        logger.warning(
-            "run %s: chart 守护 socket %s 在 %.1fs 内未就绪（host 派 subagent 期间可能补上）",
-            run_id, sock_path, _SOCK_READY_TIMEOUT,
-        )
     # ── in-session sidechain 守护（SPEC-B v4 B2：子 agent 过程 → tape）───────────
     # 与 chart 守护并列 spawn：B2 实时推送子 agent msg/tool/thinking 到 web。失败语义同
     # chart：OSError → warn 不 fail bootstrap（守护是便利层）。无 host_session / 无 backend
@@ -2786,8 +2807,8 @@ def _is_tape_flock_held(tape_path: Path) -> bool:
     try:
         fd = open(lock_path, "w")
         try:
-            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+            _flock.flock(fd.fileno(), _flock.LOCK_EX | _flock.LOCK_NB)
+            _flock.flock(fd.fileno(), _flock.LOCK_UN)
         finally:
             fd.close()
     except BlockingIOError:
@@ -2956,10 +2977,11 @@ def _collect_gc_candidates(
 
 
 def _collect_run_paths(run_id: str, rundir: Path, tape_path: Path) -> list[Path]:
-    """收集单个 run_id 的所有 gc-able 路径：per-run 目录树 + tape + lock + marker + chart socket。
+    """收集单个 run_id 的所有 gc-able 路径：per-run 目录树 + tape + lock + marker + chart 端点文件。
 
-    含 chart socket（``<tmp>/orca-<sha1(run_id)[:10]>.sock``）：run 已 inactive 时，daemon 应
-    已自退 + unlink socket；但崩溃路径（SIGKILL）残留 stale socket → 此处 best-effort 清理。
+    含 chart socket（``<tmp>/orca-<sha1(run_id)[:10]>.sock``）与 Windows TCP 模式的端口
+    sidecar（``<sock>.port``）：run 已 inactive 时，daemon 应已自退 + unlink 端点文件；
+    但崩溃路径（SIGKILL）残留 stale 端点 → 此处 best-effort 清理（POSIX 恒无 ``.port``）。
     """
     paths: list[Path] = []
     # per-run 整树（含 artifacts/、prompts/、orca_env.sh、chart_daemon.log 等）。
@@ -2975,10 +2997,13 @@ def _collect_run_paths(run_id: str, rundir: Path, tape_path: Path) -> list[Path]
     mpath = marker_path(rundir, run_id)
     if mpath.exists():
         paths.append(mpath)
-    # chart socket（best-effort：daemon 通常自退；SIGKILL 残留时清）
+    # chart 端点（best-effort：daemon 通常自退；SIGKILL 残留时清）。
     sock_path = chart_sock_path(run_id)
     if sock_path.exists():
         paths.append(sock_path)
+    port_path = chart_port_file_path(sock_path)
+    if port_path.exists():
+        paths.append(port_path)
     return paths
 
 
@@ -3004,13 +3029,14 @@ def _delete_candidate(candidate: dict[str, Any], *, rundir: Path) -> dict[str, A
         except OSError as e:
             errors.append({"path": str(p), "error": f"resolve failed: {e}"})
             continue
-        # 安全守门：路径必须在 rundir 下 OR 在 chart socket temp 根下（白名单）。
+        # 安全守门：路径必须在 rundir 下 OR 在 chart 端点 temp 根下（白名单：.sock 及
+        # Windows TCP 模式的 .port sidecar）。
         # ``Path.is_relative_to`` 3.9+；本项目 Python 3.10+（pyproject）。
         in_rundir = _is_relative_to(resolved, rundir_resolved)
         in_temp_sock = (
             resolved.parent == sock_resolved_chart_root
             and resolved.name.startswith("orca-")
-            and resolved.name.endswith(".sock")
+            and (resolved.name.endswith(".sock") or resolved.name.endswith(".port"))
         )
         if not (in_rundir or in_temp_sock):
             errors.append({
@@ -3127,7 +3153,7 @@ def gc(
     gc_lock_path = rundir / ".orca-gc.lock"
     gc_lock_fd = open(gc_lock_path, "w")
     try:
-        fcntl.flock(gc_lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _flock.flock(gc_lock_fd.fileno(), _flock.LOCK_EX | _flock.LOCK_NB)
     except (BlockingIOError, OSError) as e:
         # 另一个 gc 在跑 → 0 退出（同 next busy 语义，但不返 busy 信封，gc 是运维命令）。
         typer.echo(json.dumps({
@@ -3212,7 +3238,7 @@ def gc(
     finally:
         # 释放 gc advisory lock（同 bootstrap lock 释模式：LOCK_UN + close）。
         try:
-            fcntl.flock(gc_lock_fd.fileno(), fcntl.LOCK_UN)
+            _flock.flock(gc_lock_fd.fileno(), _flock.LOCK_UN)
         finally:
             gc_lock_fd.close()
 
@@ -3223,6 +3249,15 @@ def main() -> None:
     函数内 import（保模块导入零副作用，对齐 commands.py 的 textual 延迟 import 纪律）：
     把 ~/.orca/config.json 的 binary override 注入对应 env var，之后所有 orca run 生效。
     """
+    # D7（spec 2026-09-08）：Windows 管道/重定向下 stdout 默认 cp936 → 中文 JSON 信封
+    # mojibake。强制 UTF-8；try/except 包裹——stream 非 TextIO / 平台差异时保持原状
+    # （Linux 本就 UTF-8，无感）。
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except (AttributeError, OSError, ValueError):
+            pass
+
     from orca.iface.cli.config import bootstrap_config
 
     bootstrap_config()

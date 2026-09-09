@@ -32,6 +32,33 @@ from orca.chart._validate import validate_payload
 # 4 个必需的 env 变量名（缺任一 → fail loud，SPEC §7.1）。
 _REQUIRED_ENV = ("ORCA_RUN_ID", "ORCA_NODE", "ORCA_SESSION_ID", "ORCA_CHART_SOCK")
 
+_TCP_PREFIX = "tcp://"
+
+
+def _connect_endpoint(addr: str) -> socket.socket:
+    """按 ``ORCA_CHART_SOCK`` 端点形态建连接（返回已连接 socket，调用方 ``with`` 关闭）。
+
+    - ``tcp://host:port``：Windows 分支（``orca.chart._paths.chart_endpoint`` 注入），
+      AF_INET 连 127.0.0.1——Python/Windows 无 Unix socket。
+    - 其它：Unix socket 路径（POSIX 现状）。平台无 ``AF_UNIX`` 且端点非 tcp 形态 →
+      fail loud 明确报平台不支持（不静默）。
+    """
+    if addr.startswith(_TCP_PREFIX):
+        host, _, port_s = addr[len(_TCP_PREFIX):].rpartition(":")
+        if not host or not port_s.isdigit():
+            raise RuntimeError(f"ORCA_CHART_SOCK tcp 端点非法：{addr!r}")
+        # ConnectionRefusedError / 超时 → 调用方既有 except 映射（§7.3 / §7.6）。
+        return socket.create_connection((host, int(port_s)), timeout=ACK_TIMEOUT_SECONDS)
+    if not hasattr(socket, "AF_UNIX"):
+        raise RuntimeError(
+            f"当前平台无 Unix socket，且 ORCA_CHART_SOCK 非 tcp:// 端点（{addr!r}）。"
+            "该 env 由 Orca 注入，勿手工覆盖。"
+        )
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(ACK_TIMEOUT_SECONDS)
+    s.connect(addr)  # FileNotFoundError / ConnectionRefusedError → §7.3
+    return s
+
 
 def render_chart(
     *,
@@ -161,9 +188,7 @@ def render_chart(
 
     # 6. 连 socket + 发 + 等 ack（SPEC §4.2 step 5-6，fail loud 7 处）
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-            s.settimeout(ACK_TIMEOUT_SECONDS)
-            s.connect(sock_path)  # FileNotFoundError / ConnectionRefusedError → §7.3
+        with _connect_endpoint(sock_path) as s:
             s.sendall(encoded)
             # makefile("rb").readline() 读到 EOF 返回 b""（socket 关闭）；正常返回单行 bytes。
             # 显式 "rb" 二进制模式：与测试 helper 一致 + 避免文本模式默认 buffering 与

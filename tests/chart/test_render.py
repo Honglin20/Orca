@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -27,6 +28,16 @@ from orca.chart._limits import (
     DEFAULT_MAX_POINTS,
     MAX_MESSAGE_BYTES,
     SOCK_PATH_MAX,
+)
+
+
+# Unix-socket client 分支的测试（mock ``socket.socket(AF_UNIX, ...)``）：Windows 无
+# AF_UNIX，``_connect_endpoint`` 平台守卫会先 raise（D2），且 helper 求值
+# ``socket.AF_UNIX`` 即 AttributeError → skip（spec 2026-09-08 skipif 清点；win32
+# tcp:// client 分支由 test_tcp_transport.py 覆盖）。
+requires_unix_socket = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="AF_UNIX Unix-socket client 分支（win32 tcp:// 分支由 test_tcp_transport.py 覆盖）",
 )
 
 
@@ -85,6 +96,7 @@ def _make_socket_mock(ack_response: bytes | None = b'{"ok": true, "seq": 42}\n')
 # ── 成功路径 ─────────────────────────────────────────────────────────────────
 
 
+@requires_unix_socket
 def test_render_chart_success_returns_seq(orca_env):
     """env 全 + mock socket + ack ok=True seq=42 → 返回 42。
 
@@ -110,6 +122,7 @@ def test_render_chart_success_returns_seq(orca_env):
     assert sent["payload"]["data"] == [{"x": 1, "y": 1.0}]
 
 
+@requires_unix_socket
 def test_render_chart_settimeout_called(orca_env):
     """socket.settimeout(ACK_TIMEOUT_SECONDS) 必被调（防 client 无 timeout 挂死）。"""
     sock_mock, _ = _make_socket_mock()
@@ -210,6 +223,7 @@ def test_render_oversize_payload_raises(orca_env):
 # ── socket 不可达（SPEC §7.3）────────────────────────────────────────────────
 
 
+@requires_unix_socket
 def test_render_socket_not_found_raises(orca_env):
     """sock 文件不存在（Orca 进程未启 / run 已结束）→ FileNotFoundError → RuntimeError。"""
     import socket as _socket
@@ -222,6 +236,7 @@ def test_render_socket_not_found_raises(orca_env):
             render_chart(chart_type="line", data=[], label="g", title="t")
 
 
+@requires_unix_socket
 def test_render_socket_connection_refused_raises(orca_env):
     """sock 文件存在但 server 未 listen → ConnectionRefusedError → RuntimeError。"""
     sock_mock = MagicMock()
@@ -236,6 +251,7 @@ def test_render_socket_connection_refused_raises(orca_env):
 # ── ack timeout（SPEC §7.6）──────────────────────────────────────────────────
 
 
+@requires_unix_socket
 def test_render_ack_timeout_raises(orca_env):
     """socket.timeout 异常 → RuntimeError（10s 后 fail loud，防 script 挂死）。"""
     import socket as _socket
@@ -259,6 +275,7 @@ def test_render_ack_timeout_raises(orca_env):
 # ── socket 关闭无 ack（ingestor crash 重起窗口期）────────────────────────────
 
 
+@requires_unix_socket
 def test_render_socket_closed_no_ack_raises(orca_env):
     """readline 返回 b""（EOF）→ socket 关闭无 ack → RuntimeError。
 
@@ -273,6 +290,7 @@ def test_render_socket_closed_no_ack_raises(orca_env):
 # ── ack ok=False（SPEC §7.4）─────────────────────────────────────────────────
 
 
+@requires_unix_socket
 def test_render_ack_not_ok_raises(orca_env):
     """ack ok=False → RuntimeError 含 error 字段。"""
     sock_mock, _ = _make_socket_mock(b'{"ok": false, "error": "malformed message"}\n')
@@ -281,6 +299,7 @@ def test_render_ack_not_ok_raises(orca_env):
             render_chart(chart_type="line", data=[], label="g", title="t")
 
 
+@requires_unix_socket
 def test_render_ack_invalid_json_raises(orca_env):
     """ack 非 JSON → raise（防 server 端协议错被静默）。"""
     sock_mock, _ = _make_socket_mock(b"not a json\n")
@@ -289,6 +308,7 @@ def test_render_ack_invalid_json_raises(orca_env):
             render_chart(chart_type="line", data=[], label="g", title="t")
 
 
+@requires_unix_socket
 def test_render_ack_missing_seq_raises(orca_env):
     """ack ok=True 但无 seq 字段 → raise（防协议错）。"""
     sock_mock, _ = _make_socket_mock(b'{"ok": true}\n')  # 缺 seq
@@ -300,6 +320,7 @@ def test_render_ack_missing_seq_raises(orca_env):
 # ── 降采样触发 ───────────────────────────────────────────────────────────────
 
 
+@requires_unix_socket
 def test_render_triggers_downsample_when_data_exceeds_max_points(orca_env, capsys):
     """data 行数 > max_points → 调 downsample + 写 stderr warning（透明降采样）。"""
     data = [{"x": i, "y": float(i)} for i in range(100)]
@@ -333,6 +354,7 @@ def test_render_sock_path_max_is_90():
 # ── heatmap（第 8 种 chart_type）─────────────────────────────────────────────
 
 
+@requires_unix_socket
 def test_render_heatmap_success_passes_value_field(orca_env):
     """heatmap + value 非空 → 正常 emit，payload 含 value 字段 + 完整 cell records。
 
@@ -437,6 +459,7 @@ def test_render_heatmap_value_non_str_raises(orca_env):
         )
 
 
+@requires_unix_socket
 def test_render_heatmap_downsample_caps_top_n(orca_env):
     """heatmap data 行数 > max_points → top-N 截断（与 table 同策略，SPEC §5.1）。"""
     cells = [
@@ -463,6 +486,7 @@ def test_render_heatmap_downsample_caps_top_n(orca_env):
 # ── 轴标签 / caption（解「图表看不懂」根因 C，2026-07-21）──────────────────────────
 
 
+@requires_unix_socket
 def test_render_axis_labels_passed_to_payload(orca_env):
     """x_label/y_label/caption 非空 → payload 含这三字段（前端/TUI 读它们渲染轴标签/图下说明）。
 
@@ -488,6 +512,7 @@ def test_render_axis_labels_passed_to_payload(orca_env):
     assert payload["caption"] == "每轮 champion 的实测时延变化；★=达标"
 
 
+@requires_unix_socket
 def test_render_axis_labels_empty_omitted_from_payload(orca_env):
     """x_label/y_label/caption 空串 → payload **不含**这三字段（保 ChartPayload 干净，
     旧 tape 反序列化也不带空键）。

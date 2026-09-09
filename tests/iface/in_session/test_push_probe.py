@@ -13,6 +13,8 @@
 """
 from __future__ import annotations
 
+import sys
+
 import json
 import os
 import re
@@ -650,6 +652,7 @@ def test_h5_unknown_when_log_missing(monkeypatch, tmp_path):
 # ── H6 ws_delivery（SPEC §4 H6 + B2 决议 degradation；S3 实现）───────────────
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="doctor push-chain 自起 WS server 的 subprocess 探针（依赖 POSIX shell spawn 链）")
 def test_h6_pass_self_spawn(monkeypatch, tmp_path):
     """SPEC §7-5a：H6 self-spawn happy path——3s 内收到合成 agent_message → pass。
 
@@ -666,6 +669,7 @@ def test_h6_pass_self_spawn(monkeypatch, tmp_path):
     assert "mode=self-spawn" in h6["evidence"]  # 统一 schema：self-spawn 与 passive 共用 mode= 前缀
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="doctor push-chain 自起 WS server 的 subprocess 探针（依赖 POSIX shell spawn 链）")
 def test_h6_fail_when_pump_raises(monkeypatch, tmp_path):
     """SPEC §7-5b 反例：patch ``ws_handler._pump`` 抛 RuntimeError → H6=fail。
 
@@ -687,6 +691,7 @@ def test_h6_fail_when_pump_raises(monkeypatch, tmp_path):
     assert "pump" in h6["reason"] or "WS 未订阅" in h6["reason"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="doctor push-chain 自起 WS server 的 subprocess 探针（依赖 POSIX shell spawn 链）")
 def test_h6_no_residual_after_two_runs(monkeypatch, tmp_path):
     """SPEC §7-5c：连续两次 doctor --probe-push，第二次不因 __probe__ 残留 / EADDRINUSE 而 fail。
 
@@ -706,6 +711,7 @@ def test_h6_no_residual_after_two_runs(monkeypatch, tmp_path):
     assert h6_1["evidence"] != h6_2["evidence"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="doctor push-chain 自起 WS server 的 subprocess 探针（依赖 POSIX shell spawn 链）")
 def test_h6_fail_when_wrong_event_type(monkeypatch, tmp_path):
     """SPEC §4 H6 守门：WS 收到非 target agent_message → fail（防 pump 串流误判 pass）。
 
@@ -999,6 +1005,7 @@ class _PassiveTarget:
             pass
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="doctor push-chain 自起 WS server 的 subprocess 探针（依赖 POSIX shell spawn 链）")
 def test_h6_passive_pass_receives_real_event(monkeypatch, tmp_path):
     """S5 happy：passive 连真实 web + 后台 emit 一条事件 → probe 监听窗口内收到 → pass。
 
@@ -1032,6 +1039,7 @@ def test_h6_passive_pass_receives_real_event(monkeypatch, tmp_path):
     assert "received" in h6["evidence"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="doctor push-chain 自起 WS server 的 subprocess 探针（依赖 POSIX shell spawn 链）")
 def test_h6_passive_unknown_when_no_event(monkeypatch, tmp_path):
     """S5：passive subscribe 成功但监听窗口无事件 → unknown（被动模式无法注入，不强判 fail）。
 

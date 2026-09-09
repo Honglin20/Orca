@@ -13,13 +13,19 @@
 **副作用 = 鐱**：
   - socket 探 connect 成功后立即 close（守护 ``accept`` 一条短连接 ``readline`` 读 EOF 静默返回，
     ``chart_ingestor._make_handler`` 的 ``if not line`` 分支）。
-  - pidfile 探只读 ``pidfile`` + ``/proc/<pid>/cmdline``（Linux）或 ``ps -p <pid> -o args=``
-    （macOS/BSD），零写。
+  - pidfile 探只读 ``pidfile`` + ``/proc/<pid>/cmdline``（Linux）/ ``ps -p <pid> -o args=``
+    （macOS/BSD）/ ``OpenProcess`` 零杀伤探（win32），零写。
 
-POSIX（Linux 走 ``/proc``，macOS/BSD 走 ``ps`` subprocess；与 ``fcntl.flock`` / Unix socket
-同前提，项目 ADR I3.3 已锚定 POSIX）。
+平台分支（spec 2026-09-08 D5）：
+  - Linux 走 ``/proc``，macOS/BSD 走 ``ps`` subprocess（原状）。
+  - **win32**：``socket_daemon_alive`` 读 ``<sock>.port`` sidecar → TCP connect 探
+    （Windows 无 AF_UNIX，chart 传输走 TCP，见 D1）；``pidfile_daemon_alive`` 走
+    ``orca.iface._winprocs``（ctypes OpenProcess，**禁 ``os.kill(pid, 0)``**——Windows
+    语义是 TerminateProcess，实测根因 6）。
 
-依赖单向：仅 stdlib（socket / pathlib / subprocess / logging）；无 Orca 内部依赖（最底层 utility）。
+依赖单向：stdlib + ``orca.chart._paths``（端点/port 路径单一真相源，D2）+
+``orca.iface._winprocs``（win32 探活共享 helper，D5/D6）。2026-09-08 D5 起**不再**
+「无 Orca 内部依赖」（G2 声明）；两依赖均为底层纯工具模块，无反向依赖。
 """
 
 from __future__ import annotations
@@ -28,9 +34,15 @@ import logging
 import os
 import socket
 import subprocess
+import sys
 from pathlib import Path
 
+from orca.chart._paths import chart_port_file_path
+from orca.iface import _winprocs
+
 logger = logging.getLogger(__name__)
+
+_IS_WINDOWS = sys.platform == "win32"
 
 # connect 探测超时：守护同机 Unix socket，正常 <10ms；500ms 仅是高负载下的保守上界。
 # 超时（活但 event loop 阻塞 >500ms，如大 tape 首次扫 / GC）→ 保守视 dead → 触发 respawn。
@@ -58,7 +70,25 @@ def socket_daemon_alive(
     **对守护的副作用 = 零**：connect 成功后立即 close（``with`` 管理语境）→ 守护 accept 一条短
     连接，``readline`` 读到 EOF（空行）→ handler 走「client 提前 close」debug 分支静默返回，
     不 emit、不写 tape（见 ``chart_ingestor._make_handler`` 的 ``if not line`` 分支）。
+
+    win32 分支（spec 2026-09-08 D5）：无 AF_UNIX → 读 ``<sock_path>.port`` sidecar
+    （``chart_port_file_path``）取 TCP 端口，``create_connection`` 探 127.0.0.1——语义
+    与 Unix 分支逐字对齐：无 port 文件 / 损坏 / refused / 超时 → False（保守触发
+    respawn），connect 成功 = 有监听者 = 守护活。
     """
+    if _IS_WINDOWS:
+        try:
+            port = int(
+                chart_port_file_path(sock_path).read_text(encoding="utf-8").strip()
+            )
+        except (OSError, ValueError):
+            # port 文件缺失（守护未起 / 已退并删）/ 损坏（半写）→ False。
+            return False
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=timeout):
+                return True
+        except OSError:
+            return False
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
             s.settimeout(timeout)
@@ -84,11 +114,15 @@ def pidfile_daemon_alive(
     ``orca.iface.in_session.sidechain_daemon``）；若给 ``run_id``，还要 cmdline 含 ``--run-id``
     与 ``run_id``（子串匹配，见下）。
 
-    平台分支（SPEC D finding 3）：
+    平台分支（SPEC D finding 3；win32 分支 spec 2026-09-08 D5）：
       - **Linux**：读 ``/proc/<pid>/cmdline``（``\\x00`` 分隔 argv，零 fork）。
       - **macOS/BSD**（``/proc`` 不存在）：先 ``os.kill(pid, 0)`` 探进程存在（zombie 仍响应，
         故 kill-0 成功 ≠ 活—— cmdline 校验 mandatory，禁止 short-circuit），再 ``ps -p <pid>
         -o args=`` 取 cmdline（fork-per-probe，每次 ``orca next`` 一次，非热循环，可接受）。
+      - **win32**：``OpenProcess`` 零杀伤探活（``_winprocs``），**OpenProcess-only 无 cmdline
+        校验**（用户决策 U2-A：pid 复用假阳性风险已声明，镜像名校验列 follow-up；防 respawn
+        风暴优先）。**禁 ``os.kill(pid, 0)``**——Windows 语义是 TerminateProcess（实测根因 6：
+        现状 Windows 误入 macOS 分支 = 每 ``next`` 杀一遍 daemon + respawn）。
 
     cmdline 匹配（macOS 分支用 **子串匹配**，因 ``ps ... -o args=`` 输出是空格 join 后的 argv，
     无法逐项比；守护 module_name + run_id 联合在 cmdline 中已足够唯一）::
@@ -116,7 +150,10 @@ def pidfile_daemon_alive(
     except (ValueError, OSError):
         return False
 
-    # 平台分支：Linux 走 /proc（零 fork）；macOS/BSD 走 kill-0 + ps subprocess。
+    # 平台分支：win32 走 OpenProcess（D5/U2-A，零杀伤）；Linux 走 /proc（零 fork）；
+    # macOS/BSD 走 kill-0 + ps subprocess。
+    if _IS_WINDOWS:
+        return _winprocs.pid_alive(pid)
     if Path("/proc").is_dir():
         return _pidfile_alive_linux(pid, module_name, run_id)
     return _pidfile_alive_macos(pid, module_name, run_id)

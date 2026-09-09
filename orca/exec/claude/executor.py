@@ -49,7 +49,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from orca.chart._paths import artifacts_dir_for_run, chart_sock_path
+from orca.chart._paths import artifacts_dir_for_run, chart_endpoint, chart_sock_path
 from orca.exec.claude.accumulator import RunAccumulator
 from orca.exec.claude.result_extractor import extract_and_validate
 from orca.exec.context import RunContext
@@ -408,25 +408,25 @@ def _normalize_usage(usage: dict, cost: float) -> dict[str, Any]:
 
 
 def _resolve_chart_sock_path(runs_dir: Path | None, run_id: str) -> str:
-    """phase-13 §2 / §7.7（2026-07-08 短路径化）：算 chart ingestor socket 绝对路径。
+    """phase-13 §2 / §7.7（2026-07-08 短路径化）：算 chart ingestor 连接端点。
 
     与 ``orca.exec.script._resolve_chart_sock_path`` 逐字同语义（SPEC §11 #9 两 executor 对称）。
 
-    socket 走 ``<tmp>/orca-<sha1(run_id)[:10]>.sock``（``orca.chart._paths.chart_sock_path``），
-    与 runs 目录解耦——规避深服务器路径致 ``sun_path`` 超限。两端（RunManager bind + 此处
-    env 注入）同源。
+    走 ``orca.chart._paths.chart_endpoint``（spec 2026-09-08 D2 单一真相源）：POSIX →
+    Unix socket 绝对路径（``<tmp>/orca-<sha1(run_id)[:10]>.sock``）；Windows →
+    ``tcp://127.0.0.1:<port>``（读端口 sidecar，ingestor 未起时为空串）。
 
     - ``runs_dir is None`` → 返回空串（不注 ``ORCA_CHART_SOCK`` env，向后兼容；
       script 端 render_chart 会 fail loud 提示）。
-    - 路径恒短（temp 目录 + 10 hex），不再有"过长退化"分支。
+    - Windows 端口文件缺失也返回空串 → 同「缺 env」既有 fail loud 路径。
 
-    返回的路径用于：
+    返回的端点用于：
       1. ``build_env_overlay(chart_sock=...)`` → 子进程 ``ORCA_CHART_SOCK``
       2. script 子进程内 ``orca.chart.render_chart`` 据此连 ingestor
     """
     if runs_dir is None:
         return ""
-    return str(chart_sock_path(run_id).resolve())
+    return chart_endpoint(chart_sock_path(run_id))
 
 
 def _resolve_artifacts_dir(runs_dir: Path | None, run_id: str) -> str:

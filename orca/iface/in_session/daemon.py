@@ -19,7 +19,6 @@ workflow，不依赖交互界面。daemon 持续持锁（I3.3a：pid 探活 + �
 from __future__ import annotations
 
 import atexit
-import fcntl
 import json
 import logging
 import os
@@ -32,6 +31,8 @@ import requests
 
 from orca.events.bus import EventBus
 from orca.events.tape import Tape
+# flock shim（spec 2026-09-08 D4）：``import fcntl`` 在 Windows 模块级即崩。
+from orca.iface.in_session import _flock
 from orca.iface.in_session._step_io import advance_with_scripts, fail_in_session
 from orca.run.lifecycle import now_monotonic
 from orca.run.step import InSessionError
@@ -81,16 +82,28 @@ class InSessionDaemon:
         if self._pid_path.exists():
             try:
                 old = int(self._pid_path.read_text().strip())
-                os.kill(old, 0)
-                raise InSessionError(
-                    f"tape {self.tape_path} 已被存活 daemon (pid={old}) 占用"
-                )
+                # 平台分支（spec 2026-09-08 D6 同类铁律）：``os.kill(pid, 0)`` 在 Windows
+                # 语义 = TerminateProcess（探活变杀进程），win32 走 OpenProcess 零杀伤探。
+                if sys.platform == "win32":
+                    from orca.iface import _winprocs
+                    if _winprocs.pid_alive(old):
+                        raise InSessionError(
+                            f"tape {self.tape_path} 已被存活 daemon (pid={old}) 占用"
+                        )
+                    # 死 pid → 归一 ProcessLookupError，复用 POSIX 分支的孤儿清理路径
+                    # （对称：POSIX 由 os.kill 抛 ProcessLookupError 进入同一 except）。
+                    raise ProcessLookupError(old)
+                else:
+                    os.kill(old, 0)
+                    raise InSessionError(
+                        f"tape {self.tape_path} 已被存活 daemon (pid={old}) 占用"
+                    )
             except (ValueError, ProcessLookupError, PermissionError):
                 logger.warning("清除孤儿 pid 文件 %s", self._pid_path)
                 self._pid_path.unlink(missing_ok=True)
         self._lock_fd = open(self._lock_path, "w")
         try:
-            fcntl.flock(self._lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _flock.flock(self._lock_fd.fileno(), _flock.LOCK_EX | _flock.LOCK_NB)
         except BlockingIOError as e:
             raise InSessionError(
                 f"无法对 {self.tape_path} 取得 flock（另一进程持有；"
@@ -229,7 +242,7 @@ class InSessionDaemon:
             logger.exception("bus.close 异常")
         if self._lock_fd is not None:
             try:
-                fcntl.flock(self._lock_fd.fileno(), fcntl.LOCK_UN)
+                _flock.flock(self._lock_fd.fileno(), _flock.LOCK_UN)
                 self._lock_fd.close()
             except Exception:
                 logger.exception("释放 flock 异常")

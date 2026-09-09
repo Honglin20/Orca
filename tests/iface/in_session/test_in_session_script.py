@@ -17,6 +17,8 @@
 """
 from __future__ import annotations
 
+import sys
+
 import asyncio
 import json
 from pathlib import Path
@@ -338,6 +340,7 @@ def test_inline_stdout_tail_limit_500(tmp_path):
     bus.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="ScriptNode command 是 POSIX sh 语义（$VAR 展开；win32 shell 走 cmd.exe，不在 spec D1-D7 内）")
 def test_inline_tail_takes_end_segment_not_head(tmp_path):
     """§2.4.5 回归（E2E D-1）：tail 取**末** 500 字符（Unix tail 语义——长输出的
     verdict/error 在末尾），非前 500。600 个 H/E（头）+ 尾部标记（首尾可区分），
@@ -395,6 +398,7 @@ def _wf_as_project_scoped(command: str) -> Workflow:
     )
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="ScriptNode command 是 POSIX sh 语义（$VAR 展开；win32 shell 走 cmd.exe，不在 spec D1-D7 内）")
 def test_inline_script_sees_project_scoped_artifacts_dir(tmp_path):
     """T-I1（D-1 复现→修复证明）：script 节点看到 agent 节点部署的同一目录。
 
@@ -425,6 +429,7 @@ def test_inline_script_sees_project_scoped_artifacts_dir(tmp_path):
     bus.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="ScriptNode command 是 POSIX sh 语义（$VAR 展开；win32 shell 走 cmd.exe，不在 spec D1-D7 内）")
 def test_inline_script_artifacts_dir_per_run_without_project_root(tmp_path):
     """T-I2（per-run 回归钉）：ws 无 ``project_root`` → ORCA_ARTIFACTS_DIR 与修复前逐字节一致。
 
@@ -955,6 +960,7 @@ nodes:
     assert r2["auto_executed"][0]["exit_code"] == 5
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="ScriptNode command 是 POSIX sh 语义（$VAR 展开；win32 shell 走 cmd.exe，不在 spec D1-D7 内）")
 def test_cli_parse_json_route_defensive_ac4(cli_env):
     """AC4 正例+防御：parse_json 判定分叉；非 JSON + 防御性 when 落兜底正常推进。"""
     ok_yaml = """\

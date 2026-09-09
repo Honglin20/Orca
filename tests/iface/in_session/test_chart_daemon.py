@@ -11,19 +11,29 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import threading
 import time
 from pathlib import Path
 
-import fcntl
 import pytest
 
 from orca.events.bus import EventBus
 from orca.events.tape import Tape
+from orca.iface.in_session import _flock
 from orca.iface.in_session.chart_daemon import (
     _FlockSafeTape,
     _WATCH_POLL_SECONDS,
     _watch_terminal,
+)
+
+
+# AF_UNIX / SIGTERM 假设的测试在 win32 炸（无 Unix socket；SIGTERM 无 add_signal_handler）
+# → skip（spec 2026-09-08 skipif 清点；win32 TCP 传输由 tests/chart/test_tcp_transport.py
+# 与 E2E 验收 2/3 覆盖）。
+requires_unix_socket = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="AF_UNIX Unix-socket 传输 / SIGTERM graceful 语义（win32 走 TCP）",
 )
 
 
@@ -104,11 +114,11 @@ def test_flock_safe_tape_blocks_when_cli_holds_flock(tape_path, flock_path):
     def hold_lock():
         fd = open(flock_path, "w")
         try:
-            fcntl.flock(fd.fileno(), fcntl.LOCK_EX)
+            _flock.flock(fd.fileno(), _flock.LOCK_EX)
             holder_started.set()
             holder_done.wait(timeout=2.0)  # 持锁等主线程释放信号
         finally:
-            fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+            _flock.flock(fd.fileno(), _flock.LOCK_UN)
             fd.close()
 
     t = threading.Thread(target=hold_lock, daemon=True)
@@ -364,6 +374,7 @@ def test_chart_daemon_alive_no_socket_file(tmp_path):
     assert _chart_daemon_alive(tmp_path / "nope.sock") is False
 
 
+@requires_unix_socket
 def test_chart_daemon_alive_stale_socket_returns_false(tmp_path):
     """stale socket（文件在但无监听者，守护被 SIGKILL 残留）→ False。
 
@@ -388,6 +399,7 @@ def test_chart_daemon_alive_stale_socket_returns_false(tmp_path):
     stale.unlink(missing_ok=True)
 
 
+@requires_unix_socket
 def test_chart_daemon_alive_real_listener_returns_true(tmp_path):
     """真有监听者 → True（connect 成功；对守护副作用 = 零：连上即 close，handler 读 EOF 静默）。"""
     from orca.iface.in_session.cli import _chart_daemon_alive
@@ -431,6 +443,7 @@ def test_chart_daemon_alive_real_listener_returns_true(tmp_path):
 # ── cli._ensure_chart_daemon（alive 早返 / spawn 失败降级）─────────────────────
 
 
+@requires_unix_socket
 def test_ensure_chart_daemon_no_spawn_when_alive(tmp_path, monkeypatch):
     """守护活（真监听者）→ ``_ensure_chart_daemon`` 早返，不调 ``_spawn_chart_daemon``。
 
@@ -484,6 +497,7 @@ def test_ensure_chart_daemon_warns_on_spawn_oserror(tmp_path, monkeypatch):
 # ── chart_daemon.main 端到端 smoke（spawn 真子进程）───────────────────────────
 
 
+@requires_unix_socket
 def test_main_daemon_lifecycle_spawns_binds_and_cleans_up(tmp_path):
     """``python -m orca.iface.in_session.chart_daemon`` 真起 → bind socket → SIGTERM → 清理。
 

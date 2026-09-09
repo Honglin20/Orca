@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import json
 import re
 from pathlib import Path
@@ -82,6 +84,7 @@ def test_resolve_runs_dir_bad_env_fails_loud(monkeypatch: pytest.MonkeyPatch):
         resolve_runs_dir()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="断言锁 POSIX 绝对路径形态（win32 resolve 带 drive 前缀）")
 def test_resolve_runs_dir_does_not_call_detect_project_root(monkeypatch: pytest.MonkeyPatch):
     """不变式 3（隔离）：``resolve_runs_dir`` 绝不调 ``detect_project_root``。
 

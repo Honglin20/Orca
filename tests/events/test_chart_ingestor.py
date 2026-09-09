@@ -7,16 +7,23 @@
   - teardown cancel → socket 文件删
   - emit 抛 → ack ok=False 含 error
   - crash 恢复 callback：cancelled 不重起（teardown 安全）
+  - 熔断（D3，spec 2026-09-08）：恒崩 60s 窗口内第 6 次 crash 后不再重起（fail loud）
+  - 正常退出（exc is None）不重起不计数
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import socket
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
+import orca.events.chart_ingestor as chart_ingestor_mod
 from orca.events.bus import EventBus
 from orca.events.chart_ingestor import (
     chart_ingestor,
@@ -79,9 +86,18 @@ async def _wait_sock_async(sock_path: Path, loops: int = 100, delay: float = 0.0
     return False
 
 
+# AF_UNIX 假设的测试（Unix socket 直连 / ``start_unix_server`` patch）在 Windows 会炸
+# → skip（spec 2026-09-08 skipif 清点；win32 TCP 分支由 tests/chart/test_tcp_transport.py 覆盖）。
+requires_unix_socket = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="AF_UNIX Unix-socket 传输分支（win32 TCP 分支由 test_tcp_transport.py 覆盖）",
+)
+
+
 # ── emit + ack ──────────────────────────────────────────────────────────────
 
 
+@requires_unix_socket
 def test_ingestor_emits_chart_event_and_acks_seq(tmp_path):
     """合法消息 → emit custom(chart) + ack seq == tape.last_seq()。
 
@@ -130,6 +146,7 @@ def test_ingestor_emits_chart_event_and_acks_seq(tmp_path):
 # ── malformed（SPEC §3.4）────────────────────────────────────────────────────
 
 
+@requires_unix_socket
 def test_ingestor_malformed_message_acks_error(tmp_path):
     """非 JSON / 缺字段 / 类型错 → ack ok=False + 不 emit。"""
     sock_path = _short_sock(tmp_path)
@@ -179,6 +196,7 @@ def test_ingestor_malformed_message_acks_error(tmp_path):
 # ── 超限（SPEC §5.2 ingestor 端复核）─────────────────────────────────────────
 
 
+@requires_unix_socket
 def test_ingestor_oversize_payload_rejected(tmp_path):
     """payload > MAX_MESSAGE_BYTES（2 MB）→ 不 emit / 不写 tape（SPEC §5.2 核心契约）。
 
@@ -243,6 +261,7 @@ def test_ingestor_oversize_payload_rejected(tmp_path):
             pass
 
 
+@requires_unix_socket
 def test_ingestor_accepts_payload_under_2mb_but_over_64kb(tmp_path):
     """64KB < payload < 2MB → 正常 accept（不被 asyncio readline 64KB 默认上限误拒）。
 
@@ -288,6 +307,7 @@ def test_ingestor_accepts_payload_under_2mb_but_over_64kb(tmp_path):
 # ── teardown cancel → socket 删除（SPEC §3.4 / §3.1 finally）──────────────
 
 
+@requires_unix_socket
 def test_ingestor_teardown_unlinks_socket(tmp_path):
     """task cancel → finally 块 unlink socket 文件。"""
     sock_path = _short_sock(tmp_path)
@@ -318,6 +338,7 @@ def test_ingestor_teardown_unlinks_socket(tmp_path):
 # ── emit 抛 → ack error（SPEC §3.4 emit 失败兜底）────────────────────────────
 
 
+@requires_unix_socket
 def test_ingestor_emit_failure_acks_error(tmp_path):
     """bus.emit 抛（如 tape 写失败）→ ack ok=False + error 透传。"""
     sock_path = _short_sock(tmp_path)
@@ -365,6 +386,7 @@ def test_make_crash_callback_returns_callable(tmp_path):
     assert callable(cb)
 
 
+@requires_unix_socket
 def test_crash_callback_no_restart_on_cancelled(tmp_path):
     """task 被 cancel（非 crash）→ callback 静默返回，不重起。
 
@@ -404,6 +426,7 @@ def test_crash_callback_no_restart_on_cancelled(tmp_path):
             pass
 
 
+@requires_unix_socket
 def test_crash_callback_restarts_on_exception(tmp_path):
     """task 抛异常（非 cancel）→ callback 重起一个新 task。
 
@@ -458,6 +481,7 @@ def test_crash_callback_restarts_on_exception(tmp_path):
             pass
 
 
+@requires_unix_socket
 def test_ingestor_stale_socket_unlinked_before_bind(tmp_path):
     """SPEC §3.2：sock 文件已存在（stale）→ chart_ingestor 先 unlink 再 bind。
 
@@ -490,3 +514,86 @@ def test_ingestor_stale_socket_unlinked_before_bind(tmp_path):
             sock_path.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+# ── 熔断（D3，spec 2026-09-08：恒崩限流，POSIX 显式豁免）──────────────────────
+
+
+def test_crash_callback_circuit_breaker_stops_after_max_restarts(tmp_path, caplog):
+    """D3 熔断：60s 窗口内第 ``max_restarts``+1 次 crash 后不再创建新 ingestor task。
+
+    意图：恒崩错误（如 win32 缺 ``start_unix_server`` 这类系统性缺陷）不得无限重起
+    饿死事件循环（实测 90s 40 万次重起）。两条硬断言：
+      1. 重起链共享同一 ``crash_times``——计数**不随重起清零**（旧 bug：每代重建闭包，
+         熔断是死代码）；
+      2. 第 6 次 crash（max_restarts=5）触发熔断 ``logger.error``，此后无新 task。
+    平台无关（不碰 socket，仅驱动 done_callback 链）。
+    """
+    sock_path = tmp_path / "orca-test-breaker.sock"
+    bus, _ = _make_bus(tmp_path)
+    calls = {"n": 0}
+
+    async def always_crash(*_args, **_kwargs):
+        calls["n"] += 1
+        raise RuntimeError("simulated persistent crash")
+
+    async def go():
+        with (
+            patch.object(chart_ingestor_mod, "chart_ingestor", always_crash),
+            caplog.at_level(logging.ERROR, logger="orca.events.chart_ingestor"),
+        ):
+            task = asyncio.create_task(
+                chart_ingestor_mod.chart_ingestor(sock_path, bus, "demo"),
+                name="orca-chart-ingestor-demo",
+            )
+            task.add_done_callback(
+                make_crash_callback(sock_path, bus, "demo",
+                                    max_restarts=5, window_seconds=60.0)
+            )
+            # 等整条 crash→重起链收敛：调用数连续两轮不再增长 = 熔断已停。
+            quiescent = 0
+            while quiescent < 5:
+                before = calls["n"]
+                await asyncio.sleep(0.02)
+                quiescent = quiescent + 1 if calls["n"] == before else 0
+
+        # 熔断后无存活 restart task（若有说明第 6 次后又重起了）。
+        restart_tasks = [t for t in asyncio.all_tasks() if "restart" in t.get_name()]
+        assert restart_tasks == []
+        # 初次 + 5 次重起 = 6 次调用；第 6 次 crash 触发熔断，不再有第 7 次。
+        assert calls["n"] == 6, f"crash 链未在熔断处停住（调用了 {calls['n']} 次）"
+        # 熔断 fail loud：恰 1 条 error 日志（对齐验收 2 的 serve.log 判据）。
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert len(errors) == 1
+        assert "熔断" in errors[0].getMessage()
+
+    _run(go())
+
+
+def test_crash_callback_normal_exit_no_restart_no_count(tmp_path):
+    """task 正常完成（exc is None，serve_forever 不应返回但防御分支）→ 不重起 + 不计数。
+
+    意图：D3 保留分支——正常退出进 crash 计数会误耗熔断额度（连着 6 个正常退出也熔断）。
+    与 ``test_crash_callback_no_restart_on_cancelled``（teardown cancel 分支）成对。
+    """
+    sock_path = tmp_path / "orca-test-normalexit.sock"
+    calls = {"n": 0}
+
+    async def exits_normally(*_args, **_kwargs):
+        calls["n"] += 1
+        return None  # 正常返回（exc is None）
+
+    async def go():
+        with patch.object(chart_ingestor_mod, "chart_ingestor", exits_normally):
+            task = asyncio.create_task(
+                chart_ingestor_mod.chart_ingestor(sock_path, None, "demo"),
+                name="orca-chart-ingestor-demo",
+            )
+            cb = make_crash_callback(sock_path, None, "demo")
+            task.add_done_callback(cb)
+            await task
+            await asyncio.sleep(0.05)
+        assert calls["n"] == 1  # 正常退出不重起（没有第 2 次调用）
+        assert not any("restart" in t.get_name() for t in asyncio.all_tasks())
+
+    _run(go())

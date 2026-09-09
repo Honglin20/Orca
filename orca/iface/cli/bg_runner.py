@@ -9,6 +9,13 @@
 
   - **Unix-only**：``os.fork`` + ``os.setsid``。CI 跑 ubuntu，dev 跑 darwin，都是 Unix；
     Windows 不在 phase 11 目标内（``RuntimeError`` fail loud，SPEC §8 未列 Windows）。
+    但**模块导入必须平台安全**（spec 2026-09-08 D6）：旧默认参数 ``fork_fn=os.fork``
+    在 def 语句求值期就访问 ``os.fork``——Windows 无此属性 → ``tars ps/wait/logs/doctor``
+    的 lazy import 直接崩（实测根因 3）。现默认 ``None`` + 函数体内兜底，Unix-only
+    fail loud 语义不变（``_assert_unix`` 仍先行拒绝）。
+  - **pid 探活平台分支**（D6）：win32 走 ``orca.iface._winprocs``（ctypes OpenProcess
+    零杀伤）；**禁 ``os.kill(pid, 0)``**——Windows 语义是 TerminateProcess，探活变杀
+    进程（实测根因 6）。
   - **复用 gen_run_id + Tape 路径**（DRY，SPEC §10.2 item10）：父进程生成 run_id，
     经 ``ORCA_BG_RUN_ID`` 环境变量传给子进程；子进程的 ``OrcaApp`` 看到 env 就用它，
     不重新 gen —— 保证 metadata 的 run_id 与 tape 文件名 / run_id 三者一致（确定性）。
@@ -36,6 +43,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
 
+from orca.iface import _winprocs
 from orca.run.lifecycle import gen_run_id
 from orca.runtime import RUNS_DIRNAME
 
@@ -208,16 +216,21 @@ def list_all_meta() -> list[BgRunMeta]:
 
 
 def pid_alive(pid: int) -> bool:
-    """检测 pid 是否还在跑。
+    """检测 pid 是否还在跑（平台分支，spec 2026-09-08 D6）。
 
     - pid <= 0 → 不可能存活（占位值），返回 False。
-    - ``os.kill(pid, 0)`` 不抛 → 存在（存活或 zombie；zombie 仍占 pid slot，
-      对 ``wait`` 而言进程已终结但 metadata 可能未及更新，调用方据语义再判）。
-    - 抛 ``ProcessLookupError`` → 进程没了。
-    - 抛 ``PermissionError`` → 进程在但不归当前用户管（仍算存活）。
+    - **win32**：``_winprocs.pid_alive``（ctypes OpenProcess 零杀伤探）。**禁
+      ``os.kill(pid, 0)``**——Windows 上 sig=0 的语义是 ``TerminateProcess``（探活变
+      杀进程，实测根因 6：``tars ps`` 一跑就把长跑 run 杀了）。
+    - POSIX：``os.kill(pid, 0)`` 语义逐字保留——不抛 → 存在（存活或 zombie；zombie
+      仍占 pid slot，对 ``wait`` 而言进程已终结但 metadata 可能未及更新，调用方据
+      语义再判）；``ProcessLookupError`` → 没了；``PermissionError`` → 不归当前用户
+      管但仍算存活。
     """
     if pid <= 0:
         return False
+    if sys.platform == "win32":
+        return _winprocs.pid_alive(pid)
     try:
         os.kill(pid, 0)
         return True
@@ -298,8 +311,8 @@ def daemonize(
     run_id: str,
     extra_argv: list[str],
     *,
-    fork_fn: Callable[[], int] = os.fork,
-    setsid_fn: Callable[[], None] = os.setsid,
+    fork_fn: Callable[[], int] | None = None,
+    setsid_fn: Callable[[], None] | None = None,
     execv_fn: Callable[[str, list[str]], None] = os.execv,
     redirect_stdio_fn: Callable[[Path], None] | None = None,
     time_fn: Callable[[], float] = time.time,
@@ -326,8 +339,16 @@ def daemonize(
 
     raises:
       RuntimeError: 当前平台不支持 fork（Windows）。
+
+    ``fork_fn`` / ``setsid_fn`` 默认 ``None`` + 函数体内兜底（spec 2026-09-08 D6）：
+    默认参数在 def 期求值会在 Windows 上因 ``os.fork`` 属性缺失直接崩模块导入（实测
+    根因 3）；体内兜底发生在 ``_assert_unix()`` 之后，Unix-only fail loud 语义不变。
     """
     _assert_unix()
+    if fork_fn is None:
+        fork_fn = os.fork  # _assert_unix 已保证 Unix（Windows 到不了这行）
+    if setsid_fn is None:
+        setsid_fn = os.setsid
 
     # 1) 构造 + 写 metadata（parent 在 fork 前写，保证 fork 后 parent/child 都能读到）。
     log_file = log_path(run_id)

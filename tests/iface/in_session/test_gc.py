@@ -29,6 +29,7 @@ import pytest
 from typer.testing import CliRunner
 
 from orca.chart._paths import chart_sock_path
+from orca.iface.in_session import _flock  # flock shim（D4）：与 SUT 同锁 API
 from orca.iface.in_session.cli import (
     _collect_gc_candidates,
     _delete_candidate,
@@ -527,7 +528,6 @@ def test_collect_orphan_dir_with_leftover_marker(cwd_tmp):
 
 def test_cli_gc_concurrent_lock_rejected(cwd_tmp):
     """两个 gc 并发：第二个返 ``another gc is running`` + 0 删除（advisory lock 兜底）。"""
-    import fcntl
 
     rundir = cwd_tmp / "runs"
     _make_run(rundir, "r1", age_seconds=999999)
@@ -536,14 +536,14 @@ def test_cli_gc_concurrent_lock_rejected(cwd_tmp):
     lock_path = rundir / ".orca-gc.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     other_fd = open(lock_path, "w")
-    fcntl.flock(other_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    _flock.flock(other_fd.fileno(), _flock.LOCK_EX | _flock.LOCK_NB)
     try:
         runner = CliRunner()
         result = _gc(runner, "--max-age", "1d")  # 应撞锁返 note
         assert "another gc is running" in result.get("note", "")
         assert result["deleted_count"] == 0
     finally:
-        fcntl.flock(other_fd.fileno(), fcntl.LOCK_UN)
+        _flock.flock(other_fd.fileno(), _flock.LOCK_UN)
         other_fd.close()
 
 

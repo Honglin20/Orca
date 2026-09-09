@@ -11,17 +11,32 @@ liveness helper。本测试直接断言 helper 契约（不经守护 wrapper）�
 薄 wrapper）；``test_sidechain_daemon.py`` 守 pidfile probe（经 ``sidechain_daemon._sidechain_daemon_alive``
 薄 wrapper）。本文件加**直接单元测试**专门覆盖 ``run_id`` 校验分支（pid 复用防御第三层），
 既有测试因经 wrapper 不方便专门断言此分支。
+
+win32 分支（spec 2026-09-08 D5）：socket 探走 port sidecar + TCP connect；pidfile 探走
+``_winprocs`` OpenProcess（零杀伤，U2-A 无 cmdline 校验）。Linux /proc 与 macOS ps 分支
+测试在 win32 skip（spec skipif 清点）。
 """
 from __future__ import annotations
 
 import socket
+import sys
 from pathlib import Path
 
 import pytest
 
+from orca.chart._paths import chart_port_file_path
 from orca.iface.in_session._daemon_liveness import (
     pidfile_daemon_alive,
     socket_daemon_alive,
+)
+
+# POSIX 分支（Linux /proc cmdline 校验 / macOS ps / AF_UNIX listener）在 win32 skip；
+# win32 分支测试在 POSIX skip（spec 2026-09-08 D5 + skipif 清点）。
+requires_posix = pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX-only 分支（win32 分支另有专测）",
+)
+requires_win32 = pytest.mark.skipif(
+    sys.platform != "win32", reason="win32-only 分支（OpenProcess / TCP port sidecar）",
 )
 
 
@@ -43,6 +58,7 @@ def test_socket_probe_stale_socket_returns_false(tmp_path: Path) -> None:
     assert socket_daemon_alive(stale) is False
 
 
+@requires_posix
 def test_socket_probe_real_listener_returns_true(tmp_path: Path) -> None:
     """真监听者 → connect 成功 → True。"""
     sock_path = tmp_path / "alive.sock"
@@ -119,6 +135,7 @@ def test_pidfile_dead_pid_returns_false(tmp_path: Path) -> None:
     ) is False
 
 
+@requires_posix
 def test_pidfile_module_name_mismatch_returns_false(tmp_path: Path, monkeypatch) -> None:
     """pidfile 指向活 pid 但 cmdline 不含 ``module_name`` → False（pid 复用为其它进程）。
 
@@ -144,6 +161,7 @@ def test_pidfile_module_name_mismatch_returns_false(tmp_path: Path, monkeypatch)
     ) is False
 
 
+@requires_posix
 def test_pidfile_run_id_mismatch_returns_false(tmp_path: Path, monkeypatch) -> None:
     """**SPEC §5 S9 / pid 复用防御第三层**：cmdline 含模块名 + ``--run-id`` 但 run_id 值不匹配 → False。
 
@@ -181,6 +199,7 @@ def test_pidfile_run_id_mismatch_returns_false(tmp_path: Path, monkeypatch) -> N
     ) is True
 
 
+@requires_posix
 def test_pidfile_no_run_id_arg_skips_run_id_check(tmp_path: Path, monkeypatch) -> None:
     """``run_id=None`` → 跳过 run_id 校验（只查 module_name 在 cmdline 即可）。"""
     pidfile = tmp_path / "norid.pid"
@@ -220,6 +239,7 @@ def _force_macos_branch(monkeypatch) -> None:
     monkeypatch.setattr(Path, "is_dir", _fake_is_dir)
 
 
+@requires_posix
 def test_t6_macos_branch_alive_when_cmdline_matches(tmp_path, monkeypatch):
     """T6（AC-3）：macOS 分支，``/proc`` 不存在时走 ``os.kill(pid,0)`` + ``ps`` cmdline 校验。"""
     _force_macos_branch(monkeypatch)
@@ -248,6 +268,7 @@ def test_t6_macos_branch_alive_when_cmdline_matches(tmp_path, monkeypatch):
     ) is True
 
 
+@requires_posix
 def test_t6_macos_branch_pid_reuse_returns_false(tmp_path, monkeypatch):
     """T6（AC-3 pid 复用）：macOS 分支 + ps 返不含 module_name 的 cmdline → False。"""
     _force_macos_branch(monkeypatch)
@@ -271,6 +292,7 @@ def test_t6_macos_branch_pid_reuse_returns_false(tmp_path, monkeypatch):
     ) is False
 
 
+@requires_posix
 def test_t6_macos_branch_pid_not_found_returns_false(tmp_path, monkeypatch):
     """T6（AC-3 pid 不存在）：macOS 分支 + ``os.kill(pid,0)`` 抛 ProcessLookupError → False。"""
     _force_macos_branch(monkeypatch)
@@ -294,6 +316,7 @@ def test_t6_macos_branch_pid_not_found_returns_false(tmp_path, monkeypatch):
     ) is False
 
 
+@requires_posix
 def test_t6_macos_branch_ps_subprocess_failure_returns_false(tmp_path, monkeypatch, caplog):
     """T6 fail-path：macOS 分支 + ``ps`` 命令不可用（OSError）→ 保守 False + warning。
 
@@ -325,6 +348,7 @@ def test_t6_macos_branch_ps_subprocess_failure_returns_false(tmp_path, monkeypat
     )
 
 
+@requires_posix
 def test_d1_macos_branch_run_id_as_substring_in_unrelated_arg_returns_false(
     tmp_path, monkeypatch,
 ):
@@ -359,6 +383,7 @@ def test_d1_macos_branch_run_id_as_substring_in_unrelated_arg_returns_false(
     ) is False
 
 
+@requires_posix
 def test_macos_branch_kill0_permission_still_runs_ps(tmp_path, monkeypatch):
     """SPEC D §4.3 m3：``PermissionError`` → 视进程存在，进 cmdline 校验（不 short-circuit True）。"""
     _force_macos_branch(monkeypatch)
@@ -385,3 +410,67 @@ def test_macos_branch_kill0_permission_still_runs_ps(tmp_path, monkeypatch):
         module_name="orca.iface.in_session.sidechain_daemon",
         run_id="run-Z",
     ) is True
+
+
+# ── win32 分支（spec 2026-09-08 D5：port sidecar TCP 探 / OpenProcess pidfile 探）──
+
+
+@requires_win32
+def test_win32_socket_probe_tcp_listener_returns_true(tmp_path: Path) -> None:
+    """win32：port sidecar 指向真 TCP 监听者 → connect 成功 → True。
+
+    D1/D5 契约：Windows 无 AF_UNIX，socket 探改读 ``<sock>.port`` + connect 127.0.0.1。
+    """
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    try:
+        port = server.getsockname()[1]
+        sock_path = tmp_path / "alive.sock"
+        chart_port_file_path(sock_path).write_text(str(port), encoding="utf-8")
+        assert socket_daemon_alive(sock_path) is True
+    finally:
+        server.close()
+
+
+@requires_win32
+def test_win32_socket_probe_port_without_listener_returns_false(tmp_path: Path) -> None:
+    """win32：port sidecar 在但无监听者（stale，守护被杀未清）→ refused → False。
+
+    语义对齐 POSIX stale socket 分支（保守触发 respawn）。
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()  # 立即关：短窗口内 connect 必 refused/reset
+    sock_path = tmp_path / "stale.sock"
+    chart_port_file_path(sock_path).write_text(str(port), encoding="utf-8")
+    assert socket_daemon_alive(sock_path) is False
+
+
+@requires_win32
+def test_win32_socket_probe_corrupt_port_file_returns_false(tmp_path: Path) -> None:
+    """win32：port sidecar 损坏（非数字 / 半写）→ False（宽容解析失败，非 crash）。"""
+    sock_path = tmp_path / "corrupt.sock"
+    chart_port_file_path(sock_path).write_text("not-a-port", encoding="utf-8")
+    assert socket_daemon_alive(sock_path) is False
+
+
+@requires_win32
+def test_win32_pidfile_current_pid_returns_true(tmp_path: Path) -> None:
+    """win32：pidfile 指向本进程 → OpenProcess 探活 True（U2-A：无 cmdline 校验）。"""
+    import os
+
+    pidfile = tmp_path / "self.pid"
+    pidfile.write_text(str(os.getpid()), encoding="utf-8")
+    assert pidfile_daemon_alive(
+        pidfile, module_name="anything", run_id="anything",
+    ) is True
+
+
+@requires_win32
+def test_win32_pidfile_zero_pid_returns_false(tmp_path: Path) -> None:
+    """win32：pidfile 写 0（占位/损坏值）→ False（pid<=0 guard）。"""
+    pidfile = tmp_path / "zero.pid"
+    pidfile.write_text("0", encoding="utf-8")
+    assert pidfile_daemon_alive(pidfile, module_name="m") is False

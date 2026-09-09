@@ -278,6 +278,7 @@ def test_doctor_sidechain_backend_cc_env_family_when_no_per_session_root(doctor_
     assert "available=False" in detail
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="doctor sidechain resolved 路径断言锁 POSIX 分隔符（win32 为反斜杠形态）")
 def test_doctor_sidechain_backend_env_family_cc_when_cac_dotdir_installed(doctor_iso, monkeypatch):
     """【bug 回归锚】真 CC env + .claude/.cac 两存（.cac 是 install 副作用）→ env family=cc 胜，读 .claude。
 
@@ -310,6 +311,7 @@ def test_doctor_sidechain_backend_env_family_cc_when_cac_dotdir_installed(doctor
     assert check["status"] == "pass"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="doctor sidechain resolved 路径断言锁 POSIX 分隔符（win32 为反斜杠形态）")
 def test_doctor_sidechain_backend_cac_env_family(doctor_iso, monkeypatch):
     """CAC（CC 换皮）：CODEAGENT=1 + PID 回溯命中 → env family=cac，读 .cac。
 
@@ -365,6 +367,7 @@ def test_doctor_sidechain_backend_opencode_family(doctor_iso, monkeypatch):
     assert check["status"] == "pass"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="doctor sidechain resolved 路径断言锁 POSIX 分隔符（win32 为反斜杠形态）")
 def test_doctor_sidechain_backend_env_family_beats_config(doctor_iso, monkeypatch):
     """env 身份优先于 config：真 CC env（→cc）即便 config 设 cac → family=cc、读 .claude。
 
