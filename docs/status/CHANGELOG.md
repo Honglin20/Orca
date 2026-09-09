@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-09-09] feat(web): prof-opt 文档面板轮次子分组 + 文件管理器风图标卡片（commit `8049302`）
+
+用户三反馈收口：轮次组按 `docRoundNoOf` 拆「Round N」可折叠子区；卡片改显纯文件名（完整 path 进 hover title，错误信息同步带 path 可定位）；B 方案竖排图标卡（32px 彩色类型徽章 M↓/{ }）。code-reviewer 1 MAJOR + 3 MINOR 全闭环。vitest 55/55（受影响套件）/ tsc clean / static 已重建。详见 [release note](../releases/2026-09-09-profopt-docs-round-cards.md)。
+
 ## [2026-09-08] feat(prof-opt): mfu-analyzer v3 —— bound 判定矩阵 + 昇腾知识单文件共享（commit `ce616ee`）
 
 真机误判纠正：v2 把 cycles 最大的 MATMUL 判成计算瓶颈，漏掉 reduce/transpose/img2col 与 matmul 交替的格式切换税。v3 重写为三窗口时间轴 + bound 判定矩阵 + MFU 损耗分解（提 MFU 与降时延同位）；昇腾 9 铁律压缩进共享 `subagents/references/ascend.md`（po_propose 与 mfu-analyzer 经 `{{ subagents_root }}` 共用，旧薄版删除）；根因词汇表 4→5 类；哨兵 v2→v3 全量同步。洁净审查 4 MINOR 全收口、校验门三用例实测通过。已部署环境需 `tars install` 刷新。详见 [release note](../releases/2026-09-08-mfu-analyzer-v3.md)。
