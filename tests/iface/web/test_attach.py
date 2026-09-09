@@ -330,6 +330,30 @@ def test_security_traversal_rejected(tmp_path):
             manager.resolve_tape_path(p)
 
 
+def test_security_resolve_works_without_onofollow_flag(tmp_path, monkeypatch):
+    """平台无 os.O_NOFOLLOW（Windows Python）→ resolve 仍可用且越界拒不变。
+
+    spec 2026-09-08 Windows 兼容缺陷②回归：旧实现 flags 构造期直接 os.O_RDONLY |
+    os.O_NOFOLLOW → win32 AttributeError（attach 路径 meta/events 全 500）。修复 =
+    hasattr 守卫拼接 flags（win32 不传，POSIX 不变）；本测试在两平台都模拟
+    「无该 flag」环境钉住守卫（POSIX 上 delattr 后走 win32 同款分支）。
+    """
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    (runs_dir / "good").mkdir()
+    tape = runs_dir / "good" / "tape.jsonl"
+    tape.write_text("{}", encoding="utf-8")
+    manager = _make_manager_with_runs_dir(tmp_path, runs_dir)
+
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    resolved = manager.resolve_tape_path(str(tape))
+    assert resolved.is_file()
+
+    # 越界拒绝语义不因 flags 降级回退。
+    with pytest.raises(PermissionError):
+        manager.resolve_tape_path("../../etc/passwd")
+
+
 def test_security_runs_good_traverse_rejected(tmp_path):
     """``runs/good/../../etc`` 解析后逃出 runs_dir → PermissionError。"""
     runs_dir = tmp_path / "runs"

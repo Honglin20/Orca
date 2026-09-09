@@ -10,7 +10,7 @@
 |---|---|---|
 | 1 | run 卡死 + 前端推送全断 + 90s 内 40 万次 crash 重起 | `chart_ingestor` 调 `asyncio.start_unix_server`（win32 无此属性）→ crash callback 无限重起饿死事件循环 |
 | 2 | `orca` CLI 全废 | `iface/in_session/{cli,daemon,chart_daemon}.py` 模块级 `import fcntl` |
-| 3 | `tars ps/wait/logs/doctor` 崩 | `bg_runner.py:301-302` 默认参数 `os.fork` / `os.setsid` 导入期求值 |
+| 3 | `tars ps/wait/logs` 崩 | `bg_runner.py:301-302` 默认参数 `os.fork` / `os.setsid` 导入期求值 |
 | 4 | CLI 中文 GBK 乱码 | stdout 管道下 cp936 编码 |
 | 5 | CC hook 静默死 | `bash`/`python3` 解析到 Store stub（**out-of-scope**，独立项） |
 | 6 | 探活变杀进程（高危） | `bg_runner.py:222` `pid_alive` 的 `os.kill(pid,0)` 在 Windows 语义 = TerminateProcess；`_daemon_liveness.py:120` Windows 误入 macOS 分支同命中此杀 |
@@ -100,7 +100,7 @@ POSIX 豁免声明：无限重起 → 限流熔断是对「恒崩饿死事件循
 ## 验收标准（用户拍板口径：不跑完整 E2E，证功能正确）
 
 **验收 1（CLI 解锁 + 探活无杀伤）**：
-- `tars list` / `orca list` / `tars ps` / `tars wait` / `tars logs` / `tars doctor` 在 orca-win 下退出可用、无 traceback。
+- `tars list` / `orca list`（含 `orca doctor`）/ `tars ps` / `tars wait` / `tars logs` 在 orca-win 下退出可用、无 traceback。
 - `tars list` 中文可读：管道捕获 bytes 按 UTF-8 解码无 mojibake（非 console 目测）。
 - **探活无杀伤回归**：构造 running bg run（手工写 `~/.orca/runs/<id>.json`，status=running + `subprocess.Popen` 长活进程 pid——`--background` Unix-only 无法自然构造）；跑 `tars ps` 后断言该 pid 仍存活（`poll() is None` 前后不变）。
 
@@ -116,17 +116,31 @@ POSIX 豁免声明：无限重起 → 限流熔断是对「恒崩饿死事件循
 | opencode | Windows 原生 npm 1.17.20 |
 | `orca` CLI（tars skill 编排调用） | orca-win conda env |
 | `tars serve`（web） | orca-win conda env，同 ORCA_HOME |
-| 测试 workflow | Windows 本地 scratch 项目（含 1 个 agent 节点 + 1 个 chart script 节点） |
+| 测试 workflow | Windows 本地 scratch 项目（**1 个 agent 节点，不放 chart script 节点**——inline chart 因缺陷①必然节点失败，chart 验证按下方断言口径走手工 render_chart 对 daemon） |
 
-- `opencode run` headless → tars skill 编排 `orca` CLI bootstrap/next 推进到 `workflow_completed`。
+- **opencode 自动编排口径**（缺陷③处置，用户拍板）：deepseek 余额阻塞自动编排 → 以**手工等价 CLI 序列**（`orca list` → `orca <wf> --inputs` → `orca next --output` 至终态，即 tars skill 编排的同一契约序列）PASS 为准；「opencode→tars skill 自动编排全链」挂账，余额恢复后补跑，不阻塞本轮验收。
 - web REST：`GET /api/runs` 可见该 run；events 全量；meta 终态正确。
-- **chart 断言**（U1-A 前提）：tape 含 chart 事件且图表数据非空。
+- **chart 断言口径**（缺陷①处置，用户拍板）：in-session 的 chart 验证 = **daemon 链路可用**——chart daemon 存活（port sidecar 在）+ 对其手工 `render_chart` 秒回 ack 且落 tape；~~「in-session run 的 tape 含 inline script 推的 chart 事件」~~ 不可行（`next` 持 tape flock 临界区内联跑 script → daemon `_FlockSafeTape.append` 等同一把锁自死锁——**跨平台既有架构矛盾**，POSIX 复现证据见「已知产品缺陷挂账」，本轮不修）。
 
 **验收 4（Linux 不回归，U4-B 双环境分工）**：
 - WSL `.venv` pytest 子集（平台无关逻辑）：`tests/events/`（熔断「第 6 次不再重起」单测在此）、`tests/chart/`（TCP loopback + endpoint 分支——`chart_endpoint`/`_IS_WINDOWS` 运行时可 patch）、`tests/iface/web/`（run_manager chart 相关）、`tests/exec/test_script.py`。
 - orca-win 真跑（导入期/ctypes/msvcrt 类）：`tests/iface/in_session/`（shim NB 冲突等）、`tests/iface/cli/test_bg_runner.py`（fork/setsid 导入安全 + pid_alive 无杀伤）。
 - POSIX 假设测试 skipif 清点：`tests/chart/test_render.py:69`（fixture 内 AF_UNIX）为首例，全量清点加 `skipif`。
 - WSL 全量受影响子集退出码 0（= Linux 无回归）。
+
+## 已知产品缺陷挂账（本轮范围外，登记 follow-up）
+
+1. **in-session inline script 推 chart 自死锁**（跨平台既有，POSIX 同现；Phase 3 WSL 对照证据：exit_code=1、ack 超时 10.21s、seq 迟到落 tape + `_ack` ConnectionReset）：`next` 持 `<tape>.lock` 临界区内联执行 script（`cli.py` inline 链）→ chart daemon `_FlockSafeTape.append` 阻塞等同一把锁 → ack 永不返回。修复方向（先放锁再内联 / daemon 读路径绕锁）属 in-session 锁协议架构级专项，独立立项。
+2. **CC hooks Windows 静默死**（背景根因 5）：`bash`/`python3` Store stub。
+3. **三份 msvcrt 锁实现归并**（U5-B）。
+4. **pidfile 镜像名校验**（U2 follow-up）。
+5. **opencode→tars skill 自动编排全链补跑**（deepseek 余额恢复后）。
+
+## 本轮缺陷修复（Phase 3 发现，归入实现环）
+
+| 缺陷 | 落点 | 修复 |
+|---|---|---|
+| ② in-session run 的 web meta/events 500 | `orca/iface/web/run_manager.py` `os.open(..., os.O_NOFOLLOW)`——Windows Python 无此 flag（**flags 构造期即 AttributeError**） | `hasattr(os, "O_NOFOLLOW")` 守卫拼接（win32 不传，POSIX 不变）。Windows 下 TOCTOU 守卫降级 best-effort（open 前 lstat symlink 检查 + inode/dev 对比（修复后 :545）保留；Windows symlink 需特权创建，威胁面窄），如实声明非完全等价 |
 
 ## 失败路径 / fail-loud 策略
 

@@ -461,7 +461,8 @@ class RunManager:
              （防 ``runs_evil`` 前缀碰撞）；命中 ``ORCA_WEB_TAPE_ALLOWLIST`` 等价放行。
           3. **post-resolve re-check**：再 ``resolve()`` / ``is_symlink()`` 确认无逃逸。
           4. **open + fd re-stat 防 TOCTOU**：``os.open(O_RDONLY|O_NOFOLLOW)`` + ``fstat``
-             对比 resolved 的 stat，不一致 → 拒（race 中被替换）。
+             对比 resolved 的 stat，不一致 → 拒（race 中被替换）。``O_NOFOLLOW`` 仅
+             POSIX（win32 无此 flag，TOCTOU 守卫降级 best-effort——见步骤 4 内联注释）。
 
         相对路径相对 CWD（与 ``orca run`` 写 tape 一致）。不符 → ``PermissionError``；
         不存在 → ``FileNotFoundError``。routes 层统一映射为 403 / 404。
@@ -519,11 +520,17 @@ class RunManager:
 
         # 4. open + fd re-stat 防 TOCTOU：原子 open(O_NOFOLLOW) 后从 fd 取真实 inode，
         #    与 resolved 的 stat 对比；race 中被替换 → 不一致 → 拒。
+        #    Windows 无 ``O_NOFOLLOW``（flags 构造期即 AttributeError）→ ``hasattr``
+        #    守卫拼接 flags，win32 不传该位（TOCTOU 守卫降级 best-effort：open 前
+        #    lstat symlink 检查（步骤 1/3）与本步 inode/dev 对比保留，仅少「open
+        #    原子拒 symlink」一层；spec 2026-09-08 Windows 兼容已声明该降级）；
+        #    POSIX flags 逐字不变。
+        open_flags = os.O_RDONLY | (os.O_NOFOLLOW if hasattr(os, "O_NOFOLLOW") else 0)
         try:
-            fd = os.open(str(resolved), os.O_RDONLY | os.O_NOFOLLOW)
+            fd = os.open(str(resolved), open_flags)
         except OSError as e:
             raise PermissionError(
-                f"tape_path open(O_NOFOLLOW) 失败（可能 symlink/权限）：{tape_path} ({e})"
+                f"tape_path open 失败（可能 symlink/权限）：{tape_path} ({e})"
             ) from e
         try:
             fd_stat = os.fstat(fd)

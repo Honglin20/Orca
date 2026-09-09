@@ -13,6 +13,7 @@
 - **重要状态**：spec 评审前已有**部分实现落在工作树未提交**（chart/_paths、chart_ingestor、_render、exec 两 executor、_flock.py 新建）——Phase 2 coder 须对账完成并全量 review，不得假设从零开始
 - **验收口径**（用户拍板）：不跑完整 E2E；opencode + tars skill in-session 模式测 Windows；web REST 可见输出；WSL pytest 定向子集证明 Linux 不回归；不跑 TUI
 - **Phase 2 进度（2026-09-09）**：coder 实现对账完成（D1~D7 + 6 已知 bug + code-reviewer 2 轮闭环，round2 CONDITIONAL_PASS 零必修；m-2/m-6 显式 defer）；WSL 子集绿（events/chart/web 非 playwright/script/exec；playwright 34 失败经 stash 基线证明 pre-existing）+ orca-win 真跑绿（in_session + bg_runner，4 residual 已分类：v3_step1/permission_hook/push_chain_smoke×2 pre-existing 或 D1-D7 外）；E2E 验收 1-3 待跑
+- **E2E 缺陷②修复（2026-09-09）**：web attach 路径 `os.O_NOFOLLOW` 在 win32 flags 构造期 AttributeError（meta/events 500）——orca-win 复现后 `hasattr` 守卫拼接修复（POSIX 位组合逐字不变，win32 TOCTOU 降级 best-effort 已声明）+ 回归测试（两平台钉守卫）；reviewer PASS 零必修；WSL web 非 playwright 338 passed + orca-win attach 相关 47 passed；独立 commit 待编排者续跑 E2E
 
 **必读文件**（≤5）：
 1. `docs/plans/2026-09-08-windows-native-compat.md`
