@@ -55,3 +55,8 @@
 v3 同批两处改动（L50 硬件参考路径、L88-90 补传 `<hardware_ref>`）受众翻转通过、与派发对方/校验门/共享参考四方一致；全文五组禁词零命中。一条轻微 finding（FINDING-1：变体 mfu 派发的 chip/precision/core_num 出处未写，先于本轮存在）非阻塞，建议随下批顺手修。无洁净契约违规。
 
 VERDICT: CLEAN（附 1 条 🟢 非阻塞完备性项，2026-09-08 v3 复审）
+
+## 六、2026-09-09 作者人工复核补记
+
+- **FINDING-1 已修复**：Step 3 括注扩为「(pass `<hardware_ref>={{ subagents_root }}/references/ascend.md`, plus chip / precision / core_num taken from `contracts.json`'s `profile` block, as po_baseline does)」——七参取值出处全部显式。
+- 创作方按契约 §8 通读法独立重跑全文逐行核对（非仅机械校验），未发现新残留；structural-levers「only here」措辞张力已随该文件 L11 改为「Structure-change levers live HERE and only here」收口。verdict **维持 CLEAN**。

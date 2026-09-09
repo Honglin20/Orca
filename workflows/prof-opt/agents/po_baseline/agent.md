@@ -220,8 +220,9 @@ logs go to stderr and `baseline/finalizer.log` / `baseline/train.attempt<N>.log`
 
 **mfu-analyzer** — the chain's step 2 waits for its raw products;
 dispatch it when the chain reports the awaiting state (its `running` line
-carries the full dispatch parameter set, including the chip / precision /
-core_num from `contracts.json`), or proactively when `base/model.onnx`
+carries the product paths and the chip / precision / core_num from
+`contracts.json`; `<hardware_ref>` is already in the dispatch template
+above), or proactively when `base/model.onnx`
 exists and no `base/profile/*/schedule_result.json` exists yet. After each dispatch,
 validate mechanically (product presence only — the report's SENTINEL is
 `check_baseline_docs.sh`'s business, never re-typed here):

@@ -62,3 +62,9 @@
 v3 同批改动（Task 模板 `<hardware_ref>` + chain/gate 哨兵与节清单同步）受众翻转通过；派发参数七项全对齐、哨兵单一真相源未被打破；校验门对 stale v2 报告与新节缺失均正确拒绝（实测）。无洁净契约违规，无 finding。
 
 VERDICT: CLEAN（2026-09-08 v3 复审）
+
+## 七、2026-09-09 作者人工复核补记
+
+- **F4（相邻观察）已修复**：check_flatten.sh 头注释部署清单删 analyze/mfu_adapter，与门代码 :139-141（orca_inject 对 + scripts/{assert_shadow,render_run,emit_result,deploy_scripts}）实测一致。
+- **人工复核新发现 1 处（审查 agent 低判），已修复**：Step 2（L221-225）原「its `running` line carries the **full dispatch parameter set**, including the chip / precision / core_num」与事实有偏差——chain 的 running 行实际只携带产物路径 + 三评测参，**不含 `<hardware_ref>`**（后者在 L113 Task 模板内由 render 期内联）。运行时 agent 按「full」到 running 行对账会找不到 hardware_ref。已改为「carries the product paths and the chip / precision / core_num …; `<hardware_ref>` is already in the dispatch template above」。
+- 修后复扫：哨兵锁定点、派发七参对账、五组禁词零命中均维持；verdict **维持 CLEAN**。
