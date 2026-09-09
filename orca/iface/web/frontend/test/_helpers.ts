@@ -103,6 +103,10 @@ export function resetStore(): void {
     writable: true,
     oldestSeqInWindow: 0,
     newestSeqInWindow: 0,
+    // 窗口态自动后台全量默认关：store 测试的窗口态断言（hugeFullyLoaded=false 等）
+    // 是中间态，后台 fetch mock 不接全量 URL 会写错误态污染断言。auto 行为在
+    // huge-mode 专项用例里显式开启验证。
+    autoFullLoad: false,
   });
 }
 

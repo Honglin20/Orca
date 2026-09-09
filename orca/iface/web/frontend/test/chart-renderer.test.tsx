@@ -7,7 +7,7 @@
 //   4. MINOR-5: 无 title chart dev warn-once-per-identity（spy 调用次数 === 1 跨多次 render）
 
 import { describe, expect, test, afterEach, vi } from "vitest";
-import { cleanup, render, screen, fireEvent } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { useWorkflowStore, untitledChartWarned } from "@/stores/workflow-store";
 import { selectCharts } from "@/selectors";
 import { ChartRenderer } from "@/components/chart/ChartRenderer";
@@ -91,7 +91,7 @@ describe("SPEC audit-c C2 partition（INV-5 schema 漂移显形）", () => {
 });
 
 describe("huge 模式：serverOverview 目录占位渲染（根治 773 误报）", () => {
-  test("huge 模式 → 无 schema warning + 渲染占位卡 + 有 load-full 按钮，无真实 widget", () => {
+  test("窗口态 → 无 schema warning + 渲染占位卡 + 后台全量提示（无手动按钮），无真实 widget", () => {
     useWorkflowStore.setState({
       loadStatus: "loaded",
       huge: true,
@@ -111,12 +111,13 @@ describe("huge 模式：serverOverview 目录占位渲染（根治 773 误报）
     // 目录占位不再是 schema 漂移（INV-5 只针对真实 payload）
     expect(screen.queryByTestId("chart-schema-warning")).toBeNull();
     expect(screen.getAllByTestId(/^chart-placeholder-/).length).toBe(2);
-    expect(screen.getByTestId("load-full-btn")).toBeInTheDocument();
+    // 2026-09-09 自动后台全量：手动按钮取消，仅剩被动提示
+    expect(screen.queryByTestId("load-full-btn")).toBeNull();
     expect(screen.getByTestId("huge-charts-placeholder")).toBeInTheDocument();
     expect(screen.queryByTestId("chart-widget")).toBeNull();
   });
 
-  test("点击 load full → 全量 client-fold → 占位消失 + 真实 chart 渲染", async () => {
+  test("后台全量（loadFull）到位 → 全量 client-fold → 占位消失 + 真实 chart 渲染", async () => {
     useWorkflowStore.setState({
       loadStatus: "loaded",
       huge: true,
@@ -139,8 +140,9 @@ describe("huge 模式：serverOverview 目录占位渲染（根治 773 误报）
     });
     vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
     render(<ChartRenderer />);
-    fireEvent.click(screen.getByTestId("load-full-btn"));
-    // loadFull 拉全量 → serverOverview 清 → client-fold → 真实 widget 出现
+    // 触发方 = loadRunWithMeta 的自动后台调用（见 huge-mode.test）；
+    // 此处直调 loadFull 验证渲染契约：serverOverview 清 → client-fold → 真实 widget。
+    void useWorkflowStore.getState().loadFull("r-huge", { background: true });
     const widget = await screen.findByTestId("chart-widget", undefined, {
       timeout: 2000,
     });

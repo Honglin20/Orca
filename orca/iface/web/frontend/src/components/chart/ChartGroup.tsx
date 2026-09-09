@@ -95,8 +95,8 @@ export function ChartGroup({
       {!collapsed && (
         <div className="border-t orca-border p-3" style={GRID_STYLE}>
           {placeholders.map((c) => (
-            // huge 模式目录占位卡（SPEC web-attach §3 M3）：显示 chart_type + title，
-            // 点「加载全部」后 client-fold 替换为真实 widget。
+            // 窗口态目录占位卡（SPEC web-attach §3 M3）：显示 chart_type + title，
+            // 后台全量（loadFull background）client-fold 后替换为真实 widget。
             <div
               key={c.identity}
               className="aspect-[4/3] w-full rounded border orca-border orca-bg-surface-2 flex flex-col items-center justify-center gap-1 p-2 text-center"
@@ -108,7 +108,7 @@ export function ChartGroup({
               <span className="text-xs orca-text-muted">
                 {String((c.payload as { title?: string }).title ?? "") || c.identity}
               </span>
-              <span className="text-[10px] orca-text-faint">加载全部后显示</span>
+              <span className="text-[10px] orca-text-faint">后台加载中…</span>
             </div>
           ))}
           {visuals.map((c) =>

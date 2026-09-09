@@ -284,6 +284,12 @@ export interface WorkflowState {
   serverOverview: ServerOverview | null;
   /** writable=false（attached run，read-only）→ gate 模态禁提交（SPEC §8 AC11）。 */
   writable: boolean;
+  /**
+   * 窗口态自动后台全量（2026-09-09 用户拍板：取消手动「加载全部」）。
+   * true = loadRunWithMeta 提交窗口态后自动触发 loadFull(background)。
+   * 配置位非 run 态（unloadRun 不清）；测试经 resetStore 置 false 保证窗口态断言确定性。
+   */
+  autoFullLoad: boolean;
   /** huge 模式（/meta 判定）：tail + 增量 prepend + ``load full`` 按钮。 */
   huge: boolean;
   /** huge 模式下当前窗口的最旧 seq（用于 ``?since=oldest-M`` 增量 prepend）。 */
@@ -301,16 +307,21 @@ export interface WorkflowState {
   /** 懒加载：GET /api/runs/<id>/events → _refoldAndCommit。SPEC audit-c：失败 fail loud（写 loadError + 退避重试）。 */
   loadRun: (runId: string) => Promise<void>;
   /**
-   * SPEC web-attach §3 huge-mode 入口：先 GET /meta → 据 huge 置信息位。
-   * - huge 与否都 GET /events 全量 → loadFromEvents（用户偏好：huge 不弹 gate，直接加载）。
-   *   huge 标记仍置位（"大 run" 信息位），但 hugeFullyLoaded 恒 true → 占位/按钮分支不触发。
-   *   loadEarlierChunk/loadFull 留作 huge-tail 场景预留能力（当前未接 UI）。
+   * web-perf P3 入口：先 GET /meta → 首屏一律 ``?tail=TAIL_WINDOW`` 窗口。
+   * - 满窗（截断）→ 窗口态（hugeFullyLoaded=false + serverOverview）+ **自动后台全量**
+   *   （2026-09-09：``autoFullLoad`` 时触发 ``loadFull(background)``，取消手动「加载全部」；
+   *   占位目录在后台全量到位前先行展示）。
+   * - 未满窗 = 全量：行为与旧全量加载等价（``hugeFullyLoaded=true``、窗口顶 1）。
    */
   loadRunWithMeta: (runId: string) => Promise<void>;
   /** huge 模式增量 prepend：fetch ``?since=oldest-M&limit=M`` → 与既有 events 合并 fold。 */
   loadEarlierChunk: (runId: string, chunkSize: number) => Promise<boolean>;
-  /** huge 模式 ``load full``：拉全量 + clear serverOverview（M4：可 client-fold 校验）。 */
-  loadFull: (runId: string) => Promise<void>;
+  /**
+   * 拉全量 events → client-fold + clear serverOverview（M4：可 client-fold 校验）。
+   * ``opts.background``（2026-09-09 自动全量）：不翻 loadStatus——首屏窗口内容保持可读，
+   * 不闪加载态；失败路径（writeLoadError）与前台模式一致（fail loud）。
+   */
+  loadFull: (runId: string, opts?: { background?: boolean }) => Promise<void>;
   /** 卸载当前 run 的派生态（懒加载红线：切走清，不累积）。 */
   unloadRun: () => void;
   /**
@@ -907,6 +918,7 @@ export const useWorkflowStore = create<WorkflowState>()(
     oldestSeqInWindow: 0,
     newestSeqInWindow: 0,
     hugeFullyLoaded: true, // 非 huge 模式视同已 full load
+    autoFullLoad: true, // 窗口态自动后台全量（默认开；测试经 resetStore 关）
 
     // SPEC audit-c §4.1：loader 错误态（UI 交互态，非 fold 派生，M19）
     loadStatus: "idle", // 初始 idle（M18）
@@ -1092,6 +1104,13 @@ export const useWorkflowStore = create<WorkflowState>()(
               : {}),
           });
         });
+        // 2026-09-09 自动后台全量（取消手动「加载全部」）：首屏窗口已提交（秒开），
+        // 紧接着静默拉全量 refold——成功后占位目录自动替换为真实 chart/doc。
+        // background 模式不翻 loadStatus；失败走 writeLoadError（RunLoadError 显式重试）。
+        // 本 try 的 finally 只删 initial entry（epoch 校验），不影响 background entry。
+        if (windowed && get().autoFullLoad) {
+          void get().loadFull(runId, { background: true });
+        }
       } catch (err) {
         writeLoadError(get, set, runId, myEpoch, err as LoadError);
       } finally {
@@ -1171,19 +1190,25 @@ export const useWorkflowStore = create<WorkflowState>()(
     },
 
     /**
-     * huge 模式 ``load full``：拉全量 events → client-fold + clear serverOverview（M4：
+     * ``load full``：拉全量 events → client-fold + clear serverOverview（M4：
      * 客户端可经此校验服务端 overview 派生与 client-fold 一致）。``hugeFullyLoaded=true``。
      *
-     * SPEC audit-c §4.1：失败**不清 serverOverview**（保留原 huge 状态）+ 写错误态；
+     * ``opts.background``（2026-09-09 自动全量）：loadRunWithMeta 窗口态提交后自动触发
+     * ——**不翻 loadStatus**（首屏窗口内容保持可读，不闪加载态）；其余语义（abort-all、
+     * 原子提交、失败路径）与前台模式一致。
+     *
+     * SPEC audit-c §4.1：失败**不清 serverOverview**（保留原窗口态）+ 写错误态；
      * 原子提交同 loadRun/loadRunWithMeta。
      */
-    loadFull: async (runId) => {
+    loadFull: async (runId, opts) => {
       moduleEpoch++;
       const myEpoch = moduleEpoch;
       abortAllInflight();
       const entry: InflightEntry = { abort: new AbortController(), timer: null, epoch: myEpoch };
       inflightLoads.set(runId, entry);
-      set({ loadStatus: "loading", loadError: null, retryCount: 0, historyLoadError: false });
+      if (!opts?.background) {
+        set({ loadStatus: "loading", loadError: null, retryCount: 0, historyLoadError: false });
+      }
 
       try {
         const events = (await fetchEventsWithBackoff(
@@ -1194,10 +1219,12 @@ export const useWorkflowStore = create<WorkflowState>()(
         if (get().activeRunId !== null && get().activeRunId !== runId) return;
         if (moduleEpoch !== myEpoch) return;
         set((state) => {
-          // 保留 huge=true（loadFull 在 huge 模式触发）；只清 serverOverview + hugeFullyLoaded=true
+          // 保留 huge=true（loadFull 在窗口态触发）；清 serverOverview + hugeFullyLoaded=true
+          // + 窗口顶回整 1（「全量 = 窗口顶 1」簿记不变式，同 resume-fallback 回整）
           _refoldAndCommit(state, runId, events, {
             hugeFullyLoaded: true,
             serverOverview: null,
+            oldestSeqInWindow: 1,
           });
         });
       } catch (err) {

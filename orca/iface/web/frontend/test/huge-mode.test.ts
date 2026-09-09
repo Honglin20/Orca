@@ -75,6 +75,131 @@ describe("huge-mode + writable (web-attach Step1)", () => {
     vi.unstubAllGlobals();
   });
 
+  // 2026-09-09 自动后台全量（取消手动「加载全部」）：满窗提交后自动 loadFull(background)
+  // → 首屏窗口秒开不受影响，全量到位后占位目录自动替换（hugeFullyLoaded=true）。
+  it("loadRunWithMeta：满窗 + autoFullLoad → 自动后台 loadFull（窗口秒开 → 全量 refold 收口）", async () => {
+    useWorkflowStore.setState({ autoFullLoad: true });
+    const tailWindow: WebEvent[] = [];
+    for (let i = 501; i <= 1000; i++) {
+      tailWindow.push(
+        makeEvent("agent_message", { seq: i, node: "A", data: { text: "x" } }),
+      );
+    }
+    const full: WebEvent[] = [
+      makeEvent("workflow_started", { seq: 1, data: { workflow_name: "big" } }),
+      ...tailWindow,
+    ];
+    const meta = {
+      run_id: "r-big",
+      status: "running" as const,
+      source: "attached" as const,
+      event_count: 1000,
+      byte_size: 500_000,
+      oldest_seq: 1,
+      newest_seq: 1000,
+      writable: true,
+      huge: false,
+      overview: {
+        agents: [],
+        charts: [{ label: "g1", title: "loss", chart_type: "line" }],
+        cost_usd: 0,
+        run_status: "running",
+      },
+    };
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.endsWith("/meta")) {
+        return Promise.resolve({ ok: true, json: async () => meta });
+      }
+      if (url.endsWith("/events?tail=500")) {
+        return Promise.resolve({ ok: true, json: async () => tailWindow });
+      }
+      if (url.endsWith("/events")) {
+        return Promise.resolve({ ok: true, json: async () => full });
+      }
+      return Promise.resolve({ ok: false, status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+
+    await useWorkflowStore.getState().loadRunWithMeta("r-big");
+
+    // 后台全量收口：serverOverview 清 + hugeFullyLoaded=true + events=全量 501 条
+    await vi.waitFor(() => {
+      expect(useWorkflowStore.getState().hugeFullyLoaded).toBe(true);
+    });
+    const s = useWorkflowStore.getState();
+    expect(s.serverOverview).toBeNull();
+    expect(s.events.length).toBe(501);
+    expect(s.oldestSeqInWindow).toBe(1);
+    expect(s.loadStatus).toBe("loaded"); // background 不翻错误/加载态
+    // 两次 events fetch：首屏 tail + 后台全量
+    expect(
+      fetchMock.mock.calls.filter((c) => String(c[0]).includes("/events")).length,
+    ).toBe(2);
+    vi.unstubAllGlobals();
+  });
+
+  // C-1（code-review）：background loadFull **失败**路径——loadStatus 从 "loaded" 直落
+  // "error"（全程不经过 "loading"，不闪加载态）；失败不清窗口态（SPEC audit-c §4.1：
+  // 保留 serverOverview + hugeFullyLoaded=false）。
+  it("loadRunWithMeta：autoFullLoad + 后台全量 3 连败 → 落错误态但窗口态保留（不闪 loading）", async () => {
+    useWorkflowStore.setState({ autoFullLoad: true });
+    const tailWindow: WebEvent[] = [];
+    for (let i = 501; i <= 1000; i++) {
+      tailWindow.push(
+        makeEvent("agent_message", { seq: i, node: "A", data: { text: "x" } }),
+      );
+    }
+    const meta = {
+      run_id: "r-big",
+      status: "running" as const,
+      source: "attached" as const,
+      event_count: 1000,
+      byte_size: 500_000,
+      oldest_seq: 1,
+      newest_seq: 1000,
+      writable: true,
+      huge: false,
+      overview: {
+        agents: [],
+        charts: [{ label: "g1", title: "loss", chart_type: "line" }],
+        cost_usd: 0,
+        run_status: "running",
+      },
+    };
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.endsWith("/meta")) {
+        return Promise.resolve({ ok: true, json: async () => meta });
+      }
+      if (url.endsWith("/events?tail=500")) {
+        return Promise.resolve({ ok: true, json: async () => tailWindow });
+      }
+      // 后台全量 URL 恒 500（fetchEventsWithBackoff 3 次重试全败）
+      return Promise.resolve({ ok: false, status: 500 });
+    });
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+
+    await useWorkflowStore.getState().loadRunWithMeta("r-big");
+
+    // 全量仍在后台退避重试中（backoff 1s+2s 未走完）→ 首屏窗口保持可读、未闪 loading
+    const duringFlight = useWorkflowStore.getState();
+    expect(duringFlight.loadStatus).toBe("loaded");
+    expect(duringFlight.hugeFullyLoaded).toBe(false);
+
+    // 终态：writeLoadError → 显式错误（RunLoadError 重试入口），窗口态保留不清
+    await vi.waitFor(
+      () => {
+        expect(useWorkflowStore.getState().loadStatus).toBe("error");
+      },
+      { timeout: 10_000 }
+    );
+    const s = useWorkflowStore.getState();
+    expect(s.loadError?.kind).toBe("http");
+    expect(s.serverOverview).not.toBeNull();
+    expect(s.hugeFullyLoaded).toBe(false);
+    expect(s.events.length).toBe(500); // 窗口内容未被破坏
+    vi.unstubAllGlobals();
+  });
+
   it("loadRunWithMeta：huge=false + 未满窗 → 全量等价（hugeFullyLoaded=true + serverOverview null）", async () => {
     const events: WebEvent[] = [
       makeEvent("workflow_started", { seq: 1, data: { workflow_name: "smol" } }),

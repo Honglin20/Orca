@@ -556,8 +556,9 @@ function selectChartsFrom(
   hugeFullyLoaded: boolean
 ): { groups: { group: string; entries: ChartEntry[] }[] } {
   // SPEC web-attach §3 / M3：窗口态 + serverOverview → 信任服务端 fold（仅 label/title/
-  // chart_type 清单，无完整 payload）→ 渲染为占位 entry（点击触发 ``loadFull`` 拉真实 payload）。
-  // ``loadFull`` 后 serverOverview 清，回退 client-fold（M4 可验：与展开后一致）。
+  // chart_type 清单，无完整 payload）→ 渲染为占位 entry（后台自动 ``loadFull`` 到位后
+  // 替换为真实 payload）。``loadFull`` 后 serverOverview 清，回退 client-fold（M4 可验：
+  // 与展开后一致）。
   if (serverOverview && !hugeFullyLoaded) {
     const entries: ChartEntry[] = serverOverview.charts.map((c, i) => ({
       seq: -i - 1, // 负 seq 占位（避免与真实 seq 冲突；loadFull 后清）

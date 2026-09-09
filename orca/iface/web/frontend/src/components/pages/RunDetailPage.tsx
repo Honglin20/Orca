@@ -164,8 +164,9 @@ export function RunDetailPage() {
                       {tab === "charts" && <ChartsView />}
                       {/* showDocsTab 双保险：跨 run 切换 tab state 残留 "docs" 时不渲染面板 */}
                       {tab === "docs" && showDocsTab && (
-                        // B4：文档面板独占页签（不再与图表区同栏挤占）
-                        <div className="flex h-full flex-col overflow-auto">
+                        // B4：文档面板独占页签（不再与图表区同栏挤占）。
+                        // 2026-09-09 左右分栏：容器不滚，清单/正文两栏各自滚动。
+                        <div className="flex h-full overflow-hidden">
                           <ProfOptDocsPanel runId={runId} />
                         </div>
                       )}

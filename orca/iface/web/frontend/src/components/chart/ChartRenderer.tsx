@@ -12,6 +12,7 @@
 // per-identity（MINOR-5，huge→full identity 变化允许 remount）；ChartGroup key=identity（E3）。
 
 import { useMemo } from "react";
+import { Loader2 } from "lucide-react";
 import { useWorkflowStore, untitledChartWarned } from "@/stores/workflow-store";
 import { selectCharts, DOCS_LABEL, type ChartEntry } from "@/selectors";
 import { ChartGroup } from "./ChartGroup";
@@ -42,8 +43,8 @@ interface PartitionOutput {
  * - partition 内联 ``chart_type`` / ``data-is-array`` 校验，valid 直接 cast，rejected 收集。
  * - **huge 模式目录占位（placeholder）不 reject**（SPEC web-attach §3 M3）：serverOverview
  *   charts 清单只有 label/title/chart_type，无 data——不是 INV-5 schema 漂移，是服务端
- *   fold 的目录。单独 placeholders 桶渲染占位卡 + load-full 恢复（根治「773 个 chart 数据
- *   格式异常」误报）。
+ *   fold 的目录。单独 placeholders 桶渲染占位卡，后台自动 load-full 到位后替换（根治
+ *   「773 个 chart 数据格式异常」误报）。
  * - **无 title chart dev warn-once-per-identity**（MINOR-5）：huge 模式 identity=
  *   ``chart_type#index`` vs full 模式 ``chart_type#seq``，跨 huge→full identity 变化 →
  *   React remount（允许）+ dev warn。模块级 ``untitledChartWarned: Set<identity>`` 防 spam。
@@ -91,13 +92,12 @@ function partitionCharts(
 
 export function ChartRenderer({ nodeId }: ChartRendererProps) {
   // 订阅收窄（SPEC 2026-08-28 C4.4，取消全 store 订阅）。字段清单：events/
-  // serverOverview/hugeFullyLoaded 是 selectCharts 全部输入；activeRunId + loadFull
-  // 供窗口态 load-full 按钮（漏订 activeRunId → 按钮静默失效）。
+  // serverOverview/hugeFullyLoaded 是 selectCharts 全部输入。
+  // （2026-09-09 自动后台全量：窗口态不再有 load-full 按钮——loadRunWithMeta 提交
+  // 窗口后自动 loadFull(background)，占位目录在真实数据到位前先行展示。）
   const events = useWorkflowStore((s) => s.events);
   const serverOverview = useWorkflowStore((s) => s.serverOverview);
   const hugeFullyLoaded = useWorkflowStore((s) => s.hugeFullyLoaded);
-  const activeRunId = useWorkflowStore((s) => s.activeRunId);
-  const loadFull = useWorkflowStore((s) => s.loadFull);
   const { groups } = useMemo(
     () => selectCharts._from(events, serverOverview, hugeFullyLoaded),
     [events, serverOverview, hugeFullyLoaded]
@@ -141,8 +141,9 @@ export function ChartRenderer({ nodeId }: ChartRendererProps) {
     );
   }
 
-  // 窗口态（serverOverview 目录占位在）→ 渲染目录 + load full 恢复入口
-  // （web-perf P3：非 huge 的截断 run 同样走此通道，huge 不再是前提）
+  // 窗口态（serverOverview 目录占位在）→ 渲染目录 + 后台全量提示
+  // （web-perf P3：非 huge 的截断 run 同样走此通道，huge 不再是前提；
+  // 2026-09-09 起后台自动拉全量——到位后 serverOverview 清，本条自然消失）
   const isWindowed = !hugeFullyLoaded && serverOverview !== null;
 
   return (
@@ -169,23 +170,19 @@ export function ChartRenderer({ nodeId }: ChartRendererProps) {
       )}
       {isWindowed && totalPlaceholders > 0 && (
         <div
-          className="border orca-border orca-bg-surface rounded p-2 text-xs orca-text-muted"
+          className="border orca-border orca-bg-surface flex items-center gap-2 rounded p-2 text-xs orca-text-muted"
           data-testid="huge-charts-placeholder"
         >
+          <Loader2
+            size={12}
+            strokeWidth={1.5}
+            className="animate-spin shrink-0"
+            aria-hidden
+          />
           <p>
-            已按窗口加载（首屏仅最近事件）：图表仅显示目录（{totalPlaceholders} 张），
-            完整数据需拉取全部事件。
+            首屏按窗口加载：图表先显示目录（{totalPlaceholders} 张），
+            完整事件后台拉取中，到位后自动替换。
           </p>
-          <button
-            type="button"
-            onClick={() => {
-              if (activeRunId) void loadFull(activeRunId);
-            }}
-            data-testid="load-full-btn"
-            className="mt-1 rounded border orca-border px-2 py-0.5 orca-text-muted hover:orca-bg-surface-2"
-          >
-            加载全部（拉取完整事件，大 run 可能较慢）
-          </button>
         </div>
       )}
       {partitioned.map(({ group, partitioned: p }) =>

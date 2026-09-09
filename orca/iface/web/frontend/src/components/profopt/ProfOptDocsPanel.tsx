@@ -1,9 +1,13 @@
-// components/profopt/ProfOptDocsPanel.tsx —— prof-opt「文档」页签面板（web SPEC §3 +
-// 2026-09-07 B4 重构）。
+// components/profopt/ProfOptDocsPanel.tsx —— prof-opt「文档」页签面板（web SPEC §3）。
 //
 // 数据流（铁律 1+5：selectors 是唯一 view 输入）：
 //   chart socket → store.events → selectDocRowsWithContent（selectors 层合并跨推送
-//   content，R-1）→ 本面板按组分区渲染**图标卡片网格** → 点卡片 → 面板内正文预览。
+//   content，R-1）→ 本面板按组分区渲染**单行清单**（左栏）→ 点行 → 右栏正文预览。
+//
+// 布局（2026-09-09 用户拍板）：**左右分栏**——左栏固定宽清单（按 基线/变体/轮次/规则
+// 分区，独立滚动），右栏渲染选中文档正文（占满剩余高，独立滚动）。清单项为单行：
+// 13px 线性类型图标 + 纯文件名（truncate）+ 短时间戳（可选）+ 状态点；完整 path 进
+// hover title（button 与文件名 span 双落点——截断的长文件名恰是 hover 高频位）。
 //
 // 正文三态（B4/C3）：
 //   1. 行 content 非空（本推自带或历史合并）→ 直接渲染，**零请求**（异机可见——
@@ -18,9 +22,8 @@
 // （parseDocManifest/docGroupOf）在 selectors.ts；中文组名（GROUP_ORDER）留展示层。
 //
 // 分组（web §3.1：基线 / 变体按轮序 / 轮次按 Round N 子区 / 规则）从行内容确定性
-// 派生；变体组内按 vid 归卡（docs-variant-card-<vid>），组内文件渲染为竖排图标
-// 卡片网格（2026-09-09 B 方案：32px 彩色类型徽章 M↓/{ } + 纯文件名 + 状态点 +
-// 可选短时间戳；完整 path 进 hover title）。
+// 派生；变体组内按 vid 归子组（docs-variant-card-<vid>，子组头带状态文本），轮次组
+// 归「Round N」可折叠子区（数字升序）。
 //
 // 只读与白名单（web §5）：面板只消费清单内相对 path，唯一网络请求是 GET artifacts
 // 端点（且仅 legacy 三态走它），无任何写入口。markdown 内相对图片改写为 artifacts
@@ -32,7 +35,13 @@
 // 计数，与 ChartRenderer chart-schema-warning 同模式），合法行照常渲染。
 
 import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, FileText, Loader2 } from "lucide-react";
+import {
+  Braces,
+  ChevronDown,
+  ChevronRight,
+  FileText,
+  Loader2,
+} from "lucide-react";
 import { useWorkflowStore } from "@/stores/workflow-store";
 import {
   selectDocRowsWithContent,
@@ -52,37 +61,27 @@ const GROUP_ORDER: { key: DocGroupKey; label: string }[] = [
   { key: "rules", label: "规则" },
 ];
 
-/** 图标卡片网格（非一行一行）：auto-fill 自适应列，竖排卡片最小 150px。 */
-const CARD_GRID_CLASS =
-  "grid gap-1.5 [grid-template-columns:repeat(auto-fill,minmax(150px,1fr))]";
+/** 分组 / 子组共用的小节头（DRY：基线、变体 vid 子组、规则四处同款）。 */
+function GroupLabel({ text }: { text: string }) {
+  return (
+    <p className="orca-text-faint mb-1 px-1.5 text-[11px] font-medium">{text}</p>
+  );
+}
 
 /**
- * 文件类型徽章（2026-09-09 用户拍板 B 方案：文件管理器风竖排图标卡）。
- * 实底色 + 白色单字，替代旧 14px 灰色线性图标；未知扩展灰底 FileText 兜底
- * （清单白名单只有 .md/.json，防御 payload 漂移时不崩样式）。
+ * 文件类型线性图标（单行清单项前缀）。未知扩展 FileText 兜底（清单白名单只有
+ * .md/.json，防御 payload 漂移时不崩样式）。
  */
-const TYPE_BADGES: Record<string, { cls: string; glyph: string }> = {
-  md: { cls: "bg-blue-600", glyph: "M↓" },
-  json: { cls: "bg-amber-600", glyph: "{ }" },
-};
-
-function DocTypeBadge({ path }: { path: string }) {
+function DocTypeIcon({ path }: { path: string }) {
   const ext = path.toLowerCase().split(".").pop() ?? "";
-  const badge = TYPE_BADGES[ext];
-  if (!badge) {
-    return (
-      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-slate-500 text-white">
-        <FileText size={14} strokeWidth={1.5} aria-hidden />
-      </span>
-    );
-  }
+  const Icon = ext === "json" ? Braces : FileText;
   return (
-    <span
-      className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-[11px] font-bold text-white ${badge.cls}`}
+    <Icon
+      size={13}
+      strokeWidth={1.5}
+      className="orca-text-faint shrink-0"
       aria-hidden
-    >
-      {badge.glyph}
-    </span>
+    />
   );
 }
 
@@ -140,7 +139,7 @@ export function rewriteDocImages(
     .join("");
 }
 
-/** 状态徽标配色：success 绿、含 fail/insufficient 红、其余中性（B4：状态点沿用）。 */
+/** 状态徽标配色：success 绿、含 fail/insufficient 红、其余中性（状态点/状态文本沿用）。 */
 function statusClass(status: string): string {
   if (status === "success") return "text-emerald-600";
   if (status.includes("fail") || status.includes("insufficient")) {
@@ -170,7 +169,7 @@ export function ProfOptDocsPanel({ runId }: { runId: string }) {
     [rows]
   );
 
-  // 分组 + 变体按 vid 归卡（自然序 = 轮序：r1-01 < r2-01 < r10-01）
+  // 分组 + 变体按 vid 归子组（自然序 = 轮序：r1-01 < r2-01 < r10-01）
   // + 轮次按 docRoundNoOf 归「Round N」子区（数字升序；不匹配 rounds/<N>/ 形状
   // 的行落入 roundMisc 照常渲染——不静默隐藏任何清单行）。
   const grouped = useMemo(() => {
@@ -207,7 +206,6 @@ export function ProfOptDocsPanel({ runId }: { runId: string }) {
     return { byGroup, byVid, vids, byRound, roundNos, roundMisc };
   }, [rows]);
 
-  const [open, setOpen] = useState(true);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [content, setContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -277,37 +275,37 @@ export function ProfOptDocsPanel({ runId }: { runId: string }) {
 
   return (
     <section
-      className="orca-border border-b"
+      className="orca-bg-app flex h-full min-h-0 w-full"
       data-testid="profopt-docs-panel"
     >
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="orca-text-muted hover:orca-text flex w-full items-center gap-1 px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide"
-        data-testid="profopt-docs-toggle"
-      >
-        {open ? (
-          <ChevronDown size={12} strokeWidth={1.5} aria-hidden />
-        ) : (
-          <ChevronRight size={12} strokeWidth={1.5} aria-hidden />
-        )}
-        分析文档（prof-opt）
-      </button>
-      {open && (
-        <div className="max-h-[70vh] overflow-auto px-3 pb-2">
+      {/* 左：清单（固定宽，独立滚动） */}
+      <aside className="orca-border orca-bg-surface flex w-72 shrink-0 flex-col overflow-y-auto border-r">
+        <div className="orca-border orca-text-muted shrink-0 border-b px-3 py-2 text-xs font-semibold uppercase tracking-wide">
+          分析文档
+        </div>
+        <nav className="px-1.5 py-2">
           {placeholder ? (
-            <p className="text-xs orca-text-faint" data-testid="docs-huge-hint">
-              超大 run：需「加载全部」后才能查看文档清单。
+            <p
+              className="orca-text-faint flex items-center gap-1.5 px-1.5 text-xs"
+              data-testid="docs-huge-hint"
+            >
+              <Loader2
+                size={12}
+                strokeWidth={1.5}
+                className="animate-spin shrink-0"
+                aria-hidden
+              />
+              完整清单后台拉取中…
             </p>
           ) : empty ? (
-            <p className="text-xs orca-text-faint" data-testid="docs-empty">
+            <p className="orca-text-faint px-1.5 text-xs" data-testid="docs-empty">
               暂无分析文档清单（prof-opt run 推送后显示）。
             </p>
           ) : (
             <>
               {malformed && (
                 <p
-                  className="mb-1 text-xs orca-text-failed"
+                  className="orca-text-failed mb-1 px-1.5 text-xs"
                   data-testid="docs-schema-warning"
                 >
                   ⚠️ 清单 payload 缺 data 数组（后端 schema 漂移？）
@@ -315,7 +313,7 @@ export function ProfOptDocsPanel({ runId }: { runId: string }) {
               )}
               {invalid > 0 && (
                 <p
-                  className="mb-1 text-xs orca-text-failed"
+                  className="orca-text-failed mb-1 px-1.5 text-xs"
                   data-testid="docs-schema-warning"
                 >
                   ⚠️ {invalid} 个清单行缺 path 或 vid（后端 schema 漂移？）
@@ -325,33 +323,35 @@ export function ProfOptDocsPanel({ runId }: { runId: string }) {
                 if (key === "variants") {
                   if (grouped.vids.length === 0) return null;
                   return (
-                    <div key={key} className="mb-2" data-testid={`docs-group-${key}`}>
-                      <p className="orca-text-faint mb-1 text-[11px] font-medium">
-                        {label}
-                      </p>
+                    <div
+                      key={key}
+                      className="mb-3"
+                      data-testid={`docs-group-${key}`}
+                    >
+                      <GroupLabel text={label} />
                       {grouped.vids.map((vid) => {
                         const vidRows = grouped.byVid.get(vid) ?? [];
-                        // 卡片级徽标取该 vid 首行 status（假设同 vid 文档状态一致，
-                        // 契约未保证；行级徽标始终各自显示、为准）。
+                        // 子组头状态取该 vid 首行 status（假设同 vid 文档状态一致，
+                        // 契约未保证；行级状态点始终各自显示、为准）。
                         const st = vidRows[0]?.status ?? "";
                         return (
                           <div
                             key={vid}
-                            className="orca-border orca-bg-surface mb-1 rounded p-1.5"
+                            className="mb-2"
                             data-testid={`docs-variant-card-${vid}`}
                           >
-                            <p className="flex items-center gap-2 text-xs">
-                              <span className="font-medium">{vid}</span>
-                              <span className={`text-[10px] ${statusClass(st)}`}>
+                            <p className="orca-text-faint mb-0.5 flex items-center gap-1.5 px-1.5 text-[11px]">
+                              <span className="orca-text-muted font-medium">
+                                {vid}
+                              </span>
+                              <span
+                                className={`text-[10px] ${statusClass(st)}`}
+                                title={st}
+                              >
                                 ● {st}
                               </span>
                             </p>
-                            <DocCardGrid
-                              className="mt-1"
-                              rows={vidRows}
-                              selection={selection}
-                              onSelect={setSelection}
-                            />
+                            <DocList rows={vidRows} selection={selection} onSelect={setSelection} />
                           </div>
                         );
                       })}
@@ -367,12 +367,10 @@ export function ProfOptDocsPanel({ runId }: { runId: string }) {
                   return (
                     <div
                       key={key}
-                      className="mb-2"
+                      className="mb-3"
                       data-testid="docs-group-rounds"
                     >
-                      <p className="orca-text-faint mb-1 text-[11px] font-medium">
-                        {label}
-                      </p>
+                      <GroupLabel text={label} />
                       {grouped.roundNos.map((no) => (
                         <RoundSection
                           key={no}
@@ -385,7 +383,7 @@ export function ProfOptDocsPanel({ runId }: { runId: string }) {
                       {grouped.roundMisc.length > 0 && (
                         // 非 rounds/<N>/ 形状的轮次组行：照常渲染，testid 锚定
                         // 「不静默丢行」契约（docs-round-misc）。
-                        <DocCardGrid
+                        <DocList
                           className="mt-1"
                           testid="docs-round-misc"
                           rows={grouped.roundMisc}
@@ -399,68 +397,78 @@ export function ProfOptDocsPanel({ runId }: { runId: string }) {
                 const groupRows = grouped.byGroup.get(key) ?? [];
                 if (groupRows.length === 0) return null;
                 return (
-                  <div key={key} className="mb-2" data-testid={`docs-group-${key}`}>
-                    <p className="orca-text-faint mb-1 text-[11px] font-medium">
-                      {label}
-                    </p>
-                    <DocCardGrid
-                      rows={groupRows}
-                      selection={selection}
-                      onSelect={setSelection}
-                    />
+                  <div
+                    key={key}
+                    className="mb-3"
+                    data-testid={`docs-group-${key}`}
+                  >
+                    <GroupLabel text={label} />
+                    <DocList rows={groupRows} selection={selection} onSelect={setSelection} />
                   </div>
                 );
               })}
             </>
           )}
-        </div>
-      )}
-      {(selection || loading || error) && (
-        <div className="orca-border border-t px-3 py-2">
-          <p
-            className="orca-text-muted mb-1 truncate text-[11px] font-medium"
-            title={selection?.path}
-            data-testid="doc-selected-name"
-          >
-            {selection?.name}
-          </p>
-          <div className="max-h-96 overflow-auto">
-            {loading ? (
-              <p
-                className="orca-text-faint flex items-center gap-1 text-xs"
-                data-testid="doc-loading"
-              >
-                <Loader2 size={12} strokeWidth={1.5} className="animate-spin" aria-hidden />
-                拉取文档…
-              </p>
-            ) : body != null && selection ? (
-              isMarkdown ? (
-                <MarkdownText>
-                  {rewriteDocImages(body, selection.path, runId)}
-                </MarkdownText>
-              ) : (
-                <FileContentView content={body} filePath={selection.path} />
-              )
-            ) : omitted ? (
-              <p
-                className="text-xs orca-text-faint"
-                data-testid="doc-omitted"
-              >
-                内容过大或本批未推送，仅清单可读。
-              </p>
-            ) : error ? (
-              <p className="text-xs orca-text-failed" data-testid="doc-fetch-error">
-                {error}
-              </p>
-            ) : null}
+        </nav>
+      </aside>
+      {/* 右：正文（占满剩余高，独立滚动） */}
+      <div className="flex min-w-0 flex-1 flex-col">
+        {(selection || loading || error) ? (
+          <>
+            <div
+              className="orca-border orca-text-muted shrink-0 truncate border-b px-3 py-2 text-xs font-medium"
+              title={selection?.path}
+              data-testid="doc-selected-name"
+            >
+              {selection?.name}
+            </div>
+            <div className="flex-1 overflow-auto p-4">
+              {loading ? (
+                <p
+                  className="orca-text-faint flex items-center gap-1 text-xs"
+                  data-testid="doc-loading"
+                >
+                  <Loader2
+                    size={12}
+                    strokeWidth={1.5}
+                    className="animate-spin"
+                    aria-hidden
+                  />
+                  拉取文档…
+                </p>
+              ) : body != null && selection ? (
+                isMarkdown ? (
+                  <MarkdownText>
+                    {rewriteDocImages(body, selection.path, runId)}
+                  </MarkdownText>
+                ) : (
+                  <FileContentView content={body} filePath={selection.path} />
+                )
+              ) : omitted ? (
+                <p
+                  className="orca-text-faint text-xs"
+                  data-testid="doc-omitted"
+                >
+                  内容过大或本批未推送，仅清单可读。
+                </p>
+              ) : error ? (
+                <p className="orca-text-failed text-xs" data-testid="doc-fetch-error">
+                  {error}
+                </p>
+              ) : null}
+            </div>
+          </>
+        ) : (
+          <div className="orca-text-faint flex h-full items-center justify-center px-4 text-center text-xs">
+            左侧选择文档查看内容
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </section>
   );
 }
 
-/** 轮次子区（Round N，可折叠；默认展开）：N 为数字升序，组内竖排图标卡。 */
+/** 轮次子区（Round N，可折叠；默认展开）：N 为数字升序，组内单行清单。 */
 function RoundSection({
   no,
   rows,
@@ -475,11 +483,11 @@ function RoundSection({
   // 折叠仅 UI 交互态（非业务真相，铁律 2），与 ChartGroup 同模式。
   const [open, setOpen] = useState(true);
   return (
-    <div className="mb-1.5" data-testid={`docs-round-${no}`}>
+    <div className="mb-2" data-testid={`docs-round-${no}`}>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="orca-text-muted hover:orca-text flex w-full items-center gap-1 py-1 text-left text-xs font-medium"
+        className="orca-text-muted hover:orca-text flex w-full items-center gap-1 px-1.5 py-0.5 text-left text-xs font-medium"
         data-testid={`docs-round-toggle-${no}`}
       >
         {open ? (
@@ -491,8 +499,8 @@ function RoundSection({
         <span className="orca-text-faint text-[10px]">{rows.length} 份</span>
       </button>
       {open && (
-        <DocCardGrid
-          className="mt-1"
+        <DocList
+          className="mt-0.5"
           rows={rows}
           selection={selection}
           onSelect={onSelect}
@@ -502,8 +510,8 @@ function RoundSection({
   );
 }
 
-/** 文档卡片网格（DRY：基线/变体内层/轮次子区/roundMisc 四处共用同一接线）。 */
-function DocCardGrid({
+/** 清单列表（DRY：基线/变体内层/轮次子区/roundMisc 四处共用同一接线）。 */
+function DocList({
   rows,
   selection,
   onSelect,
@@ -517,12 +525,9 @@ function DocCardGrid({
   testid?: string;
 }) {
   return (
-    <div
-      className={className ? `${className} ${CARD_GRID_CLASS}` : CARD_GRID_CLASS}
-      data-testid={testid}
-    >
+    <div className={className} data-testid={testid}>
       {rows.map((row) => (
-        <DocItemCard
+        <DocItemRow
           key={row.path}
           row={row}
           active={selection?.path === row.path}
@@ -534,12 +539,11 @@ function DocCardGrid({
 }
 
 /**
- * 单个文档卡片（2026-09-09 B 方案竖排图标卡）：32px 类型徽章 + 文件名 +
- * 状态点 + 可选短时间戳。显示名一律 ``row.doc``（纯文件名；轮次分 Round 子区后
- * 不再需要旧的 path 消歧 workaround），完整相对 path 进 hover title（button 与
- * 文件名 span 双落点——截断的长文件名恰是 hover 高频位）。
+ * 单个清单行（单行行卡）：类型图标 + 纯文件名（truncate）+ 短时间戳（可选）+
+ * 状态点。显示名一律 ``row.doc``；完整相对 path 进 hover title（button 与文件名
+ * span 双落点——截断的长文件名恰是 hover 高频位），完整 ISO 时间进时间戳 title。
  */
-function DocItemCard({
+function DocItemRow({
   row,
   active,
   onSelect,
@@ -554,25 +558,28 @@ function DocItemCard({
       onClick={() => onSelect({ path: row.path, name: row.doc })}
       title={row.path}
       data-testid="doc-item"
-      className={`orca-border orca-bg-surface flex flex-col items-center gap-1 rounded px-2 py-2.5 text-center text-xs hover:orca-bg-surface-2 ${
-        active ? "orca-border-accent orca-accent" : ""
+      className={`orca-text-muted hover:orca-bg-surface-2 hover:orca-text flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs ${
+        active ? "orca-bg-surface-2 orca-accent font-medium" : ""
       }`}
     >
-      <DocTypeBadge path={row.path} />
-      <span className="w-full truncate" title={row.path}>
+      <DocTypeIcon path={row.path} />
+      <span className="min-w-0 flex-1 truncate" title={row.path}>
         {row.doc}
       </span>
-      <span
-        className={`text-[10px] ${statusClass(row.status)}`}
-        title={row.status}
-      >
-        ● {row.status}
-      </span>
       {row.updated_at ? (
-        <span className="orca-text-faint text-[9px]" title={row.updated_at}>
+        <span
+          className="orca-text-faint shrink-0 text-[9px]"
+          title={row.updated_at}
+        >
           {shortTime(row.updated_at)}
         </span>
       ) : null}
+      <span
+        className={`shrink-0 text-[10px] ${statusClass(row.status)}`}
+        title={row.status}
+      >
+        ●
+      </span>
     </button>
   );
 }
