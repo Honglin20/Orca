@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-09-09] fix(prof-opt): 谱系闸——parent 必须过 accuracy 门 + 时延优化（commit `0c1457f`）
+
+远程实测发现 propose 谱系叠加（accuracy_fail 变体被后续轮次认作 parent 连败）；根因是写层零校验 + emit 校验属 LLM 自觉执行。修复：`expected_base` 唯一真相源 + `append_impl_row` 写层机械闸（rc 2，LLM 无法绕过、零落盘）+ 6 文件 prompt 死端规则硬化。新增 4 用例；po 三套件 209 passed（4 失败 worktree 对照实证存量）；tars validate 零 warning。详见 [release note](../releases/2026-09-09-po-lineage-gate.md)。
+
 ## [2026-09-09] feat(web): prof-opt 文档面板轮次子分组 + 文件管理器风图标卡片（commit `8049302`）
 
 用户三反馈收口：轮次组按 `docRoundNoOf` 拆「Round N」可折叠子区；卡片改显纯文件名（完整 path 进 hover title，错误信息同步带 path 可定位）；B 方案竖排图标卡（32px 彩色类型徽章 M↓/{ }）。code-reviewer 1 MAJOR + 3 MINOR 全闭环。vitest 55/55（受影响套件）/ tsc clean / static 已重建。详见 [release note](../releases/2026-09-09-profopt-docs-round-cards.md)。
