@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-09-09] feat(web): 大 run 取消手动「加载全部」+ 文档面板左右分栏（commit `6845833`）
+
+用户两反馈收口：窗口态满窗提交后自动后台 `loadFull(background)`——不翻 loadStatus、首屏秒开保持可读，占位目录自动替换为真实 chart/doc（store 新增 `autoFullLoad` 配置位；失败走 RunLoadError fail loud）；文档面板上下堆叠改**左右分栏**（左清单/右正文独立滚动），32px 徽章竖排卡改单行清单行（线性图标+文件名+时间戳+状态点），分组与正文三态零改动、testid 全保留。code-reviewer C-1（失败路径测试）闭环；已知限制：straggler 竞态恢复仅限刷新（resume 补不回中间缺口，已落档）。vitest 受影响套件 175/175 / tsc clean / static 重建。详见 [release note](../releases/2026-09-09-web-docs-split-auto-full-load.md)。
+
 ## [2026-09-09] fix(win): Windows 原生兼容——chart TCP 分支 + flock shim + 探活零杀伤 + 熔断限流（commits `4a00177` + `083cfa0`）
 
 Windows 原生实测诊断后的全链修复（sdd-loop 全流程，spec 评审 2 轮 + 1 次 SPEC-LOOP 回退 + E2E 两轮）：chart 传输 win32 走 TCP + port sidecar（POSIX Unix socket 零改动）+ crash 熔断（消除 90s 40 万次重起饿死事件循环）；`orca` CLI fcntl→shim 解锁；`tars ps/wait/logs` 解锁并消灭「探活变杀进程」；CLI UTF-8。WSL 661 passed 证 Linux 零回归；E2E 验收 1-3 重测全 PASS。挂账 5 项（含 in-session inline-chart 跨平台自死锁）。详见 [release note](../releases/2026-09-09-windows-native-compat.md)。
