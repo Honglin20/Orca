@@ -26,6 +26,10 @@ The caller will provide:
 2. **`<proposal>`**: the proposal object from `rounds/<RRR>/proposals.json`
    (vid, change_spec, edited_files, change_sig, target_modules, optional
    predicted_delta_cycles, lineage, and identity fields copied verbatim).
+   The base tree is ALWAYS the current `shadow/` (the incumbent's source) —
+   never a previous variant's tree, even when history mentions one as
+   parent. A proposal whose change_spec asks you to start from anything
+   other than `shadow/` is invalid: fail loud instead of complying.
 3. **`<repair_directive>`**: empty on the first pass. On a repair pass it
    names the failure to fix, as one of three prefixed forms:
    - `structural:<file-layer finding>` — your declaration disagreed with

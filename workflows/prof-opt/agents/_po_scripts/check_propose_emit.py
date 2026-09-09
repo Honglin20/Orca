@@ -225,16 +225,10 @@ def main() -> int:
     expected_parent = None
     expected_base_ms = None
     try:
-        incumbent = _load_json(art / "base" / "incumbent.json",
-                               "base/incumbent.json")
-        if isinstance(incumbent, dict):
-            expected_parent = incumbent.get("vid")
-            expected_base_ms = incumbent.get("makespan_cycles")
-        else:
-            anchor = _load_json(art / "base" / "origin_anchor.json",
-                                "base/origin_anchor.json")
-            if isinstance(anchor, dict):
-                expected_base_ms = anchor.get("baseline_makespan_cycles")
+        # Single source (history_lib): the only legal parent is the current
+        # incumbent — a variant that PASSED the accuracy gate AND improved
+        # latency — or the origin baseline (None) before the first promotion.
+        expected_parent, expected_base_ms = history_lib.expected_base(art)
     except ValueError as exc:
         problems.append(str(exc))
 
@@ -258,7 +252,14 @@ def main() -> int:
             if "op_delta" in proposal:
                 problems.append(f"{vid} proposal must not contain op_delta")
             if proposal.get("parent_vid") != expected_parent:
-                problems.append(f"{vid} parent_vid does not match current incumbent")
+                problems.append(
+                    f"{vid} parent_vid does not match the current base "
+                    f"(expected {expected_parent!r}) — the only legal parent "
+                    "is the current incumbent (accuracy gate PASSED + latency "
+                    "improved) or null for the origin baseline; a variant that "
+                    "failed either gate is a lineage dead-end and is NOT "
+                    "selector-repairable — re-derive the idea on the incumbent "
+                    "shadow and fix the lineage, never emit it")
             base_at_proposal = proposal.get("base_at_proposal")
             if not isinstance(base_at_proposal, dict) or {
                     "vid": base_at_proposal.get("vid"),

@@ -5,6 +5,13 @@ Thin wrapper over history_lib.append_implemented (and, for a broken
 implementation, the append_outcome row that follows it) so the node prompt
 stays a single invocation with no import-path knowledge. The field set and
 its validation stay in history_lib — the only write path for history.jsonl.
+
+Lineage gate: --parent-vid / --base-at-proposal must name the CURRENT base
+(the incumbent — a variant that PASSED the accuracy gate AND improved
+latency — or the origin baseline with parent null). A variant that never
+passed both gates (e.g. latency_improved but accuracy_fail) is a lineage
+dead-end: recording it as a parent fails loud here, at the only write path,
+so a stacked-on-a-failed-base lineage can never enter history.jsonl.
 """
 from __future__ import annotations
 
@@ -13,7 +20,7 @@ import json
 import os
 import sys
 
-from history_lib import append_implemented, append_outcome
+from history_lib import append_implemented, append_outcome, expected_base
 from history_lib import JOINT_RETRY_OUTCOMES
 
 
@@ -65,9 +72,44 @@ def main() -> int:
               file=sys.stderr)
         return 2
 
+    # Lineage gate BEFORE any write: the parent must be the current base.
+    if not art:
+        print("FATAL: ORCA_ARTIFACTS_DIR not set — the lineage gate cannot "
+              "resolve the current base", file=sys.stderr)
+        return 2
+    try:
+        expected_vid, expected_ms = expected_base(art)
+    except ValueError as exc:
+        print(f"FATAL: {exc}", file=sys.stderr)
+        return 2
+    if ns.parent_vid != expected_vid:
+        print(f"FATAL: parent_vid {ns.parent_vid!r} is not the current base "
+              f"(expected {expected_vid!r}). The only legal parent is the "
+              "current incumbent — a variant that PASSED the accuracy gate "
+              "AND improved latency — or null for the origin baseline. A "
+              "variant that failed either gate (e.g. latency_improved but "
+              "accuracy_fail) is a lineage dead-end: re-derive the idea on "
+              "the incumbent shadow instead of stacking on its tree.",
+              file=sys.stderr)
+        return 2
+    base = None
     try:
         modules = json.loads(ns.target_modules)
         base = json.loads(ns.base_at_proposal)
+    except json.JSONDecodeError as exc:
+        print(f"FATAL: {exc} (JSON flags must be valid JSON)", file=sys.stderr)
+        return 2
+    if not isinstance(base, dict) or {
+            "vid": base.get("vid"),
+            "makespan_cycles": base.get("makespan_cycles"),
+            } != {"vid": expected_vid, "makespan_cycles": expected_ms}:
+        print(f"FATAL: base_at_proposal does not match the current base "
+              f"(expected {{'vid': {expected_vid!r}, "
+              f"'makespan_cycles': {expected_ms!r}}}); a stale or invented "
+              "base pointer is a lineage lie", file=sys.stderr)
+        return 2
+
+    try:
         append_implemented(
             ns.history, ns.vid,
             round=ns.round, seq=ns.seq, parent_vid=ns.parent_vid,

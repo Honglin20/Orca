@@ -242,6 +242,64 @@ def read_latest(path: str | Path) -> dict[str, dict[str, Any]]:
     return latest
 
 
+# ── lineage anchor (proposal parent eligibility) ─────────────────────────────
+
+def expected_base(artifacts: str | Path) -> tuple[str | None, int]:
+    """The ONLY legal proposal lineage anchor: ``(vid, makespan_cycles)`` of
+    the current incumbent, or ``(None, baseline_makespan_cycles)`` while no
+    variant has ever been promoted.
+
+    This function IS the parent-eligibility rule, mechanically: incumbent.json
+    is written only by promote_incumbent, whose candidate set is
+    ``outcome == "success"`` rows (accuracy gate PASSED) with a strictly lower
+    makespan than the previous base (latency improved). A
+    latency_improved-but-accuracy-failed variant is therefore a lineage
+    dead-end — it can never satisfy this anchor, so it can never become a
+    parent.
+
+    Raises ValueError on a missing/malformed anchor or incumbent (fail loud —
+    a torn incumbent must never silently downgrade the anchor to the origin
+    baseline).
+    """
+    art = Path(artifacts)
+    incumbent_path = art / "base" / "incumbent.json"
+    if incumbent_path.is_file():
+        try:
+            doc = json.loads(incumbent_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"base/incumbent.json unparseable: {exc}") from exc
+        if not isinstance(doc, dict):
+            raise ValueError("base/incumbent.json is not a JSON object")
+        vid, ms = doc.get("vid"), doc.get("makespan_cycles")
+        if not isinstance(vid, str) or not vid:
+            raise ValueError(
+                f"base/incumbent.json carries invalid vid: {vid!r}")
+        if isinstance(ms, bool) or not isinstance(ms, int) or ms < 0:
+            raise ValueError(
+                "base/incumbent.json carries invalid makespan_cycles: "
+                f"{ms!r}")
+        return vid, ms
+    anchor_path = art / "base" / "origin_anchor.json"
+    try:
+        doc = json.loads(anchor_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError(
+            "no base/incumbent.json and no base/origin_anchor.json — the "
+            "baseline stage has not frozen the origin anchor") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"base/origin_anchor.json unparseable: {exc}") from exc
+    if not isinstance(doc, dict):
+        raise ValueError("base/origin_anchor.json is not a JSON object")
+    ms = doc.get("baseline_makespan_cycles")
+    if isinstance(ms, bool) or not isinstance(ms, int) or ms < 0:
+        raise ValueError(
+            "base/origin_anchor.json carries invalid "
+            f"baseline_makespan_cycles: {ms!r}")
+    return None, ms
+
+
 # ── dedup ────────────────────────────────────────────────────────────────────
 
 def dedup_state(path: str | Path, change_sig: str,

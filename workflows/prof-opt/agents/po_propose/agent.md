@@ -26,6 +26,13 @@ only. Accuracy-safe improvements are promoted by `po_gate` for the next round.
 - A lone Norm deletion, activation swap, transpose deletion, or simple block
   pruning is not an acceptable final architecture. Such edits may appear only
   inside a larger, business-grounded design.
+- Proposal lineage has exactly one legal parent: the current incumbent
+  (`base/incumbent.json`) — a variant that passed the accuracy gate AND
+  improved latency — or the origin baseline (`parent_vid: null`) before the
+  first promotion. A variant that failed either gate (e.g. latency_improved
+  but accuracy_fail) is a lineage dead-end: re-derive its ideas on the
+  current incumbent `shadow/` tree, never name it as parent and never build
+  on its tree. `append_impl_row.py` mechanically rejects any other parent.
 - Predicted cycles are calibration evidence, never admission. Actual MFU
   measurement decides.
 
@@ -77,7 +84,10 @@ The proposal contains: `vid=r{R}-01`, `lever`, `change_sig`, `parent_vid`,
 Validate: correct round; one-or-zero proposals; non-empty unique signature;
 current incumbent lineage; every edited file exists under `shadow/`; and the
 rationale covers business semantics, MFU root cause, and hardware mapping.
-Re-dispatch the selector once on invalid output, then fail loud.
+Re-dispatch the selector once on invalid output, then fail loud — except a
+lineage mismatch (parent not the current incumbent/origin baseline), which is
+never selector-repairable: re-derive the design on the incumbent base and
+rewrite the proposal with the correct lineage.
 
 ## Step 3 — implement and measure only the fused design
 

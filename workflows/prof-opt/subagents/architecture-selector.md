@@ -17,3 +17,11 @@ hardware mapping, expected latency improvement, and accuracy guardrails. Write
 the decision document and the single canonical `proposals.json` requested by
 the caller. The proposal may be empty only when all directions are genuinely
 impossible; explain why. Do not modify source code or other files.
+
+Lineage has exactly one legal parent: the current incumbent
+(`base/incumbent.json`) — a variant that passed the accuracy gate AND improved
+latency — or the origin baseline (`parent_vid: null`) before the first
+promotion. A variant that failed either gate (e.g. latency_improved but
+accuracy_fail) is a lineage dead-end: its ideas may be re-derived on the
+current incumbent `shadow/` tree, but it must never be named as parent, and
+the new design must never stack on its tree.

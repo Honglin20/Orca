@@ -143,6 +143,99 @@ def test_history_cli_surface(tmp_path: Path):
     assert "--probe-max-steps" in stale.stderr
 
 
+# ── lineage gate: proposal parent eligibility ─────────────────────────────────
+# Parent rule (mechanical): the ONLY legal parent is the current incumbent —
+# a variant that PASSED the accuracy gate AND improved latency — or null for
+# the origin baseline. A variant that failed either gate (e.g.
+# latency_improved but accuracy_fail) is a lineage dead-end: append_impl_row
+# must reject it at the write path, before any history row lands.
+
+_LINEAGE_ANCHOR_MS = 1000
+
+
+def _lineage_artifacts(tmp_path: Path, *,
+                       incumbent: dict | None) -> Path:
+    art = tmp_path / "art"
+    (art / "base").mkdir(parents=True)
+    (art / "base" / "origin_anchor.json").write_text(json.dumps({
+        "baseline_makespan_cycles": _LINEAGE_ANCHOR_MS,
+        "latency_reduction_min": 0.5, "accuracy_budget": 0.1,
+        "target_cycles": 501, "frozen_at_round": 0}), encoding="utf-8")
+    if incumbent is not None:
+        (art / "base" / "incumbent.json").write_text(
+            json.dumps(incumbent), encoding="utf-8")
+    return art
+
+
+def _append_impl(art: Path, hist: Path, parent_vid: str | None,
+                 base_at_proposal: dict) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(_SCRIPTS / "append_impl_row.py"),
+         "--history", str(hist), "--vid", "r2-01", "--round", "2",
+         "--seq", "1",
+         "--parent-vid", "null" if parent_vid is None else parent_vid,
+         "--change-sig", "sig:x", "--probe-epochs", "1",
+         "--target-modules", '["m"]',
+         "--base-at-proposal", json.dumps(base_at_proposal)],
+        capture_output=True, text=True, timeout=60,
+        env={**os.environ, "ORCA_ARTIFACTS_DIR": str(art)})
+
+
+def test_lineage_gate_accepts_incumbent_parent(tmp_path: Path):
+    """incumbent r1-01（过精度门 + 时延更优）做 parent → 放行且行内谱系正确。"""
+    art = _lineage_artifacts(
+        tmp_path, incumbent={"vid": "r1-01", "makespan_cycles": 800,
+                             "parent_vid": None, "promoted_round": 1,
+                             "change_sig": "sig:a"})
+    hist = art / "history.jsonl"
+    proc = _append_impl(art, hist, "r1-01",
+                        {"vid": "r1-01", "makespan_cycles": 800})
+    assert proc.returncode == 0, proc.stderr
+    row = json.loads(hist.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["parent_vid"] == "r1-01"
+    assert row["base_at_proposal"] == {"vid": "r1-01", "makespan_cycles": 800}
+
+
+def test_lineage_gate_rejects_accuracy_failed_parent(tmp_path: Path):
+    """r1-01 时延改善但 accuracy_fail（从未晋升，incumbent 缺位）→ 想认它当爹
+    必须在写层被拒，且不落任何 history 行（死端不可入谱）。"""
+    art = _lineage_artifacts(tmp_path, incumbent=None)
+    hist = art / "history.jsonl"
+    proc = _append_impl(art, hist, "r1-01",
+                        {"vid": "r1-01", "makespan_cycles": 800})
+    assert proc.returncode == 2
+    assert "lineage dead-end" in proc.stderr
+    assert not hist.exists()
+
+
+def test_lineage_gate_rejects_stale_base_pointer(tmp_path: Path):
+    """parent vid 对但 base_at_proposal 还指 origin 锚 → 谱系谎言，拒绝。"""
+    art = _lineage_artifacts(
+        tmp_path, incumbent={"vid": "r1-01", "makespan_cycles": 800,
+                             "parent_vid": None, "promoted_round": 1,
+                             "change_sig": "sig:a"})
+    hist = art / "history.jsonl"
+    proc = _append_impl(art, hist, "r1-01",
+                        {"vid": None, "makespan_cycles": _LINEAGE_ANCHOR_MS})
+    assert proc.returncode == 2
+    assert "base_at_proposal" in proc.stderr
+    assert not hist.exists()
+
+
+def test_expected_base_prefers_incumbent_and_fails_loud_when_torn(tmp_path: Path):
+    """expected_base：incumbent 优先于锚；incumbent 撕裂必须 fail loud
+    （静默降级回锚点 = 把晋升过的事实抹掉）。"""
+    art = _lineage_artifacts(
+        tmp_path, incumbent={"vid": "r1-01", "makespan_cycles": 800})
+    assert history_lib.expected_base(art) == ("r1-01", 800)
+    (art / "base" / "incumbent.json").write_text("{broken", encoding="utf-8")
+    with pytest.raises(ValueError, match="unparseable"):
+        history_lib.expected_base(art)
+    art_no_promo = _lineage_artifacts(tmp_path / "b", incumbent=None)
+    assert history_lib.expected_base(art_no_promo) == (
+        None, _LINEAGE_ANCHOR_MS)
+
+
 # ── gate_decide: loop continuation + anchor invariant ─────────────────────────
 
 _GATE_BASE_MAKESPAN = 1000  # fixture baseline; anchor ratio 0.5 -> target 501
@@ -2057,6 +2150,14 @@ def _push_env(art: Path, sock: Path | None,
     return env
 
 
+# ``_chart_server`` stub 绑 AF_UNIX Unix socket：win32 无 AF_UNIX → 用它的 8 个测试
+# skip（spec 2026-09-08 skipif 清点；rx-sweep / po-scripts 非 Windows 验证面）。
+_requires_unix_socket = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="AF_UNIX chart stub（rx-sweep po-scripts 非 Windows 验证面）",
+)
+
+
 def _push(art: Path, sock: Path | None, *extra: str,
           run_id: str | None = None):
     return subprocess.run(
@@ -2125,6 +2226,7 @@ def test_push_curves_missing_sock_is_silent_exit_zero(tmp_path: Path):
     assert not (art / ".chart_push.log").exists()   # no push -> no audit line
 
 
+@_requires_unix_socket
 def test_push_curves_pushes_one_chart_and_audits(tmp_path: Path):
     art = _push_ws(tmp_path)
     sock = tmp_path / "chart.sock"
@@ -2164,6 +2266,7 @@ def test_push_curves_pushes_one_chart_and_audits(tmp_path: Path):
         encoding="utf-8").splitlines()) == 2
 
 
+@_requires_unix_socket
 def test_push_curves_title_suffix_and_half_written_rows(tmp_path: Path):
     art = _push_ws(tmp_path)
     # half-written tail row (flush mid-write) must be skipped, not crash
@@ -2184,6 +2287,7 @@ def test_push_curves_title_suffix_and_half_written_rows(tmp_path: Path):
     assert audit["baseline_epochs"] == 2
 
 
+@_requires_unix_socket
 def test_push_curves_ack_timeout_never_hangs(tmp_path: Path):
     """A chart daemon that accepts but never acks must be abandoned within
     the 5s hard timeout — the sidecar exits 0, the worker never waits."""
@@ -2235,6 +2339,7 @@ def _po_ws(tmp_path: Path) -> Path:
     return art
 
 
+@_requires_unix_socket
 def test_push_curves_top10_selection_strategy(tmp_path: Path):
     """§10.1 three-branch selection: ① in-flight by most recent update first,
     ② terminal success next, ③ the rest by ascending gap (null last, vid as
@@ -2295,6 +2400,7 @@ def test_push_curves_top10_selection_strategy(tmp_path: Path):
             "metrics.jsonl").is_file()
 
 
+@_requires_unix_socket
 def test_push_curves_pareto_payload(tmp_path: Path):
     """§10.2 every variant one point: x = reduction vs the origin-anchor
     baseline makespan (negative = slower), y = final gap (metric fallback,
@@ -2358,6 +2464,7 @@ def test_push_curves_pareto_payload(tmp_path: Path):
                for row in pareto["data"])
 
 
+@_requires_unix_socket
 def test_push_curves_docs_manifest_whitelist_and_columns(tmp_path: Path):
     """§10.4 the docs table: canonical columns vid/doc/status/path
     (+updated_at), paths ONLY from the constructed artifacts-relative
@@ -2440,6 +2547,7 @@ def test_push_curves_docs_manifest_whitelist_and_columns(tmp_path: Path):
         assert row2["content_omitted"] == ""
 
 
+@_requires_unix_socket
 def test_push_curves_w3_joint_three_charts_idempotent(tmp_path: Path):
     """W3-T1 联调（web §6.3-1 后端侧）：一次 ``--docs`` 推送三图齐全——line
     （§10.1 top-10）/ pareto（§10.2 全量 + C2 baseline 锚点，y=null 占位**保持

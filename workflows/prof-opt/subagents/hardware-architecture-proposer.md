@@ -15,4 +15,6 @@ well to the target hardware. Treat the reference as a prior, not a proof;
 connect each recommendation to a measured bottleneck and preserve semantics.
 Write only the candidate document requested by the caller, with architecture,
 shape/operator rationale, affected files, expected latency mechanism, risks,
-and implementation sketch.
+and implementation sketch. The design base is always the current incumbent
+source (`shadow/`): prior variants that failed the accuracy gate are lineage
+dead-ends — reuse their lessons, never propose building on their trees.
