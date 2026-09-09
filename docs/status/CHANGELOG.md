@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-09-09] fix(win): Windows 原生兼容——chart TCP 分支 + flock shim + 探活零杀伤 + 熔断限流（commits `4a00177` + `083cfa0`）
+
+Windows 原生实测诊断后的全链修复（sdd-loop 全流程，spec 评审 2 轮 + 1 次 SPEC-LOOP 回退 + E2E 两轮）：chart 传输 win32 走 TCP + port sidecar（POSIX Unix socket 零改动）+ crash 熔断（消除 90s 40 万次重起饿死事件循环）；`orca` CLI fcntl→shim 解锁；`tars ps/wait/logs` 解锁并消灭「探活变杀进程」；CLI UTF-8。WSL 661 passed 证 Linux 零回归；E2E 验收 1-3 重测全 PASS。挂账 5 项（含 in-session inline-chart 跨平台自死锁）。详见 [release note](../releases/2026-09-09-windows-native-compat.md)。
+
 ## [2026-09-09] fix(prof-opt): 谱系闸——parent 必须过 accuracy 门 + 时延优化（commit `0c1457f`）
 
 远程实测发现 propose 谱系叠加（accuracy_fail 变体被后续轮次认作 parent 连败）；根因是写层零校验 + emit 校验属 LLM 自觉执行。修复：`expected_base` 唯一真相源 + `append_impl_row` 写层机械闸（rc 2，LLM 无法绕过、零落盘）+ 6 文件 prompt 死端规则硬化。新增 4 用例；po 三套件 209 passed（4 失败 worktree 对照实证存量）；tars validate 零 warning。详见 [release note](../releases/2026-09-09-po-lineage-gate.md)。
