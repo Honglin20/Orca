@@ -25,6 +25,17 @@ the training entry is contract-templated and physically outside the shadow
 closure an edit can reach, and a hyperparameter "change" produces an empty
 op delta that the strictly-negative admission gate rejects anyway.
 
+Depth is frozen: the network's stage/block/repeat count is a FROZEN axis,
+never a tuning knob. Depth-scaling entries (the retired D1 deeper-narrower /
+D2 shallower-wider capacity redistribution) are removed from this catalog —
+adding, removing, merging, or re-stacking blocks to make the network deeper
+or shallower is hyperparameter search, not a structural breakthrough, and is
+illegal at every proposal surface. This workflow seeks structural
+breakthroughs: wiring, operator organization, and information flow within
+the frozen stage count. Provably-redundant micro-module removal (C2 op
+pairs, N2/N3 norms) is exempt — it deletes proven redundancy, not capacity
+stages.
+
 Accuracy-risk grades (one vocabulary, everywhere): `low` (mathematically
 identical or recovered almost always), `medium` (usually recovered by a
 fresh training), `high` (may need the full training budget or may not
@@ -64,7 +75,7 @@ proposer never uses ONNX as the model-design input.
 | `LayerNormalization` (fused) or `ReduceMean`/`Sub`/`Pow`/`Sqrt`/`Div` chains, `ReduceL2` norm chains | 算力利用率 / 子图串行化 (reduction + division barriers mid-path) | N1-N3 |
 | `Transpose`/`Reshape`/`Cast`/`Concat`/`Split` pairs, small-shape elementwise swarms | 小算子碎片 / DMA 搬运 | C2 |
 | `Softmax` (fused or `ReduceMax`+`Sub`+`Exp`+`ReduceSum`+`Div`), score `MatMul`/`Transpose` clusters | 算子碎片 / 子图串行化 | C1, S1 |
-| `MatMul`/`Gemm` in a latency-dominant shape class | 算力利用率 (shape pricing) | D1, D2, F1, F2 |
+| `MatMul`/`Gemm` in a latency-dominant shape class | 算力利用率 (shape pricing) | F1, F2 |
 | Long dependent chains of cheap elementwise/reduction ops | 子图串行化 | S2 |
 
 ---
@@ -248,42 +259,7 @@ addresses 算力利用率; mid-path barriers also feed 子图串行化.)
 
 ---
 
-## Lever 4 — Capacity redistribution
-
-These entries change width/depth while preserving the model's input/output
-contract. Justified only when profiling shows a matrix-multiply shape class
-is latency-dominant and the target hardware prices tall/narrow or
-short/wide shapes inefficiently. (Typically addresses 算力利用率 in
-shape pricing.)
-
-### D1. Deeper-narrower block
-
-- **Template**: replace a block whose dominant `MatMul` output shape is wide
-  with narrower blocks of near-equal total capacity (e.g. `Linear(d, 4d) ->
-  Linear(4d, d)` becomes two `d -> 2d -> d` residual sub-blocks) when the
-  profile shows the smaller shape class is materially cheaper per MAC.
-- **Trigger ops**: hot `MatMul`/`Gemm` rows in a poorly priced shape class
-  plus a cost-table ratio showing the narrower decomposition lowers cycles.
-- **Accuracy risk**: medium for a near-capacity redistribution; high when
-  capacity changes materially.
-- **References**: MobileNet width multipliers (Howard, 2017); EfficientNet
-  compound scaling (Tan & Le, 2019).
-
-### D2. Shallower-wider block
-
-- **Template**: collapse repeated shallow blocks into one wider block when
-  per-block movement/reduction overhead dominates and the fused shape stays
-  hardware-efficient.
-- **Trigger ops**: repeated subgraph overhead, high movement/reduction
-  share, and an actual graph pattern proving consumers allow fusion.
-  Root-cause affinity: 小算子碎片 / 子图串行化 of repeated blocks.
-- **Accuracy risk**: medium.
-- **References**: mobile CNN/transformer designs: removing sequential
-  overhead helps only when representational width is retained.
-
----
-
-## Lever 5 — Projection factorization
+## Lever 4 — Projection factorization
 
 ### F1. Low-rank projection
 
@@ -308,7 +284,7 @@ shape pricing.)
 
 ---
 
-## Lever 6 — Score-path restructuring
+## Lever 5 — Score-path restructuring
 
 ### S1. Linear/low-rank attention score path
 

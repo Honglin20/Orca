@@ -464,8 +464,33 @@ def test_architecture_first_prompt_contract_is_pinned():
     assert "latency_improved" in propose
     assert "must not contain `op_delta`" in propose
     assert not (root / "subagents" / "structure-proposer.md").exists()
-    assert (root / "agents" / "po_propose" / "references" / "hardware"
-            / "ascend.md").is_file()
+    # the shared hardware reference lives once, under subagents/ (the agent
+    # dispatch and every proposer read it from there)
+    assert (root / "subagents" / "references" / "ascend.md").is_file()
+
+
+def test_depth_freeze_is_pinned_across_the_propose_pipeline():
+    """The depth axis is frozen (user directive 2026-09-09): the rule must
+    ride every proposal-generating/reviewing surface, and the retired
+    depth-scaling entries (D1/D2) must be gone from the levers catalog."""
+    root = _REPO / "workflows" / "prof-opt"
+    surfaces = [
+        root / "agents" / "po_propose" / "agent.md",
+        root / "subagents" / "semantic-architecture-proposer.md",
+        root / "subagents" / "hardware-architecture-proposer.md",
+        root / "subagents" / "sota-architecture-proposer.md",
+        root / "subagents" / "architecture-selector.md",
+        root / "subagents" / "variant-assessor.md",
+        root / "agents" / "po_propose" / "references" / "structural-levers.md",
+    ]
+    for path in surfaces:
+        assert "Depth is frozen" in path.read_text(encoding="utf-8"), \
+            f"depth-freeze rule missing: {path.name}"
+    catalog = (root / "agents" / "po_propose" / "references"
+               / "structural-levers.md").read_text(encoding="utf-8")
+    for gone in ("Deeper-narrower", "Shallower-wider",
+                 "Capacity redistribution", "D1.", "D2."):
+        assert gone not in catalog, f"retired depth lever remains: {gone}"
 
 
 # ── gate idle exit (§8) ────────────────────────────────────────────────────────

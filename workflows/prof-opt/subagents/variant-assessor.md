@@ -91,6 +91,10 @@ document path. The file, not the return text, is the authoritative artifact.
 
 - **Modification scope**: write ONLY `<doc_path>`. Never modify the shadow
   trees, `contracts.json`, `history.jsonl`, or anything else in the workspace.
+- **Depth is frozen**: if the variant's source changes the stage/block/repeat
+  count against the base tree, that change is out of scope for this workflow
+  regardless of its latency result — say so explicitly in `## 与基线差异`
+  (the caller reads that section to reject the variant).
 - **Zero fabricated numbers**: no cycle counts, no accuracy figures —
   mechanical numbers live in the profiling report and the ledger; this
   document reasons about semantics and information.

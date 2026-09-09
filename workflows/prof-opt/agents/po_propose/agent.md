@@ -26,6 +26,13 @@ only. Accuracy-safe improvements are promoted by `po_gate` for the next round.
 - A lone Norm deletion, activation swap, transpose deletion, or simple block
   pruning is not an acceptable final architecture. Such edits may appear only
   inside a larger, business-grounded design.
+- Depth is frozen. The network's stage/block/repeat count is never a tuning
+  knob: any proposal that adds, removes, merges, or re-stacks blocks —
+  making the network deeper or shallower — is illegal, whatever the
+  predicted gain. This workflow seeks structural breakthroughs (wiring,
+  operator organization, information flow), not depth-style scaling search.
+  Provably-redundant micro-module removal (a cancelling op pair, a
+  redundant norm) is not a depth change.
 - Proposal lineage has exactly one legal parent: the current incumbent
   (`base/incumbent.json`) — a variant that passed the accuracy gate AND
   improved latency — or the origin baseline (`parent_vid: null`) before the
@@ -82,8 +89,10 @@ The proposal contains: `vid=r{R}-01`, `lever`, `change_sig`, `parent_vid`,
 `build_sig.py` and `history_lib.py` for signature and dedup.
 
 Validate: correct round; one-or-zero proposals; non-empty unique signature;
-current incumbent lineage; every edited file exists under `shadow/`; and the
-rationale covers business semantics, MFU root cause, and hardware mapping.
+current incumbent lineage; every edited file exists under `shadow/`; the
+change preserves the incumbent's depth (no block/layer/repeat-count change —
+see the frozen-depth invariant); and the rationale covers business
+semantics, MFU root cause, and hardware mapping.
 Re-dispatch the selector once on invalid output, then fail loud — except a
 lineage mismatch (parent not the current incumbent/origin baseline), which is
 never selector-repairable: re-derive the design on the incumbent base and
