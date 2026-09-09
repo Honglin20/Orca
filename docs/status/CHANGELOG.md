@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-09-09] feat(prof-opt): po_propose 每轮随 emit 门推送 docs manifest（commit `8636a8a`）
+
+用户真机 round 2 仍只见 baseline 文档：`--docs` 确定性触发点只有 baseline 首推 + report 终推两处，agent.md 里的推送软指令无命令支撑从未生效。修复：`check_propose_emit` 校验全过后随门 best-effort 推送（fail-soft 不阻塞 emit，拒绝路径不推，exhausted 轮也覆盖），触发点扩为三处；spec 新增 §5.6。新增 3 面用例 + tars validate 零 warning；3 个失败为 CURRENT.md 挂账 HEAD 既有。详见 [release note](../releases/2026-09-09-po-per-round-docs-push.md)。
+
 ## [2026-09-09] feat(web): 大 run 取消手动「加载全部」+ 文档面板左右分栏（commit `6845833`）
 
 用户两反馈收口：窗口态满窗提交后自动后台 `loadFull(background)`——不翻 loadStatus、首屏秒开保持可读，占位目录自动替换为真实 chart/doc（store 新增 `autoFullLoad` 配置位；失败走 RunLoadError fail loud）；文档面板上下堆叠改**左右分栏**（左清单/右正文独立滚动），32px 徽章竖排卡改单行清单行（线性图标+文件名+时间戳+状态点），分组与正文三态零改动、testid 全保留。code-reviewer C-1（失败路径测试）闭环；已知限制：straggler 竞态恢复仅限刷新（resume 补不回中间缺口，已落档）。vitest 受影响套件 175/175 / tsc clean / static 重建。详见 [release note](../releases/2026-09-09-web-docs-split-auto-full-load.md)。
