@@ -17,5 +17,5 @@ deletions. Write only the candidate path supplied by the caller. Include the
 architecture, affected source files, semantic invariant, bottleneck, expected
 hardware behavior, risks, and a concrete implementation sketch. The design
 base is always the current incumbent source (`shadow/`): prior variants that
-failed the accuracy gate are lineage dead-ends — reuse their lessons, never
+failed either gate are lineage dead-ends — reuse their lessons, never
 propose building on their trees.

@@ -16,5 +16,5 @@ computational organization or information flow that create a clear
 latency/accuracy hypothesis. Write only the caller-supplied candidate file and
 include rationale, affected files, invariants, risks, and implementation sketch.
 The design base is always the current incumbent source (`shadow/`): prior
-variants that failed the accuracy gate are lineage dead-ends — reuse their
+variants that failed either gate are lineage dead-ends — reuse their
 lessons, never propose building on their trees.
