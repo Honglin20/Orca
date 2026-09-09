@@ -120,11 +120,17 @@ describe("W2-T3a 清单分组（web §6.2-1）", () => {
     expect(card.textContent).toContain("business_logic.md");
     expect(card.textContent).toContain("latency_fail");
     expect(screen.getByTestId("docs-variant-card-r1-01").textContent).toContain("success");
-    // 轮次（doc 同名 analysis.md → 全 path 显示消歧）+ 规则组（S-9 快照 path）
-    expect(screen.getByTestId("docs-group-rounds").textContent).toContain("rounds/002/analysis.md");
+    // 轮次：Round 2 子区 + 纯文件名显示（完整 path 收进 card title 属性）
+    expect(screen.getByTestId("docs-round-2").textContent).toContain("Round 2");
+    expect(screen.getByTestId("docs-round-2").textContent).toContain("analysis.md");
+    expect(
+      screen
+        .getAllByTestId("doc-item")
+        .find((el) => el.getAttribute("title") === "rounds/002/analysis.md")
+    ).toBeDefined();
     expect(screen.getByTestId("docs-group-rules").textContent).toContain("accuracy_rules_snapshot.json");
-    // updated_at 显示；缺省行不显示（不造假值 → 组内仅 1 个时间串）
-    expect(screen.getByTestId("docs-group-baseline").textContent).toContain("2026-08-31T10:00:00");
+    // updated_at 显示（压成 YYYY-MM-DD HH:MM）；缺省行不显示（不造假值 → 组内仅 1 个时间串）
+    expect(screen.getByTestId("docs-group-baseline").textContent).toContain("2026-08-31 10:00");
     // 不渲染正文（点开前无 markdown 容器）
     expect(screen.queryByTestId("file-content-view")).toBeNull();
   });
@@ -187,6 +193,29 @@ describe("W2-T3a 清单分组（web §6.2-1）", () => {
       "docs-variant-card-r2-01",
       "docs-variant-card-r10-01",
     ]);
+  });
+
+  test("轮次按 Round N 子区分组（数字升序、组间不串）；非 rounds/<N>/ 形状行不隐藏", () => {
+    setup([
+      { vid: "round", doc: "architecture_decision.md", status: "final", path: "rounds/002/architecture_decision.md" },
+      { vid: "round", doc: "analysis.md", status: "final", path: "rounds/001/analysis.md" },
+      { vid: "round", doc: "semantic.md", status: "candidate", path: "rounds/002/candidates/semantic.md" },
+      { vid: "round", doc: "analysis.md", status: "final", path: "rounds/002/analysis.md" },
+      { vid: "round", doc: "summary.md", status: "final", path: "rounds/summary.md" },
+    ]);
+    // 子区按轮次号拆开：001 行不进 Round 2，002 行不进 Round 1（同名 analysis.md 各归各轮）
+    expect(screen.getByTestId("docs-round-1").textContent).toContain("analysis.md");
+    expect(screen.getByTestId("docs-round-1").textContent).not.toContain("architecture_decision.md");
+    expect(screen.getByTestId("docs-round-2").textContent).toContain("architecture_decision.md");
+    const round1Cards = Array.from(
+      screen.getByTestId("docs-round-1").querySelectorAll("[data-testid=doc-item]")
+    );
+    expect(round1Cards.map((c) => c.getAttribute("title"))).toEqual(["rounds/001/analysis.md"]);
+    // 不匹配 rounds/<N>/ 的行落入 misc 网格（不静默丢，且不混进任何 Round 子区）
+    expect(screen.getByTestId("docs-round-misc").textContent).toContain("summary.md");
+    expect(screen.getByTestId("docs-round-2").textContent).not.toContain("summary.md");
+    // 显示名 = 纯文件名（同名 analysis.md 靠 Round 子区消歧，不再带路径前缀）
+    expect(screen.getByTestId("docs-round-2").textContent).not.toContain("rounds/002");
   });
 
   test("updated_at 缺省行不显示时间（不造假值）", () => {
@@ -360,8 +389,10 @@ describe("W2-T2 RunDetailPage 挂载冒烟（plan W-P2 + B4 页签重构）", ()
     expect(await screen.findByTestId("profopt-docs-panel")).toBeInTheDocument();
     expect(screen.getByTestId("docs-group-baseline")).toBeInTheDocument();
     // 图表页签：ChartsView 在、文档面板不在（不再同栏挤占）
+    // timeout 5s：ChartsView 懒加载 chunk 在全量并行跑下可超默认 1s（flake 实证），
+    // 意图是「切页后 ChartsView 挂载」而非「1s 内挂载」。
     fireEvent.click(screen.getByTestId("tab-charts"));
-    expect(await screen.findByTestId("charts-view")).toBeInTheDocument();
+    expect(await screen.findByTestId("charts-view", {}, { timeout: 5000 })).toBeInTheDocument();
     expect(screen.queryByTestId("profopt-docs-panel")).toBeNull();
   });
 });

@@ -95,8 +95,8 @@ describe("W3-T1 联调：ProfOptDocsPanel 消费真实 push_curves 清单 payloa
     expect(screen.getByTestId("docs-variant-card-r2-01").textContent).toContain(
       "in-flight"
     );
-    expect(screen.getByTestId("docs-group-rounds").textContent).toContain(
-      "rounds/002/analysis.md"
+    expect(screen.getByTestId("docs-round-2").textContent).toContain(
+      "analysis.md"
     );
     expect(screen.getByTestId("docs-group-rules").textContent).toContain(
       "accuracy_rules_snapshot.json"
@@ -109,8 +109,8 @@ describe("W3-T1 联调：ProfOptDocsPanel 消费真实 push_curves 清单 payloa
     expect(screen.getByTestId("docs-variant-card-r5-01").textContent).toContain(
       "success"
     );
-    expect(screen.getByTestId("docs-group-rounds").textContent).toContain(
-      "rounds/003/analysis.md"
+    expect(screen.getByTestId("docs-round-3").textContent).toContain(
+      "analysis.md"
     );
     // 替换而非追加：条目总数 == final 清单行数（无复制残留）
     expect(screen.getAllByTestId("doc-item").length).toBe(

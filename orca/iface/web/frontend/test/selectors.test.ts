@@ -13,6 +13,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useWorkflowStore } from "@/stores/workflow-store";
 import {
   classifyLogLevel,
+  docGroupOf,
+  docRoundNoOf,
   EMPTY_EVENTS,
   formatElapsed,
   selectAgents,
@@ -22,6 +24,7 @@ import {
   selectNodeSessions,
   setLogShowDebug,
   summarizeEvent,
+  type DocRow,
   type LogLevel,
 } from "@/selectors";
 import type { EventType, WebEvent } from "@/types/events";
@@ -665,5 +668,31 @@ describe("selectors P2 — selectNodeSessions + selectConversation sessionId", (
     expect(c.events).toBe(EMPTY_EVENTS);
     // readonly 契约：mutate 冻结数组 → throw（fail loud）
     expect(() => (EMPTY_EVENTS as WebEvent[]).push(ev("agent_message"))).toThrow();
+  });
+});
+
+// ── docRoundNoOf / docGroupOf（2026-09-09 轮次子分组派生源）─────────────────────
+describe("docRoundNoOf（轮次号派生）+ docGroupOf 分组回归", () => {
+  const row = (over: Partial<DocRow>): DocRow => ({
+    vid: "round",
+    doc: "analysis.md",
+    status: "final",
+    path: "rounds/001/analysis.md",
+    ...over,
+  });
+
+  it("rounds/<N>/ → 数字（前导零去除）；非 rounds 行 → null", () => {
+    expect(docRoundNoOf(row({ path: "rounds/001/analysis.md" }))).toBe(1);
+    expect(docRoundNoOf(row({ path: "rounds/010/candidates/semantic.md" }))).toBe(10);
+    expect(docRoundNoOf(row({ path: "rounds/summary.md" }))).toBeNull();
+    expect(docRoundNoOf(row({ path: "base/information_analysis.md" }))).toBeNull();
+    expect(docRoundNoOf(row({ path: "rounds/" }))).toBeNull();
+  });
+
+  it("docGroupOf 回归：rounds/ 前缀归轮次组（子分组在其上派生）", () => {
+    expect(docGroupOf(row({}))).toBe("rounds");
+    expect(docGroupOf(row({ path: "base/accuracy_rules_snapshot.json" }))).toBe("rules");
+    expect(docGroupOf(row({ vid: "baseline", path: "baseline/business_logic.md" }))).toBe("baseline");
+    expect(docGroupOf(row({ vid: "r1-01", path: "variants/r1-01/assessment.md" }))).toBe("variants");
   });
 });

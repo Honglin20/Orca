@@ -679,6 +679,13 @@ export function docGroupOf(row: DocRow): DocGroupKey {
   return "variants";
 }
 
+/** 行 path 中的轮次号（``rounds/001/...`` → 1；非 rounds 行 → null）。
+ * 展示层「Round N」子分组的唯一派生源（Number 顺带去前导零）。 */
+export function docRoundNoOf(row: DocRow): number | null {
+  const m = /^rounds\/(\d+)\//.exec(row.path);
+  return m ? Number(m[1]) : null;
+}
+
 /** 清单 payload 解析：合法行 + 坏行计数 + payload 形状漂移标记（fail loud 披露）。 */
 export function parseDocManifest(payload: unknown): {
   rows: DocRow[];

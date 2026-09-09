@@ -17,10 +17,10 @@
 // vid/doc/status/path/updated_at（+ 可选 content/content_omitted）。解析/分组
 // （parseDocManifest/docGroupOf）在 selectors.ts；中文组名（GROUP_ORDER）留展示层。
 //
-// 分组（web §3.1：基线 / 变体按轮序 / 轮次 / 规则）从行内容确定性派生；变体组内
-// 按 vid 归卡（docs-variant-card-<vid>），组内文件渲染为图标卡片网格（lucide：
-// .md → FileText，.json → Braces，其余 FileText）+ 文件名 + 状态点（statusClass
-// 配色）+ 可选 updated_at。
+// 分组（web §3.1：基线 / 变体按轮序 / 轮次按 Round N 子区 / 规则）从行内容确定性
+// 派生；变体组内按 vid 归卡（docs-variant-card-<vid>），组内文件渲染为竖排图标
+// 卡片网格（2026-09-09 B 方案：32px 彩色类型徽章 M↓/{ } + 纯文件名 + 状态点 +
+// 可选短时间戳；完整 path 进 hover title）。
 //
 // 只读与白名单（web §5）：面板只消费清单内相对 path，唯一网络请求是 GET artifacts
 // 端点（且仅 legacy 三态走它），无任何写入口。markdown 内相对图片改写为 artifacts
@@ -32,11 +32,12 @@
 // 计数，与 ChartRenderer chart-schema-warning 同模式），合法行照常渲染。
 
 import { useEffect, useMemo, useState } from "react";
-import { Braces, ChevronDown, ChevronRight, FileText, Loader2 } from "lucide-react";
+import { ChevronDown, ChevronRight, FileText, Loader2 } from "lucide-react";
 import { useWorkflowStore } from "@/stores/workflow-store";
 import {
   selectDocRowsWithContent,
   docGroupOf,
+  docRoundNoOf,
   type DocGroupKey,
   type DocRow,
 } from "@/selectors";
@@ -51,9 +52,44 @@ const GROUP_ORDER: { key: DocGroupKey; label: string }[] = [
   { key: "rules", label: "规则" },
 ];
 
-/** 图标卡片网格（非一行一行）：auto-fill 自适应列，卡片最小 170px。 */
+/** 图标卡片网格（非一行一行）：auto-fill 自适应列，竖排卡片最小 150px。 */
 const CARD_GRID_CLASS =
-  "grid gap-1.5 [grid-template-columns:repeat(auto-fill,minmax(170px,1fr))]";
+  "grid gap-1.5 [grid-template-columns:repeat(auto-fill,minmax(150px,1fr))]";
+
+/**
+ * 文件类型徽章（2026-09-09 用户拍板 B 方案：文件管理器风竖排图标卡）。
+ * 实底色 + 白色单字，替代旧 14px 灰色线性图标；未知扩展灰底 FileText 兜底
+ * （清单白名单只有 .md/.json，防御 payload 漂移时不崩样式）。
+ */
+const TYPE_BADGES: Record<string, { cls: string; glyph: string }> = {
+  md: { cls: "bg-blue-600", glyph: "M↓" },
+  json: { cls: "bg-amber-600", glyph: "{ }" },
+};
+
+function DocTypeBadge({ path }: { path: string }) {
+  const ext = path.toLowerCase().split(".").pop() ?? "";
+  const badge = TYPE_BADGES[ext];
+  if (!badge) {
+    return (
+      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-slate-500 text-white">
+        <FileText size={14} strokeWidth={1.5} aria-hidden />
+      </span>
+    );
+  }
+  return (
+    <span
+      className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-[11px] font-bold text-white ${badge.cls}`}
+      aria-hidden
+    >
+      {badge.glyph}
+    </span>
+  );
+}
+
+/** ISO 时间戳压成 ``YYYY-MM-DD HH:MM``（完整 ISO 进该 span 的 title）。 */
+function shortTime(iso: string): string {
+  return iso.replace("T", " ").slice(0, 16);
+}
 
 /** artifacts 只读端点 URL（web SPEC §2.1；唯一被本面板消费的端点）。 */
 export function artifactFileUrl(runId: string, path: string): string {
@@ -134,7 +170,9 @@ export function ProfOptDocsPanel({ runId }: { runId: string }) {
     [rows]
   );
 
-  // 分组 + 变体按 vid 归卡（自然序 = 轮序：r1-01 < r2-01 < r10-01）。
+  // 分组 + 变体按 vid 归卡（自然序 = 轮序：r1-01 < r2-01 < r10-01）
+  // + 轮次按 docRoundNoOf 归「Round N」子区（数字升序；不匹配 rounds/<N>/ 形状
+  // 的行落入 roundMisc 照常渲染——不静默隐藏任何清单行）。
   const grouped = useMemo(() => {
     const byGroup = new Map<DocGroupKey, DocRow[]>();
     for (const row of rows) {
@@ -153,7 +191,20 @@ export function ProfOptDocsPanel({ runId }: { runId: string }) {
     const vids = Array.from(byVid.keys()).sort((a, b) =>
       a.localeCompare(b, undefined, { numeric: true })
     );
-    return { byGroup, byVid, vids };
+    const byRound = new Map<number, DocRow[]>();
+    const roundMisc: DocRow[] = [];
+    for (const row of byGroup.get("rounds") ?? []) {
+      const no = docRoundNoOf(row);
+      if (no === null) {
+        roundMisc.push(row);
+        continue;
+      }
+      const arr = byRound.get(no);
+      if (arr) arr.push(row);
+      else byRound.set(no, [row]);
+    }
+    const roundNos = Array.from(byRound.keys()).sort((a, b) => a - b);
+    return { byGroup, byVid, vids, byRound, roundNos, roundMisc };
   }, [rows]);
 
   const [open, setOpen] = useState(true);
@@ -199,11 +250,11 @@ export function ProfOptDocsPanel({ runId }: { runId: string }) {
         if (res.ok) {
           setContent(text);
         } else if (res.status === 404) {
-          setError(`文档不存在或路径不可访问（404）：${selection.name}`);
+          setError(`文档不存在或路径不可访问（404）：${selection.path}`);
         } else if (res.status === 413) {
-          setError(`文档超过 1MB 上限，无法预览（413）：${selection.name}`);
+          setError(`文档超过 1MB 上限，无法预览（413）：${selection.path}`);
         } else {
-          setError(`加载失败（HTTP ${res.status}）：${selection.name}`);
+          setError(`加载失败（HTTP ${res.status}）：${selection.path}`);
         }
       })
       .catch((e: unknown) => {
@@ -295,19 +346,53 @@ export function ProfOptDocsPanel({ runId }: { runId: string }) {
                                 ● {st}
                               </span>
                             </p>
-                            <div className={`mt-1 ${CARD_GRID_CLASS}`}>
-                              {vidRows.map((row) => (
-                                <DocItemCard
-                                  key={row.path}
-                                  row={row}
-                                  active={selection?.path === row.path}
-                                  onSelect={setSelection}
-                                />
-                              ))}
-                            </div>
+                            <DocCardGrid
+                              className="mt-1"
+                              rows={vidRows}
+                              selection={selection}
+                              onSelect={setSelection}
+                            />
                           </div>
                         );
                       })}
+                    </div>
+                  );
+                }
+                if (key === "rounds") {
+                  if (
+                    grouped.roundNos.length === 0 &&
+                    grouped.roundMisc.length === 0
+                  )
+                    return null;
+                  return (
+                    <div
+                      key={key}
+                      className="mb-2"
+                      data-testid="docs-group-rounds"
+                    >
+                      <p className="orca-text-faint mb-1 text-[11px] font-medium">
+                        {label}
+                      </p>
+                      {grouped.roundNos.map((no) => (
+                        <RoundSection
+                          key={no}
+                          no={no}
+                          rows={grouped.byRound.get(no) ?? []}
+                          selection={selection}
+                          onSelect={setSelection}
+                        />
+                      ))}
+                      {grouped.roundMisc.length > 0 && (
+                        // 非 rounds/<N>/ 形状的轮次组行：照常渲染，testid 锚定
+                        // 「不静默丢行」契约（docs-round-misc）。
+                        <DocCardGrid
+                          className="mt-1"
+                          testid="docs-round-misc"
+                          rows={grouped.roundMisc}
+                          selection={selection}
+                          onSelect={setSelection}
+                        />
+                      )}
                     </div>
                   );
                 }
@@ -318,16 +403,11 @@ export function ProfOptDocsPanel({ runId }: { runId: string }) {
                     <p className="orca-text-faint mb-1 text-[11px] font-medium">
                       {label}
                     </p>
-                    <div className={CARD_GRID_CLASS}>
-                      {groupRows.map((row) => (
-                        <DocItemCard
-                          key={row.path}
-                          row={row}
-                          active={selection?.path === row.path}
-                          onSelect={setSelection}
-                        />
-                      ))}
-                    </div>
+                    <DocCardGrid
+                      rows={groupRows}
+                      selection={selection}
+                      onSelect={setSelection}
+                    />
                   </div>
                 );
               })}
@@ -380,7 +460,85 @@ export function ProfOptDocsPanel({ runId }: { runId: string }) {
   );
 }
 
-/** 单个文档卡片（B4 图标网格项）：类型图标 + 文件名 + 状态点 + 可选更新时间。 */
+/** 轮次子区（Round N，可折叠；默认展开）：N 为数字升序，组内竖排图标卡。 */
+function RoundSection({
+  no,
+  rows,
+  selection,
+  onSelect,
+}: {
+  no: number;
+  rows: DocRow[];
+  selection: Selection | null;
+  onSelect: (sel: Selection) => void;
+}) {
+  // 折叠仅 UI 交互态（非业务真相，铁律 2），与 ChartGroup 同模式。
+  const [open, setOpen] = useState(true);
+  return (
+    <div className="mb-1.5" data-testid={`docs-round-${no}`}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="orca-text-muted hover:orca-text flex w-full items-center gap-1 py-1 text-left text-xs font-medium"
+        data-testid={`docs-round-toggle-${no}`}
+      >
+        {open ? (
+          <ChevronDown size={12} strokeWidth={1.5} aria-hidden />
+        ) : (
+          <ChevronRight size={12} strokeWidth={1.5} aria-hidden />
+        )}
+        Round {no}
+        <span className="orca-text-faint text-[10px]">{rows.length} 份</span>
+      </button>
+      {open && (
+        <DocCardGrid
+          className="mt-1"
+          rows={rows}
+          selection={selection}
+          onSelect={onSelect}
+        />
+      )}
+    </div>
+  );
+}
+
+/** 文档卡片网格（DRY：基线/变体内层/轮次子区/roundMisc 四处共用同一接线）。 */
+function DocCardGrid({
+  rows,
+  selection,
+  onSelect,
+  className,
+  testid,
+}: {
+  rows: DocRow[];
+  selection: Selection | null;
+  onSelect: (sel: Selection) => void;
+  className?: string;
+  testid?: string;
+}) {
+  return (
+    <div
+      className={className ? `${className} ${CARD_GRID_CLASS}` : CARD_GRID_CLASS}
+      data-testid={testid}
+    >
+      {rows.map((row) => (
+        <DocItemCard
+          key={row.path}
+          row={row}
+          active={selection?.path === row.path}
+          onSelect={onSelect}
+        />
+      ))}
+    </div>
+  );
+}
+
+/**
+ * 单个文档卡片（2026-09-09 B 方案竖排图标卡）：32px 类型徽章 + 文件名 +
+ * 状态点 + 可选短时间戳。显示名一律 ``row.doc``（纯文件名；轮次分 Round 子区后
+ * 不再需要旧的 path 消歧 workaround），完整相对 path 进 hover title（button 与
+ * 文件名 span 双落点——截断的长文件名恰是 hover 高频位）。
+ */
 function DocItemCard({
   row,
   active,
@@ -390,30 +548,29 @@ function DocItemCard({
   active: boolean;
   onSelect: (sel: Selection) => void;
 }) {
-  // 轮次组 doc 名同为 analysis.md → 用完整相对 path 作显示名消歧。
-  const name = docGroupOf(row) === "rounds" ? row.path : row.doc;
-  const Icon = row.path.toLowerCase().endsWith(".json") ? Braces : FileText;
   return (
     <button
       type="button"
-      onClick={() => onSelect({ path: row.path, name })}
+      onClick={() => onSelect({ path: row.path, name: row.doc })}
       title={row.path}
       data-testid="doc-item"
-      className={`orca-border orca-bg-surface flex items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:orca-bg-surface-2 ${
+      className={`orca-border orca-bg-surface flex flex-col items-center gap-1 rounded px-2 py-2.5 text-center text-xs hover:orca-bg-surface-2 ${
         active ? "orca-border-accent orca-accent" : ""
       }`}
     >
-      <Icon size={14} strokeWidth={1.5} className="shrink-0" aria-hidden />
-      <span className="min-w-0 flex-1 truncate">{name}</span>
+      <DocTypeBadge path={row.path} />
+      <span className="w-full truncate" title={row.path}>
+        {row.doc}
+      </span>
       <span
-        className={`shrink-0 text-[10px] ${statusClass(row.status)}`}
+        className={`text-[10px] ${statusClass(row.status)}`}
         title={row.status}
       >
         ● {row.status}
       </span>
       {row.updated_at ? (
-        <span className="orca-text-faint shrink-0 text-[10px]">
-          {row.updated_at}
+        <span className="orca-text-faint text-[9px]" title={row.updated_at}>
+          {shortTime(row.updated_at)}
         </span>
       ) : null}
     </button>
