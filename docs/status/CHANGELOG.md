@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-09-09] feat(prof-opt): depth 冻结——提案面全线禁改深度，D1/D2 退役（commit `07a5883`）
+
+用户观察 propose 偶发改 depth 换时延，与「结构突破非超参寻优」定位冲突。structural-levers 的 D1/D2 capacity redistribution 整节退役 + 冻结规则钉进管线七面（节点校验 / 三 proposer / selector / assessor / 目录硬范围条款）；不加机械闸（depth 无确定性信号，与谱系闸不同类）。新增管线 pin 用例；顺手修 ascend.md stale 断言；46 passed + tars validate 零 warning。详见 [release note](../releases/2026-09-09-po-depth-freeze.md)。
+
 ## [2026-09-09] feat(prof-opt): po_propose 每轮随 emit 门推送 docs manifest（commit `8636a8a`）
 
 用户真机 round 2 仍只见 baseline 文档：`--docs` 确定性触发点只有 baseline 首推 + report 终推两处，agent.md 里的推送软指令无命令支撑从未生效。修复：`check_propose_emit` 校验全过后随门 best-effort 推送（fail-soft 不阻塞 emit，拒绝路径不推，exhausted 轮也覆盖），触发点扩为三处；spec 新增 §5.6。新增 3 面用例 + tars validate 零 warning；3 个失败为 CURRENT.md 挂账 HEAD 既有。详见 [release note](../releases/2026-09-09-po-per-round-docs-push.md)。
