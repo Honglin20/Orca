@@ -41,9 +41,15 @@ LLM 自觉。同时训练已流水线化（多轮在飞），链式晋升"各代
 
 - `tars validate` 通过、warning 清零；
 - pytest：test_po_v6/v7/scripts/prompt_scripts/diff_check/inject/v5 + 新增
-  test_po_v8_frontier（10 用例）共 **289 green**；2 个 `test_baseline_chain_*` 为
+  test_po_v8_frontier（12 用例）共 **282 green**；2 个 `test_baseline_chain_*` 为
   HEAD 既有失败（见 CURRENT.md 挂账），未恶化；
-- 测试抓到并修复真 bug：gate_node.sh 重构后 `rc` 在 `set -u` 下未初始化。
+- code-reviewer 自检：3 major + 5 minor 全部修复（含 review 后补测抓到的
+  gate_node.sh stdout 泄漏真 bug——M1 修 stderr 捕获时弄丢了 `>/dev/null`）；
+- **E2E（2026-09-10，tars skill + orca CLI，target 项目，run
+  `prof-opt-20260910-130812-1af1ea`）**：全链真实驱动到 flatten 即 fail loud——
+  本机无 NPU/CUDA（torch 2.13.0+cpu、无 nvidia-smi/npu-smi），resolver enum
+  npu|cuda 按设计无 CPU 回退；失败路径全链合规（诚实披露报告 + rules merge +
+  web 面板 + 零写回）。v8 轮环（frontier/avoid/absorbs 实战）待有卡宿主验证。
 
 ## 影响
 
