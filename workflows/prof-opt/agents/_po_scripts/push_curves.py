@@ -117,6 +117,7 @@ _VARIANT_DOC_FILES = (
 )
 _RULES_ROW = ("rules", "accuracy_rules_snapshot.json",
               "base/accuracy_rules_snapshot.json")
+_DIGEST_ROW = ("digest", "history_digest.md", "base/history_digest.md")
 
 
 def _load_curve(path: Path, vid: str) -> list[dict[str, Any]]:
@@ -360,6 +361,8 @@ def collect_docs(artifacts: Path) -> list[dict[str, Any]]:
                              f"rounds/{rdir.name}/candidates/{name}", "candidate")):
                     rows.append(r)
     if (r := row(*_RULES_ROW, "snapshot")):              # 规则组（S-9 快照源）
+        rows.append(r)
+    if (r := row(*_DIGEST_ROW, "snapshot")):             # 叙事层（跨轮 digest）
         rows.append(r)
     return rows
 

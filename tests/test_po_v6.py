@@ -48,6 +48,7 @@ _REPO = Path(__file__).resolve().parents[1]
 _SCRIPTS = _REPO / "workflows" / "prof-opt" / "agents" / "_po_scripts"
 sys.path.insert(0, str(_SCRIPTS))
 
+import digest_stamp  # noqa: E402
 import history_lib  # noqa: E402
 from gate_decide import decide  # noqa: E402
 
@@ -997,7 +998,7 @@ def _emit_ws(tmp_path: Path, *, outcome: str = "latency_improved",
     analysis."""
     art = tmp_path / "ws"
     (art / "scripts").mkdir(parents=True)
-    for src in ("history_lib.py", "round_state.py"):
+    for src in ("history_lib.py", "round_state.py", "digest_stamp.py"):
         shutil.copy(_SCRIPTS / src, art / "scripts" / src)
     _write_raw_profile(art / "base" / "profile", 1000)
     _write_anchor(art, target=500)
@@ -1062,6 +1063,14 @@ def _emit_ws(tmp_path: Path, *, outcome: str = "latency_improved",
                                    makespan_cycles=800, latency_gate="fail",
                                    pred_actual_ratio=None,
                                    outcome="latency_fail")
+
+    digest = art / "base" / "history_digest.md"
+    digest.write_text(
+        "[subagent:history-curator v1 HDC7Q2]\n# History Digest\n\n"
+        "## Global lessons\nnone yet\n\n"
+        "## Round r1 — activation lever\nthe round's lesson\n\n"
+        "## Accuracy rules\nsnapshot absent\n", encoding="utf-8")
+    digest_stamp.stamp_digest(art)
     return art
 
 
@@ -1107,6 +1116,25 @@ def test_emit_gate_pushes_docs_manifest_on_pass_only(tmp_path):
                       "--artifacts", str(art2)], env=env)
     assert proc2.returncode == 1
     assert "push failed for prof-opt/docs" not in proc2.stderr
+
+
+def test_emit_gate_requires_sealed_history_digest(tmp_path):
+    """The digest seal is part of the round's disk contract: without it the
+    gate refuses the emit (the next round's Step 0 brief input would be
+    unverifiable)."""
+    art = _emit_ws(tmp_path / "noseal")
+    (art / "base" / "history_digest.stamp.json").unlink()
+    proc = _check_emit(art)
+    assert proc.returncode == 1
+    assert "history digest" in proc.stderr
+
+    art2 = _emit_ws(tmp_path / "tampered")
+    digest_path = art2 / "base" / "history_digest.md"
+    digest_path.write_text(digest_path.read_text(encoding="utf-8") + "drift\n",
+                           encoding="utf-8")
+    proc2 = _check_emit(art2)
+    assert proc2.returncode == 1
+    assert "differs from its seal" in proc2.stderr
 
 
 def test_emit_gate_docs_push_success_keeps_emit_contract(tmp_path):

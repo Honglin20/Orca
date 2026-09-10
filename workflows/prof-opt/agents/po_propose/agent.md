@@ -45,15 +45,27 @@ through composition (`absorbs`), never through a moved base.
   steered around and why; `in_flight` shows each running training's CURRENT
   epoch/metric/gap/streak — a training whose live numbers look bad is
   evidence against its direction before any terminal row exists.
+- `base/history_digest.md` (rewritten by the `history-curator` subagent and
+  sealed by `digest_stamp.py` in Step 4) is the round's narrative layer: the
+  cumulative WHY across all closed rounds — recent rounds verbose, older
+  rounds one-line lessons. It is a derived, non-authoritative cache: it
+  never carries measured numbers (the reader gets those from
+  `base/frontier.json`) and never overrides `history.jsonl`, which stays the
+  only truth. Its freshness is mechanical: the Step 0 seal check fails loud
+  on a missing, tampered, or stale seal.
 - Predicted cycles are calibration evidence, never admission. Actual MFU
   measurement decides.
 
-## Step 0 — round, frontier, re-entry
+## Step 0 — round, frontier, digest seal, re-entry
 
 Verify deployed scripts, refresh the mechanical view
 (`python3 "$ORCA_ARTIFACTS_DIR/scripts/frontier_snapshot.py" --artifacts
 "$ORCA_ARTIFACTS_DIR"` — non-zero exit is a torn workspace: fail loud), and
-derive the working round with `round_state.py`.
+derive the working round with `round_state.py`. Then verify the narrative
+layer's freshness (`python3 "$ORCA_ARTIFACTS_DIR/scripts/digest_stamp.py"
+--artifacts "$ORCA_ARTIFACTS_DIR" check` — non-zero exit is a missing,
+tampered, or stale history digest: fail loud; exploring on a stale narrative
+is worse than stopping).
 Create `rounds/<RRR>/candidates/`. If a parseable `proposals.json` already
 exists, reuse it and resume implementation; never regenerate a completed
 selector result.
@@ -69,11 +81,12 @@ Dispatch these tasks in parallel, each after fully reading its subagent file:
 Provide each candidate the SAME bounded brief: the baseline documents, the
 current `shadow/` source (the origin tree), the FULL `base/frontier.json`
 (frontier to absorb, avoid to steer around, in-flight live numbers), the
-previous round's `analysis.md` (round 1: none), the accuracy rules snapshot,
+cumulative narrative digest `base/history_digest.md` — every closed round's
+lessons, recent rounds verbose (round 1: absent), the accuracy rules snapshot,
 and the shared hardware reference
 `{{ subagents_root }}/references/ascend.md`. Do NOT dump raw history or
-every prior variant's MFU report — the frontier view plus the rules are the
-distilled evidence. Each candidate must name
+every prior variant's MFU report — the frontier view, the digest, and the
+rules are the distilled evidence. Each candidate must name
 the information invariant, measured root cause, affected source files,
 shape/operator strategy, latency mechanism, risks, and implementation sketch,
 and say which frontier mechanisms (if any) it builds on.
@@ -160,6 +173,21 @@ Write `rounds/<RRR>/analysis.md` with `## architecture`, `## latency`, and
 origin/variant cycles, improvement result, origin-target disclosure, MFU
 report, and next direction. Empty rounds record the exhausted rationale.
 
+Then refresh the narrative layer for the NEXT round: dispatch
+`history-curator` (after fully reading its subagent file) with
+`<output_dir>` = the workspace, `<doc_path>` =
+`$ORCA_ARTIFACTS_DIR/base/history_digest.md`, and `<closed_round>` = the
+round just closing — it rewrites `base/history_digest.md` from
+all rounds' `analysis.md` documents plus the rules snapshot, recent rounds
+verbose, older rounds compressed, measured numbers never copied. This runs
+on BOTH ending paths. Seal it immediately
+(`python3 "$ORCA_ARTIFACTS_DIR/scripts/digest_stamp.py" --artifacts
+"$ORCA_ARTIFACTS_DIR" stamp`; the seal lands at
+`base/history_digest.stamp.json`) — a non-zero exit (sentinel, missing
+round block, or size-cap violation) is fail loud: re-dispatch the curator
+with the scripted finding once, then fail. The emit gate verifies the seal,
+so the curator and the stamp must both precede `check_propose_emit.py`.
+
 For `latency_improved`, seed the ledger shard with that status, refresh the
 derived ledger, and refresh the accuracy rules snapshot when present. Run
 `check_propose_emit.py` before emitting on BOTH ending paths — on success it
@@ -167,7 +195,8 @@ also pushes the analysis-docs manifest best-effort, so each round's documents
 reach the web panel immediately (a push failure never blocks the emit).
 
 List only files that exist in `generated_artifacts`. Include candidate files,
-`architecture_decision.md`, `proposals.json`, `analysis.md`, assessment, stamp,
+`architecture_decision.md`, `proposals.json`, `analysis.md`, the history
+digest and its seal, assessment, stamp,
 declaration, MFU report, and verdict/history artifacts.
 
 Emit one JSON line only with `status`, `error`, `repair_count`, and honest

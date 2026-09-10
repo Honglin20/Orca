@@ -214,7 +214,9 @@ nodes:
   #   实测严格优于冻结 origin 线才进入 probe；origin target 保持冻结。op_delta
   #   不再是契约字段，absorbs（组合谱系）+ source snapshot 记录来源。depth 冻结——
   #   禁增删/合并/重排 block 与重复次数（结构突破非超参寻优）。上下文三件套：
-  #   base/frontier.json（前沿吸收/avoid 避坑/在飞实时精度）+ 上轮 analysis.md +
+  #   base/frontier.json（前沿吸收/avoid 避坑/在飞实时精度，数字层）；叙事层 =
+  #   base/history_digest.md（history-curator 每轮收尾重写的跨轮因果总结，
+  #   digest_stamp.py 机械戳保新鲜，替代上轮 analysis.md 直读）+
   #   accuracy rules。emit 门通过后随门 best-effort 推送 docs manifest——每轮
   #   round 文档即时上板（不等 report 终推）。
   #   executed → po_probe；catch-all → po_report。

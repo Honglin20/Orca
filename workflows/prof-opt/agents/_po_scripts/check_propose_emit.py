@@ -29,7 +29,11 @@ the node emits:
      repair_count == len(attempts) and repair_count <= 5.
   6. rounds/<R>/analysis.md exists, is non-empty, and carries the
      `## latency` section — required on BOTH ending paths.
-  7. On success (and only then) it fires the per-round docs-manifest push
+  7. The history digest (`base/history_digest.md`) exists and carries a seal
+     that covers THIS closing round (digest_stamp.py) — the next round's
+     Step 0 reads the digest as its brief input, so the seal is part of the
+     round's disk contract on BOTH ending paths.
+  8. On success (and only then) it fires the per-round docs-manifest push
      (§5.6) — fail-soft, never blocks the emit.
 
 This is structural completeness only; proposal quality, verdicts, and the
@@ -234,6 +238,7 @@ def main() -> int:
         return 1
     sys.path.insert(0, str(scripts_dir))
     try:
+        import digest_stamp
         import history_lib
         import round_state
     except Exception as exc:
@@ -392,6 +397,8 @@ def main() -> int:
                     problems.append(f"verdicts.jsonl:{line_no} is not a JSON object")
         except json.JSONDecodeError as exc:
             problems.append(f"verdicts.jsonl unparseable: {exc}")
+
+    problems.extend(digest_stamp.problems_for_emit(art, r))
 
     if problems:
         for p in problems:
