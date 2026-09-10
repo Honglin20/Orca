@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-09-10] feat(prof-opt): v8.1 po_propose 叙事层 history digest（commit `dff5456`）
+
+用户提出每轮收尾由 history agent 总结、propose 看总结输出（原叙事窗口仅上一轮 analysis.md，跨轮"为什么"丢失）。落地为分层派生缓存：数字层仍机械（frontier.json），叙事层由 `history-curator` 子代理每轮收尾重写 `base/history_digest.md`（每个已关轮一个轮块 + Global lessons，零实测数字），`digest_stamp.py` 机械戳（sentinel/逐轮块/字节帽/sha，round 三态语义保 torn 中断轮可续跑）；下一轮 Step 0 校戳 stale fail loud，emit gate 把 seal 纳入磁盘契约，docs manifest 随轮上板。15 + 2 新用例，po 全套件绿（仅 HEAD 既有 2 失败），tars validate 零 warning + 双洁净脚本 rc=0 + 独立 reviewer 1 MAJOR 3 minor 全修。详见 [release note](../releases/2026-09-10-profopt-history-digest.md)。
+
 ## [2026-09-10] feat(prof-opt): v8 同基前沿探索——永不晋升 + frontier 快照（commit `1694e4b`）
 
 v7 两缺口收口：在飞训练无精度信号（watchdog 每 epoch 的 train_status.json 早已在盘，补读端）+ accuracy_fail 无机械换路（direction.json 退役，avoid 派生取代）。base 恒冻结 origin（promote_incumbent 删除、expected_base/check_verdict 恒 origin 线、残留 incumbent.json fail loud）；谱系 parent_vid/base_at_proposal → absorbs 组合谱系（selector 两节义务 + emit 门校验）；上下文三件套（frontier.json/上轮 analysis/accuracy rules）有界化；BASELINE.lock 2→3 拒旧工作区。289 green（2 个 HEAD 既有失败未恶化）+ tars validate 零 warning。详见 [release note](../releases/2026-09-10-profopt-v8-frontier.md)。
