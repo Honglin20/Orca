@@ -19,8 +19,12 @@ the node emits:
      the key changes with them and the mechanical re-entry guard holds.
   4. The vid has its expected history row; a latency-passing vid has a
       `latency_improved` row, an eliminated vid its terminal/elimination
-     outcome, and a latency_fail elimination also lands in
-     rounds/<R>/direction.json `failed_sigs`.
+     outcome (the mechanical avoid list in base/frontier.json derives the
+     rerouting signal — no hand-written direction file exists in v8).
+  4b. Composition lineage (v8): the proposal's `absorbs` list names only
+     vids that exist in history (never the vid itself), and
+     architecture_decision.md carries the `## absorbs` / `## avoids`
+     sections whose `r<round>-<seq>` references all exist on disk.
   5. variants/<vid>/repair_trace.json, when present, records
      repair_count == len(attempts) and repair_count <= 5.
   6. rounds/<R>/analysis.md exists, is non-empty, and carries the
@@ -37,6 +41,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -157,6 +162,38 @@ def _check_repair_trace(path: Path, vid: str, problems: list[str]) -> None:
             "intercepted, never emitted")
 
 
+def _check_decision_lineage(path: Path, known_vids: set[str],
+                            problems: list[str]) -> None:
+    """v8 composition-lineage gate on the selector's decision document: the
+    `## absorbs` / `## avoids` sections must exist, and every vid-shaped
+    reference inside them must name a vid that exists in history."""
+    if not path.is_file():
+        problems.append(f"architecture_decision.md missing ({path})")
+        return
+    lines = [l.strip() for l in path.read_text(encoding="utf-8").splitlines()]
+    for section in ("## absorbs", "## avoids"):
+        if section not in lines:
+            problems.append(f"architecture_decision.md missing the {section} "
+                            "section (composition provenance is declared, "
+                            "never implied)")
+    section_text: dict[str, list[str]] = {}
+    current = None
+    for line in lines:
+        if line.startswith("## "):
+            current = line
+            section_text[current] = []
+        elif current is not None:
+            section_text[current].append(line)
+    vid_pattern = re.compile(r"\br\d+-\d+\b")
+    for section in ("## absorbs", "## avoids"):
+        for token in vid_pattern.findall("\n".join(section_text.get(section, []))):
+            if token not in known_vids:
+                problems.append(
+                    f"architecture_decision.md {section} references "
+                    f"{token}, which has no history row — provenance is "
+                    "mechanical, never invented")
+
+
 def _push_docs_manifest(art: Path) -> None:
     """Per-round docs-manifest push (v7 §5.6): once the gate passes, the
     round's analysis / candidates / decision docs go live on the web panel
@@ -252,15 +289,16 @@ def main() -> int:
     except Exception as exc:
         problems.append(f"history.jsonl unreadable: {exc}")
 
-    expected_parent = None
-    expected_base_ms = None
     try:
-        # Single source (history_lib): the only legal parent is the current
-        # incumbent — a variant that PASSED the accuracy gate AND improved
-        # latency — or the origin baseline (None) before the first promotion.
-        expected_parent, expected_base_ms = history_lib.expected_base(art)
+        # Single source (history_lib): the anchor is ALWAYS the frozen origin
+        # baseline in v8 (no promotion); a stale base/incumbent.json or a
+        # missing anchor fails loud here.
+        history_lib.expected_base(art)
     except ValueError as exc:
         problems.append(str(exc))
+
+    _check_decision_lineage(rd / "architecture_decision.md",
+                            set(latest), problems)
 
     if proposal:
         vid = proposal.get("vid")
@@ -268,7 +306,7 @@ def main() -> int:
             problems.append("proposal missing vid")
         else:
             for key in ("change_sig", "edited_files", "change_spec",
-                        "parent_vid", "base_at_proposal", "target_pattern_id",
+                        "absorbs", "target_pattern_id",
                         "predicted_acc_impact",
                         "sota_reference"):
                 if key not in proposal:
@@ -278,25 +316,25 @@ def main() -> int:
             elif any(not (art / "shadow" / rel).is_file()
                      for rel in proposal["edited_files"]):
                 problems.append(f"{vid} edited_files contains a path absent "
-                                "from the current incumbent shadow")
+                                "from the origin baseline shadow")
             if "op_delta" in proposal:
                 problems.append(f"{vid} proposal must not contain op_delta")
-            if proposal.get("parent_vid") != expected_parent:
+            absorbs = proposal.get("absorbs")
+            if not isinstance(absorbs, list) or not all(
+                    isinstance(v, str) and v for v in absorbs):
                 problems.append(
-                    f"{vid} parent_vid does not match the current base "
-                    f"(expected {expected_parent!r}) — the only legal parent "
-                    "is the current incumbent (accuracy gate PASSED + latency "
-                    "improved) or null for the origin baseline; a variant that "
-                    "failed either gate is a lineage dead-end and is NOT "
-                    "selector-repairable — re-derive the idea on the incumbent "
-                    "shadow and fix the lineage, never emit it")
-            base_at_proposal = proposal.get("base_at_proposal")
-            if not isinstance(base_at_proposal, dict) or {
-                    "vid": base_at_proposal.get("vid"),
-                    "makespan_cycles": base_at_proposal.get("makespan_cycles"),
-                    } != {"vid": expected_parent,
-                          "makespan_cycles": expected_base_ms}:
-                problems.append(f"{vid} base_at_proposal does not match current incumbent")
+                    f"{vid} absorbs must be a list of vid strings "
+                    "(composition lineage; empty is legal)")
+            else:
+                if vid in absorbs:
+                    problems.append(
+                        f"{vid} absorbs names the vid itself — a design "
+                        "cannot absorb itself")
+                unknown = [v for v in absorbs if v not in latest]
+                if unknown:
+                    problems.append(
+                        f"{vid} absorbs names vid(s) absent from history: "
+                        f"{unknown} — provenance is mechanical, never invented")
             tpid = proposal.get("target_pattern_id")
             if not isinstance(tpid, str) or not tpid.strip():
                 problems.append(
@@ -309,9 +347,6 @@ def main() -> int:
             elif row.get("round") != r \
                     or row.get("change_sig") != proposal.get("change_sig"):
                 problems.append(f"{vid} history row does not match proposal")
-            elif row.get("parent_vid") != proposal.get("parent_vid") \
-                    or row.get("base_at_proposal") != proposal.get("base_at_proposal"):
-                problems.append(f"{vid} history lineage does not match proposal")
             elif row.get("outcome") not in LEGAL_END_OUTCOMES:
                 problems.append(
                     f"{vid} history row outcome {row.get('outcome')!r} is not "
@@ -321,22 +356,10 @@ def main() -> int:
                     and row.get("latency_gate") != "pass":
                 problems.append(f"{vid} latency_improved row lacks latency_gate "
                                 "'pass'")
-            if row and row.get("outcome") == "latency_fail":
-                try:
-                    direction = _load_json(rd / "direction.json",
-                                           "direction.json")
-                except ValueError as exc:
-                    direction = None
-                    problems.append(str(exc))
-                sig = proposal.get("change_sig")
-                if not isinstance(direction, dict):
-                    problems.append(
-                        "rounds/<R>/direction.json missing on the latency_fail "
-                        "path (failed_sigs must land there)")
-                elif sig not in direction.get("failed_sigs", []):
-                    problems.append(
-                        f"direction.json failed_sigs does not contain {vid}'s "
-                        "change_sig")
+            elif row.get("absorbs") != absorbs:
+                problems.append(
+                    f"{vid} history row absorbs {row.get('absorbs')!r} does "
+                    "not match the proposal's composition lineage")
 
             vdir = art / "variants" / vid
             _check_assessment(vdir / "assessment.md", vid, problems)

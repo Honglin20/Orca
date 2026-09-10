@@ -8,32 +8,34 @@ with that vid.
 
 Row semantics: impl / latency_improved / latency_fail / success /
 accuracy_fail / probe_insufficient. Terminal outcomes are written ONLY via
-append_terminal (the watchdog's terminal action); the v5-only builders and
-their field sets (round advance, probe gate, proxy accuracy) are retired
-(kept on old workspace rows for READ compatibility only — never written
-anymore).
+append_terminal (the watchdog's terminal action). v8: the base tree NEVER
+moves (no promotion exists) — lineage is composition, carried by the impl
+row's ``absorbs`` list (the frontier vids whose proven mechanisms the
+design fuses); ``parent_vid`` / ``base_at_proposal`` are retired.
 
 Read side:
     read_rows(path)            -> all rows in append order
     read_latest(path)          -> {vid: last row}
 Dedup side (mechanical rules — no LLM judgement):
-    permanent set   = outcome in {advanced, promoted, unsupported_op}
-                      ("advanced"/"promoted" are kept for READ compatibility
-                      with old workspaces only — v6 never writes them);
-                      judged over ANY version row (a later row cannot
-                      resurrect a permanently-exhausted signature);
+    permanent set   = outcome in {unsupported_op}; judged over ANY version
+                      row (a later row cannot resurrect an exhausted
+                      signature); ("advanced"/"promoted" read-compat rows
+                      died with the v7 workspaces — a v8 workspace rejects
+                      those at the entry lock gate and never writes them);
     latency_improved is a process state and NEVER blocks;
     structural_mismatch / variant_broken share ONE joint retry budget per sig
                       (total attempts with those outcomes <= 2, i.e. <= 1 retry);
-    probe_insufficient permanently consumes the signature (v7: the proxy
+    probe_insufficient permanently consumes the signature (the proxy
                       budget is fixed epoch-only — no knob exists whose
                       change would reopen it; a genuine retry is a NEW
                       composition with a new signature).
     accuracy_fail is NOT permanent: a recovery-round composed proposal
                       produces a NEW change_sig that exact-match dedup admits
                       by design (the round-level rerouting signal is the
-                      failed_sigs set in direction.json, not dedup).
-The dedup key is unchanged in v6: (vid, change_sig) over full-snapshot rows
+                      mechanically derived ``avoid`` list in
+                      base/frontier.json — frontier_snapshot.py — never a
+                      hand-written file).
+The dedup key is unchanged: (vid, change_sig) over full-snapshot rows
 — repair iterations on the same vid/sig overwrite latest.
 """
 from __future__ import annotations
@@ -47,9 +49,9 @@ from typing import Any
 # Field sets per builder (superset = history row schema). Keys are deliberately
 # exhaustive; builders validate against these so a typo fails loudly.
 IMPL_FIELDS = (
-    "vid", "round", "seq", "parent_vid", "change_sig",
-    "probe_epochs", "target_modules",
-    "predicted_delta_cycles", "implemented", "base_at_proposal",
+    "vid", "round", "seq", "change_sig",
+    "probe_epochs", "target_modules", "absorbs",
+    "predicted_delta_cycles", "implemented",
 )
 LATENCY_FIELDS = (
     "structural_check", "makespan_cycles", "latency_gate",
@@ -71,7 +73,7 @@ TERMINAL_FIELDS = (
 
 TERMINAL_OUTCOMES = frozenset(
     {"success", "accuracy_fail", "probe_insufficient", "latency_fail"})
-PERMANENT_OUTCOMES = frozenset({"advanced", "promoted", "unsupported_op"})
+PERMANENT_OUTCOMES = frozenset({"unsupported_op"})
 JOINT_RETRY_OUTCOMES = frozenset({"structural_mismatch", "variant_broken"})
 JOINT_RETRY_MAX_ATTEMPTS = 2  # first failure + at most one retry
 
@@ -119,27 +121,27 @@ def _append(path: Path, vid: str, new_fields: dict[str, Any], allowed: tuple[str
 
 
 def append_implemented(path: str | Path, vid: str, *, round: int, seq: int,
-                       parent_vid: str | None, change_sig: str,
+                       change_sig: str,
                        probe_epochs: int,
                        target_modules: list[str],
-                       predicted_delta_cycles: int | None,
-                       base_at_proposal: dict,
+                       absorbs: list[str],
+                       predicted_delta_cycles: int | None = None,
                        implemented: bool = True) -> dict:
     """First row of a vid (the proposal node's mechanical write after the
     implementer subagent returns). outcome stays unset unless broken.
 
     probe_epochs carries the proxy depth the variant judged under
-    (verbatim from contracts.json proxy_budget — epoch-only in v7, no knob
-    fields).
+    (verbatim from contracts.json proxy_budget — epoch-only, no knob fields).
 
-    base_at_proposal: the base pointer when the proposal was generated,
-    e.g. {"vid": null, "makespan_cycles": 15288} — the lineage anchor for
-    po_report's winner chain."""
+    absorbs: the composition lineage (v8 — the tree never moves, so there is
+    no parent): the frontier vids whose proven mechanisms this design fuses,
+    empty when it stands alone."""
     fields = {
-        "vid": vid, "round": round, "seq": seq, "parent_vid": parent_vid,
+        "vid": vid, "round": round, "seq": seq,
         "change_sig": change_sig, "probe_epochs": probe_epochs,
         "target_modules": list(target_modules),
-        "implemented": implemented, "base_at_proposal": dict(base_at_proposal),
+        "absorbs": list(absorbs),
+        "implemented": implemented,
     }
     if predicted_delta_cycles is not None:
         fields["predicted_delta_cycles"] = predicted_delta_cycles
@@ -242,51 +244,31 @@ def read_latest(path: str | Path) -> dict[str, dict[str, Any]]:
     return latest
 
 
-# ── lineage anchor (proposal parent eligibility) ─────────────────────────────
+# ── lineage anchor (v8: the base never moves) ────────────────────────────────
 
 def expected_base(artifacts: str | Path) -> tuple[str | None, int]:
-    """The ONLY legal proposal lineage anchor: ``(vid, makespan_cycles)`` of
-    the current incumbent, or ``(None, baseline_makespan_cycles)`` while no
-    variant has ever been promoted.
+    """The ONLY legal lineage anchor, constant in v8: ``(None,
+    baseline_makespan_cycles)`` from the frozen origin anchor — every variant
+    is implemented and measured on the SAME origin tree, so there is no
+    parent and no promotion.
 
-    This function IS the parent-eligibility rule, mechanically: incumbent.json
-    is written only by promote_incumbent, whose candidate set is
-    ``outcome == "success"`` rows (accuracy gate PASSED) with a strictly lower
-    makespan than the previous base (latency improved). A
-    latency_improved-but-accuracy-failed variant is therefore a lineage
-    dead-end — it can never satisfy this anchor, so it can never become a
-    parent.
-
-    Raises ValueError on a missing/malformed anchor or incumbent (fail loud —
-    a torn incumbent must never silently downgrade the anchor to the origin
-    baseline).
+    A leftover ``base/incumbent.json`` means a stale pre-v8 workspace: fail
+    loud (never silently adopt or ignore it). Raises ValueError on a
+    missing/malformed anchor too — the baseline stage must have frozen it.
     """
     art = Path(artifacts)
     incumbent_path = art / "base" / "incumbent.json"
     if incumbent_path.is_file():
-        try:
-            doc = json.loads(incumbent_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"base/incumbent.json unparseable: {exc}") from exc
-        if not isinstance(doc, dict):
-            raise ValueError("base/incumbent.json is not a JSON object")
-        vid, ms = doc.get("vid"), doc.get("makespan_cycles")
-        if not isinstance(vid, str) or not vid:
-            raise ValueError(
-                f"base/incumbent.json carries invalid vid: {vid!r}")
-        if isinstance(ms, bool) or not isinstance(ms, int) or ms < 0:
-            raise ValueError(
-                "base/incumbent.json carries invalid makespan_cycles: "
-                f"{ms!r}")
-        return vid, ms
+        raise ValueError(
+            "base/incumbent.json exists but v8 has no promotion — a stale "
+            "pre-v8 workspace; re-run with fresh_start=true")
     anchor_path = art / "base" / "origin_anchor.json"
     try:
         doc = json.loads(anchor_path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise ValueError(
-            "no base/incumbent.json and no base/origin_anchor.json — the "
-            "baseline stage has not frozen the origin anchor") from exc
+            f"no base/origin_anchor.json — the baseline stage has not "
+            f"frozen the origin anchor: {anchor_path}") from exc
     except json.JSONDecodeError as exc:
         raise ValueError(
             f"base/origin_anchor.json unparseable: {exc}") from exc

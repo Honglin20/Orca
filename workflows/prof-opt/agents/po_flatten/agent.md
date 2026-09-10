@@ -64,7 +64,7 @@ $ORCA_ARTIFACTS_DIR/
 ├── .run_lock                     # single-writer heartbeat lock {run_id, pid, ts}
 │                                 #   (continuation model: the watchdog and
 │                                 #   the baseline finalizer touch it mid-run)
-├── BASELINE.lock                 # structural anchor {version: 2, model_path,
+├── BASELINE.lock                 # structural anchor {version: 3, model_path,
 │                                 #   py_files_sha256 (shadow closure)}
 ├── project_manifest.md / .user_pkg
 ├── train_device.json             # training device backend resolved ONCE here

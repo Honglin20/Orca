@@ -6,9 +6,10 @@ tools: [bash, read, write, edit, glob, grep, task]
 
 Each round generates three independent macro-architecture hypotheses, fuses
 them into one design, and sends only that design through assessment,
-implementation, and `mfu-analyzer`. A measured improvement over the current
-incumbent enters `po_probe`; reaching the frozen origin target is disclosure
-only. Accuracy-safe improvements are promoted by `po_gate` for the next round.
+implementation, and `mfu-analyzer`. A measured improvement over the frozen
+origin line enters `po_probe`; reaching the frozen origin target is disclosure
+only. Every round designs on the SAME origin tree — progress accumulates
+through composition (`absorbs`), never through a moved base.
 
 ## Invariants
 
@@ -20,9 +21,11 @@ only. Accuracy-safe improvements are promoted by `po_gate` for the next round.
   `architecture_decision.md` and `proposals.json`. Under `variants/<vid>/`, the
   implementer owns source/declaration/ONNX, the assessor owns `assessment.md`,
   and MFU owns profiling products.
-- Do not use ONNX graph diffs or `op_delta` as proposal gates. Lineage is
-  `parent_vid`, `base_at_proposal`, `change_spec`, `edited_files`, `change_sig`,
-  and the source snapshot.
+- Do not use ONNX graph diffs or `op_delta` as proposal gates. Provenance is
+  composition: `absorbs` (the frontier vids whose proven mechanisms this
+  design fuses), `change_spec`, `edited_files`, `change_sig`, and the source
+  snapshot. `parent_vid` / `base_at_proposal` are retired — the base tree is
+  ALWAYS the origin baseline (`shadow/` never moves; v8 has no promotion).
 - A lone Norm deletion, activation swap, transpose deletion, or simple block
   pruning is not an acceptable final architecture. Such edits may appear only
   inside a larger, business-grounded design.
@@ -33,19 +36,24 @@ only. Accuracy-safe improvements are promoted by `po_gate` for the next round.
   operator organization, information flow), not depth-style scaling search.
   Provably-redundant micro-module removal (a cancelling op pair, a
   redundant norm) is not a depth change.
-- Proposal lineage has exactly one legal parent: the current incumbent
-  (`base/incumbent.json`) — a variant that passed the accuracy gate AND
-  improved latency — or the origin baseline (`parent_vid: null`) before the
-  first promotion. A variant that failed either gate (e.g. latency_improved
-  but accuracy_fail) is a lineage dead-end: re-derive its ideas on the
-  current incumbent `shadow/` tree, never name it as parent and never build
-  on its tree. `append_impl_row.py` mechanically rejects any other parent.
+- `base/frontier.json` (refreshed by `frontier_snapshot.py` in Step 0) is the
+  round's number layer: `frontier` lists the non-dominated success variants —
+  ABSORB their proven mechanisms into the new design and name them in
+  `absorbs`; `avoid` lists the failed vids (accuracy_fail /
+  probe_insufficient / latency_fail) — do NOT re-derive
+  the same work, and declare in the selector's `## avoids` section what was
+  steered around and why; `in_flight` shows each running training's CURRENT
+  epoch/metric/gap/streak — a training whose live numbers look bad is
+  evidence against its direction before any terminal row exists.
 - Predicted cycles are calibration evidence, never admission. Actual MFU
   measurement decides.
 
-## Step 0 — round and re-entry
+## Step 0 — round, frontier, re-entry
 
-Verify deployed scripts and derive the working round with `round_state.py`.
+Verify deployed scripts, refresh the mechanical view
+(`python3 "$ORCA_ARTIFACTS_DIR/scripts/frontier_snapshot.py" --artifacts
+"$ORCA_ARTIFACTS_DIR"` — non-zero exit is a torn workspace: fail loud), and
+derive the working round with `round_state.py`.
 Create `rounds/<RRR>/candidates/`. If a parseable `proposals.json` already
 exists, reuse it and resume implementation; never regenerate a completed
 selector result.
@@ -58,22 +66,26 @@ Dispatch these tasks in parallel, each after fully reading its subagent file:
 - `hardware-architecture-proposer` → `candidates/hardware.md`
 - `sota-architecture-proposer` → `candidates/sota.md`
 
-Provide the baseline documents, current `shadow/` source, current
-`base/incumbent.json` or origin baseline, prior analyses, prior variant MFU
-reports, history, accuracy rules, failed signatures, and the shared hardware
-reference `{{ subagents_root }}/references/ascend.md`. Each candidate must name
+Provide each candidate the SAME bounded brief: the baseline documents, the
+current `shadow/` source (the origin tree), the FULL `base/frontier.json`
+(frontier to absorb, avoid to steer around, in-flight live numbers), the
+previous round's `analysis.md` (round 1: none), the accuracy rules snapshot,
+and the shared hardware reference
+`{{ subagents_root }}/references/ascend.md`. Do NOT dump raw history or
+every prior variant's MFU report — the frontier view plus the rules are the
+distilled evidence. Each candidate must name
 the information invariant, measured root cause, affected source files,
-shape/operator strategy, latency mechanism, risks, and implementation sketch.
-Build failed signatures as the union of `failed_sigs` from every existing
-`rounds/*/direction.json`. A training success completed after the latest gate
-remains pending until the next gate promotion; always record the base actually
-used in `base_at_proposal`.
+shape/operator strategy, latency mechanism, risks, and implementation sketch,
+and say which frontier mechanisms (if any) it builds on.
 
 ## Step 2 — fuse to one architecture
 
 After all candidates exist, dispatch `architecture-selector`. It writes only:
 
-- `rounds/<RRR>/architecture_decision.md`
+- `rounds/<RRR>/architecture_decision.md` — with `## absorbs` (which
+  frontier vids' mechanisms the fused design takes and how they combine)
+  and `## avoids` (which avoid-listed/failed directions it steers around
+  and why) sections
 - `rounds/<RRR>/proposals.json`
 
 It must fuse, reject, or combine the candidates into exactly one implementable
@@ -81,22 +93,23 @@ macro architecture. One round has one consumer, so never emit a second
 proposal. An empty list is legal only with a non-empty rationale explaining
 why every direction is impossible.
 
-The proposal contains: `vid=r{R}-01`, `lever`, `change_sig`, `parent_vid`,
-`base_at_proposal`, `target_modules`, `target_pattern_id`, `rationale`,
+The proposal contains: `vid=r{R}-01`, `lever`, `change_sig`, `absorbs`,
+`target_modules`, `target_pattern_id`, `rationale`,
 `change_spec`, optional integer `predicted_delta_cycles`, `prediction_basis`,
 `edited_files`, `predicted_acc_impact`, `accuracy_evidence`, and
 `sota_reference`. It must not contain `op_delta`. The selector uses
 `build_sig.py` and `history_lib.py` for signature and dedup.
 
 Validate: correct round; one-or-zero proposals; non-empty unique signature;
-current incumbent lineage; every edited file exists under `shadow/`; the
-change preserves the incumbent's depth (no block/layer/repeat-count change —
+`absorbs` names only vids that exist in history (never the vid itself); the
+decision document carries the `## absorbs` / `## avoids` sections with valid
+references; every edited file exists under `shadow/`; the
+change preserves the frozen depth (no block/layer/repeat-count change —
 see the frozen-depth invariant); and the rationale covers business
 semantics, MFU root cause, and hardware mapping.
-Re-dispatch the selector once on invalid output, then fail loud — except a
-lineage mismatch (parent not the current incumbent/origin baseline), which is
-never selector-repairable: re-derive the design on the incumbent base and
-rewrite the proposal with the correct lineage.
+Re-dispatch the selector once on invalid output, then fail loud — an invalid
+`absorbs` reference is selector-repairable (fix the provenance); anything
+structural is not.
 
 ## Step 3 — implement and measure only the fused design
 
@@ -112,8 +125,8 @@ For the sole proposal dispatch, in order:
 
 No candidate document may bypass the selector. Use the existing bounded repair
 loop on the same selected architecture; never introduce a competing proposal.
-Append the implementation history row with the real incumbent parent and base
-pointer. `predicted_delta_cycles`, when present, remains a hypothesis field.
+Append the implementation history row with the real `absorbs` list.
+`predicted_delta_cycles`, when present, remains a hypothesis field.
 
 After each implementation or repair, validate the assessment sentinel and six
 required sections against the current variant source. Then compute the key
@@ -125,7 +138,7 @@ agent judgment.
 
 Run `$ORCA_AGENT_RESOURCES/scripts/run_latency_recheck.sh`. It records
 `latency_improved` only when variant makespan is strictly lower than the
-incumbent makespan. Equal or slower results are normal `latency_fail` outcomes
+origin line. Equal or slower results are normal `latency_fail` outcomes
 and do not enter training. The frozen origin target is recorded separately.
 
 For a repairable `structural_mismatch` or `variant_broken`, delete the stale
@@ -135,15 +148,16 @@ For `latency_fail`, read the MFU report and `repair_trace.json` first. While
 `repair_count < 5`, delete the stale verdict and profile directory, dispatch the
 implementer with the full MFU report as the latency repair directive, delete the
 stamp, reassess, rerun MFU, and recheck. At `repair_count >= 5`, stop repairing
-and write `rounds/<RRR>/direction.json` with the round and the selected
-`change_sig` in `failed_sigs`. Never delete the fifth verdict or attempt a sixth
+— the `latency_fail` terminal row IS the record: `frontier_snapshot.py`
+derives the `avoid` list from it mechanically, so no hand-written direction
+file exists. Never delete the fifth verdict or attempt a sixth
 measurement.
 
 ## Step 4 — artifacts and emit
 
 Write `rounds/<RRR>/analysis.md` with `## architecture`, `## latency`, and
 `## accuracy`. Record candidate paths, selector decision, selected invariant,
-incumbent/variant cycles, improvement result, origin-target disclosure, MFU
+origin/variant cycles, improvement result, origin-target disclosure, MFU
 report, and next direction. Empty rounds record the exhausted rationale.
 
 For `latency_improved`, seed the ledger shard with that status, refresh the
@@ -154,8 +168,7 @@ reach the web panel immediately (a push failure never blocks the emit).
 
 List only files that exist in `generated_artifacts`. Include candidate files,
 `architecture_decision.md`, `proposals.json`, `analysis.md`, assessment, stamp,
-declaration, MFU report, verdict/history artifacts, and `direction.json` only on
-the exhausted `latency_fail` path.
+declaration, MFU report, and verdict/history artifacts.
 
 Emit one JSON line only with `status`, `error`, `repair_count`, and honest
 `generated_artifacts`. A complete empty or slower round is `executed`; missing

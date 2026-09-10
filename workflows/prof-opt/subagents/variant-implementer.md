@@ -24,12 +24,11 @@ The caller will provide:
    `scripts/render_run.sh` + `scripts/diff_check.py` (deployed shared
    scripts), `contracts.json` (shadow_pkgs, interpreter).
 2. **`<proposal>`**: the proposal object from `rounds/<RRR>/proposals.json`
-   (vid, change_spec, edited_files, change_sig, target_modules, optional
-   predicted_delta_cycles, lineage, and identity fields copied verbatim).
-   The base tree is ALWAYS the current `shadow/` (the incumbent's source) —
-   never a previous variant's tree, even when history mentions one as
-   parent. A proposal whose change_spec asks you to start from anything
-   other than `shadow/` is invalid: fail loud instead of complying.
+   (vid, change_spec, edited_files, change_sig, target_modules, absorbs,
+   optional predicted_delta_cycles, and identity fields copied verbatim).
+   The base tree is ALWAYS the current `shadow/` (the origin baseline tree —
+   it never moves). A proposal whose change_spec asks you to start from
+   anything other than `shadow/` is invalid: fail loud instead of complying.
 3. **`<repair_directive>`**: empty on the first pass. On a repair pass it
    names the failure to fix, as one of three prefixed forms:
    - `structural:<file-layer finding>` — your declaration disagreed with
@@ -69,19 +68,16 @@ The caller will provide:
    confirm every declared site was applied.
 4. **Write `declaration.json`** — the machine-checked mirror of the
    proposal: the identity fields (`change_sig` / `lever` / `change_spec` /
-   `target_modules` / `edited_files` / optional
-   `predicted_delta_cycles` / `prediction_basis` / `parent_vid` /
-   `base_at_proposal`) copied VERBATIM from the
+   `target_modules` / `edited_files` / `absorbs` / optional
+   `predicted_delta_cycles` / `prediction_basis`) copied VERBATIM from the
    proposal; `round` and `seq` DERIVED from the vid (`r{round}-{seq:02d}`),
    never guessed:
    ```json
    {"vid": "r1-01", "round": 1, "seq": 1, "change_sig": "<verbatim>",
     "lever": "<verbatim>", "change_spec": "<verbatim>",
-    "target_modules": ["..."],
+    "target_modules": ["..."], "absorbs": [],
     "edited_files": ["pkg/model.py"],
-    "predicted_delta_cycles": -3792, "prediction_basis": "<verbatim>",
-    "parent_vid": null,
-    "base_at_proposal": {"vid": null, "makespan_cycles": 15288}}
+    "predicted_delta_cycles": -3792, "prediction_basis": "<verbatim>"}
    ```
 5. **Export the variant onnx** — render + run the export template with
    `shadow_dir=$ORCA_ARTIFACTS_DIR/variants/$VID/shadow`, `out` under

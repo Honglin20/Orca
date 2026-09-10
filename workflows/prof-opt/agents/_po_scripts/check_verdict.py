@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Check that a variant is strictly faster than the current incumbent."""
+"""Check that a variant is strictly faster than the frozen origin line (v8).
+
+The admission line is ALWAYS ``origin_anchor.baseline_makespan_cycles`` —
+the base tree never moves and no promotion exists. A leftover
+``base/incumbent.json`` is a stale pre-v8 workspace: fail loud, never adopt.
+"""
 from __future__ import annotations
 
 import argparse
@@ -27,14 +32,12 @@ def check_verdict(artifacts: Path, vid: str, makespan: int | None = None) -> dic
 
     incumbent_path = artifacts / "base" / "incumbent.json"
     if incumbent_path.is_file():
-        incumbent = _load(incumbent_path)
-        incumbent_ms = incumbent.get("makespan_cycles")
-        incumbent_vid = incumbent.get("vid")
-    else:
-        incumbent_ms = anchor.get("baseline_makespan_cycles")
-        incumbent_vid = None
-    if not isinstance(incumbent_ms, int) or isinstance(incumbent_ms, bool):
-        raise ValueError("current incumbent has no integer makespan_cycles")
+        raise ValueError(
+            "base/incumbent.json exists but v8 has no promotion — a stale "
+            "pre-v8 workspace; re-run with fresh_start=true")
+    line_ms = anchor.get("baseline_makespan_cycles")
+    if not isinstance(line_ms, int) or isinstance(line_ms, bool):
+        raise ValueError("origin anchor has no integer baseline_makespan_cycles")
 
     if makespan is None:
         verdict = _load(artifacts / "variants" / vid / "verdict.json")
@@ -43,15 +46,15 @@ def check_verdict(artifacts: Path, vid: str, makespan: int | None = None) -> dic
         variant_ms = makespan
     if not isinstance(variant_ms, int) or isinstance(variant_ms, bool):
         raise ValueError(f"{vid} has no integer makespan_cycles")
-    if variant_ms >= incumbent_ms:
+    if variant_ms >= line_ms:
         raise ValueError(
-            f"{vid} makespan {variant_ms} is not below incumbent {incumbent_ms}")
+            f"{vid} makespan {variant_ms} is not below the frozen origin "
+            f"line {line_ms}")
     return {
         "vid": vid,
         "makespan_cycles": variant_ms,
-        "incumbent_vid": incumbent_vid,
-        "incumbent_makespan_cycles": incumbent_ms,
-        "improvement_cycles": incumbent_ms - variant_ms,
+        "admission_line_makespan_cycles": line_ms,
+        "improvement_cycles": line_ms - variant_ms,
         "target_cycles": target,
         "target_met": variant_ms <= target,
         "ok": True,

@@ -1,5 +1,5 @@
 name: prof-opt
-description: "硬件 profiling 证据驱动的模型结构优化闭环。唯一 profiling 方式 = mfu-analyzer 调用用户内网 mfu_benchmark 评测工具（芯片/精度/核数为显式 inputs；无环境嗅探、无本地估算、无静默降级；本地 E2E 走同一链路——仓库内 mfu_benchmark.py 是 CLI 形状替身，真机换真脚本，CLI 契约不变）。在用户项目旁的影子工作区内，每轮独立提出恰一个结构变体（历史/规则/前序报告仅作证据非血缘，可大步修改），经 variant-assessor 软对齐评估 → 实现 → mfu 实测 → 原地修复直至达到冻结时延线（单变体收敛环）；基线完整训练后台非阻塞运行并推送精度曲线；变体达线即经设备账本（agent 读占用原文选卡 + O_EXCL 锁 claim --idx）占卡启动同预算完整训练、两条件存活确认后立即放行（异步训练流水线），detached watchdog 逐 epoch 与基线同深度对比、连续超预算自动早停（流式早停）；任一变体 success、轮数硬帽、或连续多轮零提案（idle 出环）即出环，report 无 kill 等全部在飞训练终态后按 gap 最优判 winner（并列取 makespan），首段固定披露 profiling 来源 / 训练设备后端 / chart daemon 状态，并对遗留死锁做卡释放兜底。实测精度教训按规则沉淀进项目镜像，供后续轮与后续 run 提案复用。准入条款：模型须可 opset17 静态 shape 导出（禁 dynamic_axes，动态 shape 模型不在范围）；训练须按给定轮数精确执行——自带 early-stopping 的项目不在本 workflow 范围。用户原文件全程只读，胜出结构最终以新文件名写回项目。"
+description: "硬件 profiling 证据驱动的模型结构优化闭环。唯一 profiling 方式 = mfu-analyzer 调用用户内网 mfu_benchmark 评测工具（芯片/精度/核数为显式 inputs；无环境嗅探、无本地估算、无静默降级；本地 E2E 走同一链路——仓库内 mfu_benchmark.py 是 CLI 形状替身，真机换真脚本，CLI 契约不变）。在用户项目旁的影子工作区内，每轮独立提出恰一个结构变体（v8 同基前沿探索：base 恒冻结 origin 不晋升，每轮先经 frontier_snapshot 读 base/frontier.json——吸收前沿已验证机制（absorbs 组合谱系）/避开失败方向（avoid 避坑清单）/查看在飞训练实时精度对比（in_flight），上下文三件套有界不随轮数膨胀），经 variant-assessor 软对齐评估 → 实现 → mfu 实测 → 原地修复直至达到冻结时延线（单变体收敛环）；基线完整训练后台非阻塞运行并推送精度曲线；变体达线即经设备账本（agent 读占用原文选卡 + O_EXCL 锁 claim --idx）占卡启动同预算完整训练、两条件存活确认后立即放行（异步训练流水线），detached watchdog 逐 epoch 与基线同深度对比、连续超预算自动早停（流式早停）；任一变体 success、轮数硬帽、或连续多轮零提案（idle 出环）即出环，report 无 kill 等全部在飞训练终态后按 gap 最优判 winner（并列取 makespan），首段固定披露 profiling 来源 / 训练设备后端 / chart daemon 状态，并对遗留死锁做卡释放兜底。实测精度教训按规则沉淀进项目镜像，供后续轮与后续 run 提案复用。准入条款：模型须可 opset17 静态 shape 导出（禁 dynamic_axes，动态 shape 模型不在范围）；训练须按给定轮数精确执行——自带 early-stopping 的项目不在本 workflow 范围。用户原文件全程只读，胜出结构最终以新文件名写回项目。"
 
 entry: po_flatten
 
@@ -84,12 +84,12 @@ inputs:
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 节点形态：7 节点 = 6 个 agent + 1 个 script（po_gate）。agent 内确定性逻辑
-# 执行工作区 scripts/ 并 emit 单行 JSON；gate 先做确定性 incumbent 晋升，
-# 再由纯读决策脚本计算路由。
+# 执行工作区 scripts/ 并 emit 单行 JSON；gate 先刷新机械前沿视图
+# （frontier_snapshot.py → base/frontier.json），再由纯读决策脚本计算路由。
 #
 # 单变体收敛环：po_propose 节点内一轮 = 一个变体（提案 → variant-assessor
 # 软对齐评估 → 实现 → 实测 → 原地修复 ≤5），达线即交 po_probe；不达线淘汰
-# 并留 failed_sigs 换路指令。
+# ——latency_fail 终态行经 frontier_snapshot 机械派生为 avoid 避坑清单。
 #
 # 异步训练流水线：po_probe 先 device_alloc probe 看占用原文、agent 选卡、
 # claim --idx 占卡（O_EXCL），渲染 + detach 训练 wrapper 与 watchdog.py，
@@ -211,11 +211,12 @@ nodes:
   # ── Agent 4: po_propose（多架构候选 → selector 融合 → 单变体验证）───────
   #   三个 architecture proposer 并行生成业务/硬件/SOTA 候选，selector 融合为
   #   唯一架构；只有 selector 产物进入 assessor/implementer/mfu。预测仅披露，
-  #   实测严格优于 incumbent 才进入 probe；origin target 保持冻结。op_delta
-  #   不再是契约字段，parent_vid + source snapshot 记录谱系。depth 冻结——
-  #   禁增删/合并/重排 block 与重复次数（结构突破非超参寻优）。emit 门通过后
-  #   随门 best-effort 推送 docs manifest——每轮 round 文档即时上板（不等
-  #   report 终推）。
+  #   实测严格优于冻结 origin 线才进入 probe；origin target 保持冻结。op_delta
+  #   不再是契约字段，absorbs（组合谱系）+ source snapshot 记录来源。depth 冻结——
+  #   禁增删/合并/重排 block 与重复次数（结构突破非超参寻优）。上下文三件套：
+  #   base/frontier.json（前沿吸收/avoid 避坑/在飞实时精度）+ 上轮 analysis.md +
+  #   accuracy rules。emit 门通过后随门 best-effort 推送 docs manifest——每轮
+  #   round 文档即时上板（不等 report 终推）。
   #   executed → po_probe；catch-all → po_report。
   # ───────────────────────────────────────────────────────────────────────────
   - name: po_propose
@@ -273,16 +274,16 @@ nodes:
         to: po_gate
       - to: po_report
 
-  # ── Script 6: po_gate（确定性晋升 + 纯读现算决策）────────────────────────
+  # ── Script 6: po_gate（frontier 快照 + 纯读现算决策）────────────────────
   #   决策前先验部署件版本戳（不符输出 finish-failed 披露 payload，经
-  #   catch-all 进 po_report）→ 将已完成训练且严格更快的 accuracy-success
-  #   变体晋升为当前 base，并写 incumbent_promotion.json → 读盘面（history 终态行 + round_state current
+  #   catch-all 进 po_report）→ 刷新机械前沿视图 frontier_snapshot.py →
+  #   base/frontier.json（v8 无晋升：base 树恒 origin，永不移动）→ 读盘面
+  #   （history 终态行 + round_state current
   #   + 各轮 proposals.json + origin 锚——不读任何上游节点 output）→ 确定性
   #   脚本出 decision（顺序 first-match-wins）：report（任一 accuracy-success
   #   vid 同时达到 origin target；出环不打断存量，由 report 终态收割；或
   #   round ≥ max_rounds 轮数硬帽，永不回边；或从最新轮往回连续
-  #   idle_round_cap 轮零提案——idle_exhausted，防搜索空间耗尽后空转；若本次
-  #   gate 刚晋升新 incumbent，则旧 base 的 idle streak 重置）/
+  #   idle_round_cap 轮零提案——idle_exhausted，防搜索空间耗尽后空转）/
   #   loop（其余一切——唯一回边出口）。loop → 回边 po_propose（DAG 显式
   #   容环）。
   # ───────────────────────────────────────────────────────────────────────────
@@ -308,7 +309,7 @@ nodes:
   #   output 引用：读工作区盘面（history/rounds/contracts/baseline/variants/
   #   train_device/origin 锚/accuracy_rules）判终态与失败归因 → winner =
   #   达到 origin target 的 success 变体中 gap 最优（并列 makespan 最优），
-  #   无最终达标变体则披露 incumbent 进展 → 卡释放兜底（每把 devices/*.lock 查 owner pid，已死
+  #   无最终达标变体则披露 frontier 进展 → 卡释放兜底（每把 devices/*.lock 查 owner pid，已死
   #   → release；无法判定 → 披露 liveness unverifiable）→ prof_opt_report.md
   #   + 静态图 + finalize chart（live 终稿 "(final)" 推送 + 分析文档清单
   #   --docs）→ 报告首段固定披露三行（profiling 来源 = mfu 实测 via 用户内网
@@ -335,7 +336,7 @@ nodes:
           properties:
             vid: {type: string}
             change_sig: {type: string}
-            lineage: {type: array, items: {type: string}, description: "从 origin baseline 到 winner 的晋升 vid 链"}
+            lineage: {type: array, items: {type: string}, description: "winner 的组合谱系：其历史行 absorbs 清单（吸收了前沿哪些 vid 的机制；空 = 未吸收；v8 无晋升链）"}
         baseline:
           type: object
           required: [makespan, ref_acc]

@@ -4,16 +4,18 @@
 
 ---
 
-当前无进行中任务。
+**当前任务**：prof-opt v8（同基前沿探索）——代码已实现并提交，**E2E 实测进行中**
 
-**最近完成**：Windows 原生兼容（2026-09-09，commits `4a00177` + `083cfa0`，release note：`docs/releases/2026-09-09-windows-native-compat.md`）——chart TCP 分支/flock shim/探活零杀伤/熔断限流/UTF-8；WSL 零回归 + E2E 验收 1-3 全 PASS。
+- 已完成：SPEC（`docs/specs/prof-opt-v8-spec.md`）+ 实现 + 282 green + tars validate 零 warning + code-reviewer 自检（3 major + 5 minor 全部修复，含 gate_node stdout 泄漏真 bug）
+- release note：`docs/releases/2026-09-10-profopt-v8-frontier.md`
+- **进行中**：E2E（WSL in-session：claude -p 驱动 tars skill + orca CLI，target 项目，max_rounds=2，epoch 帽 10）——启动脚本 `.e2e_scratch/e2e_v8_launch.sh`
+- 已拍板（用户 2026-09-10）：①永不晋升 ②被支配变体照旧放行 ③历史 = 机械层 + frontier 派生快照
+- 注意：`playground/target/artifacts/prof-opt` 旧工作区 2026-09-10 11:33 被外部清除（非本会话），E2E 为干净首跑
 
 **挂账小项（非阻塞，下次顺手）**：
-- **in-session inline script 推 chart 自死锁**（跨平台既有，POSIX 同现）：`next` 持 tape flock 临界区内联跑 script → daemon `_FlockSafeTape.append` 等同锁；架构级专项待立项（复现证据 `.e2e_win/`）
-- **CC hooks Windows 静默死**：注册命令 `bash`/`python3` 命中 Store stub——nudge/审批桥需 python 化 + `sys.executable` 绝对路径注册
-- 三份 msvcrt 锁实现归并（`web_registry`/`_project`/`_flock`）；pidfile 镜像名校验；opencode→tars skill 自动编排全链补跑待 deepseek 余额
-- Windows 上 ScriptNode 走 cmd.exe，`$VAR` 不展开——product gap 待立项
-- **构建流程缺口**：前端源码变更未强制重建 static——考虑提交流程加检查
-- HEAD 既有 pytest 失败 3 个：`test_gate_node_sh_parses_after_quote_fix`（陈旧断言）、`test_baseline_chain_*` ×2
-- **测试卫生债**：部分 tests/iface/web 套件不隔离 ORCA_HOME/注册表——根治 = conftest autouse 隔离
-- 仓库根 `_e2e_playground` MSYS 破损 symlink 阻断 Windows python 跑全量 pytest（环境残留，建议移出或换 junction）
+- **in-session inline script 推 chart 自死锁**（跨平台既有）：架构级专项待立项
+- **CC hooks Windows 静默死**：需 python 化 + `sys.executable` 绝对路径注册
+- 三份 msvcrt 锁实现归并；Windows ScriptNode `$VAR` 不展开；前端 static 未强制重建
+- HEAD 既有 pytest 失败 2 个：`test_baseline_chain_*` ×2（本次 review 顺手修活了 `test_gate_node_sh_parses_after_quote_fix`）
+- **测试卫生债**：部分 tests/iface/web 套件不隔离 ORCA_HOME
+- 仓库根 `_e2e_playground` MSYS 破损 symlink 阻断 Windows 全量 pytest

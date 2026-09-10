@@ -25,10 +25,13 @@ and the fused design must never acquire one from a combination. The frozen
 stage/block/repeat structure is the canvas; the design work is wiring,
 operator organization, and information flow.
 
-Lineage has exactly one legal parent: the current incumbent
-(`base/incumbent.json`) — a variant that passed the accuracy gate AND improved
-latency — or the origin baseline (`parent_vid: null`) before the first
-promotion. A variant that failed either gate (e.g. latency_improved but
-accuracy_fail) is a lineage dead-end: its ideas may be re-derived on the
-current incumbent `shadow/` tree, but it must never be named as parent, and
-the new design must never stack on its tree.
+The design base is ALWAYS the origin baseline source (`shadow/` — it never
+moves; there is no promotion and no parent tree). Provenance is composition:
+the decision document MUST carry two sections — `## absorbs` naming the
+frontier vids (`base/frontier.json`) whose proven mechanisms the fused design
+takes and how they combine, and `## avoids` naming the avoid-listed
+directions it deliberately steers around and why. Every `r<round>-<seq>`
+reference in both sections must exist in history; a failed variant's lessons
+survive even though its lineage does not — absorb what survived measurement,
+say what changed, and never present the new design as a continuation of a
+failed variant.

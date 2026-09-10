@@ -5,9 +5,9 @@ Covers the admission list the spec names:
   - device_alloc: probe raw passthrough (incl. CLI failure fail loud),
     claim --idx lock/refusal/out-of-range (the fuller matrix also lives in
     test_po_v6.py), adopt/release non-regression, pid_lib unknown semantics
-  - check_verdict.py: the ONE incumbent-improvement predicate (strict boundary,
-    target disclosure, torn verdicts) + its three callers agreeing (recheck / probe emit /
-    protocol doc reference)
+  - check_verdict.py: the ONE origin-line improvement predicate (strict
+    boundary, target disclosure, torn verdicts) + its three callers agreeing
+    (recheck / probe emit / protocol doc reference)
   - gate_decide idle exit: N consecutive zero-proposal rounds -> report;
     fewer -> loop; a non-idle round breaks the streak
   - watchdog.py: duplicate-epoch last-wins disclosure, streak threshold
@@ -36,7 +36,7 @@ _SCRIPTS = _REPO / "workflows" / "prof-opt" / "agents" / "_po_scripts"
 sys.path.insert(0, str(_SCRIPTS))
 
 from gate_decide import decide  # noqa: E402
-from promote_incumbent import promote  # noqa: E402
+from history_lib import expected_base  # noqa: E402
 
 
 def _run_cli(args, env=None, timeout=120):
@@ -258,16 +258,16 @@ def test_device_alloc_sweep_releases_dead_keeps_alive_and_unknown(tmp_path,
         assert (devices / f"{kept}.lock").exists()
 
 
-# ── check_verdict: the ONE incumbent-improvement predicate ───────────────────
+# ── check_verdict: the ONE origin-line improvement predicate ─────────────────
 
 def _verdict_ws(tmp_path: Path, makespan=400, target=500,
-                incumbent=600) -> Path:
+                line=600) -> Path:
     art = tmp_path / "ws"
     art.mkdir(parents=True, exist_ok=True)
     (art / "base").mkdir(parents=True, exist_ok=True)
     (art / "base" / "origin_anchor.json").write_text(json.dumps(
         {"target_cycles": target,
-         "baseline_makespan_cycles": incumbent}), encoding="utf-8")
+         "baseline_makespan_cycles": line}), encoding="utf-8")
     vd = art / "variants" / "r1-01"
     vd.mkdir(parents=True)
     (vd / "verdict.json").write_text(json.dumps(
@@ -275,48 +275,45 @@ def _verdict_ws(tmp_path: Path, makespan=400, target=500,
     return art
 
 
-def test_check_verdict_requires_strict_incumbent_improvement(tmp_path):
-    art = _verdict_ws(tmp_path, makespan=500, target=400, incumbent=600)
+def test_check_verdict_requires_strict_origin_line_improvement(tmp_path):
+    art = _verdict_ws(tmp_path, makespan=500, target=400, line=600)
     proc = _run_cli([sys.executable, str(_SCRIPTS / "check_verdict.py"),
                      "--vid", "r1-01", "--artifacts", str(art)])
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
-    assert result["incumbent_makespan_cycles"] == 600
+    assert result["admission_line_makespan_cycles"] == 600
     assert result["improvement_cycles"] == 100
     assert result["target_cycles"] == 400
     assert result["target_met"] is False
 
-    # equality with the incumbent is not an improvement
-    art2 = _verdict_ws(tmp_path / "b", makespan=600, target=400,
-                       incumbent=600)
+    # equality with the origin line is not an improvement
+    art2 = _verdict_ws(tmp_path / "b", makespan=600, target=400, line=600)
     proc2 = _run_cli([sys.executable, str(_SCRIPTS / "check_verdict.py"),
                       "--vid", "r1-01", "--artifacts", str(art2)])
     assert proc2.returncode == 1
-    assert "not below incumbent" in proc2.stderr
+    assert "not below the frozen origin line" in proc2.stderr
 
     # the --makespan pre-verdict mode judges the same strict boundary
-    art3 = _verdict_ws(tmp_path / "c", makespan=500, target=400,
-                       incumbent=600)
+    art3 = _verdict_ws(tmp_path / "c", makespan=500, target=400, line=600)
     proc3 = _run_cli([sys.executable, str(_SCRIPTS / "check_verdict.py"),
                       "--vid", "r1-01", "--artifacts", str(art3),
                       "--makespan", "600"])
     assert proc3.returncode == 1
 
-    # Once an incumbent exists, it replaces the origin baseline as the strict
-    # comparison line while the origin target remains frozen disclosure.
-    art4 = _verdict_ws(tmp_path / "d", makespan=500, target=400,
-                       incumbent=600)
+    # v8: a stale pre-v8 incumbent.json never becomes the comparison line —
+    # the whole workspace is rejected (fresh_start is the recovery)
+    art4 = _verdict_ws(tmp_path / "d", makespan=500, target=400, line=600)
     (art4 / "base" / "incumbent.json").write_text(json.dumps({
         "vid": "r1-00", "makespan_cycles": 550,
     }), encoding="utf-8")
     proc4 = _run_cli([sys.executable, str(_SCRIPTS / "check_verdict.py"),
                       "--vid", "r1-01", "--artifacts", str(art4)])
-    assert proc4.returncode == 0, proc4.stderr
-    result4 = json.loads(proc4.stdout)
-    assert result4["incumbent_vid"] == "r1-00"
-    assert result4["incumbent_makespan_cycles"] == 550
-    assert result4["improvement_cycles"] == 50
-    assert result4["target_met"] is False
+    assert proc4.returncode == 1
+    assert "v8 has no promotion" in proc4.stderr
+
+    # the same stale-workspace guard rides the shared anchor helper
+    with pytest.raises(ValueError, match="v8 has no promotion"):
+        expected_base(art4)
 
 
 def test_check_verdict_torn_states_fail_loud(tmp_path):
@@ -355,83 +352,20 @@ def test_check_verdict_is_the_single_predicate_three_callers():
     assert "check_verdict.py" in protocol
 
 
-def test_promote_incumbent_advances_shadow_without_moving_origin(tmp_path):
+def test_promotion_is_retired_origin_anchor_is_the_only_base(tmp_path):
+    """v8: promote_incumbent.py is gone; expected_base is CONSTANT at the
+    frozen origin anchor — (None, baseline_makespan_cycles) — and the origin
+    anchor is never modified by anything."""
+    assert not (_SCRIPTS / "promote_incumbent.py").exists()
     art = tmp_path / "ws"
-    base = art / "base"
-    variant = art / "variants" / "r1-01"
-    (base / "profile").mkdir(parents=True)
-    (art / "shadow").mkdir(parents=True)
-    (variant / "shadow").mkdir(parents=True)
-    (variant / "onnx").mkdir(parents=True)
-    (variant / "profile").mkdir(parents=True)
-    anchor = {"baseline_makespan_cycles": 1000, "target_cycles": 500}
-    (base / "origin_anchor.json").write_text(json.dumps(anchor), encoding="utf-8")
-    (art / "shadow" / "model.py").write_text("old", encoding="utf-8")
-    (variant / "shadow" / "model.py").write_text("new", encoding="utf-8")
-    (variant / "onnx" / "model.onnx").write_bytes(b"onnx")
-    (variant / "profile" / "schedule_result.json").write_text("{}", encoding="utf-8")
-    (art / "history.jsonl").write_text(json.dumps({
-        "vid": "r1-01", "round": 1, "parent_vid": None,
-        "change_sig": "sig-1", "makespan_cycles": 800,
-        "outcome": "success",
-    }) + "\n", encoding="utf-8")
-
-    result = promote(art)
-
-    assert result["promoted"] is True
-    assert (art / "shadow" / "model.py").read_text(encoding="utf-8") == "new"
-    assert json.loads((base / "incumbent.json").read_text(encoding="utf-8")) == {
-        "vid": "r1-01", "parent_vid": None, "makespan_cycles": 800,
-        "promoted_round": 1, "change_sig": "sig-1",
-    }
-    assert json.loads((base / "origin_anchor.json").read_text(encoding="utf-8")) == anchor
-
-
-def test_promote_incumbent_uses_current_base_and_excludes_non_improvements(tmp_path):
-    art = tmp_path / "ws"
-    base = art / "base"
-    (base / "profile").mkdir(parents=True)
-    (art / "shadow").mkdir(parents=True)
-    (base / "origin_anchor.json").write_text(json.dumps({
-        "baseline_makespan_cycles": 1000, "target_cycles": 500,
-    }), encoding="utf-8")
-    (base / "incumbent.json").write_text(json.dumps({
-        "vid": "r1-01", "parent_vid": None, "makespan_cycles": 800,
-        "promoted_round": 1, "change_sig": "sig-1",
-    }), encoding="utf-8")
-    (art / "shadow" / "model.py").write_text("incumbent", encoding="utf-8")
-
-    winner = art / "variants" / "r2-01"
-    (winner / "shadow").mkdir(parents=True)
-    (winner / "onnx").mkdir()
-    (winner / "profile").mkdir()
-    (winner / "shadow" / "model.py").write_text("next", encoding="utf-8")
-    (winner / "onnx" / "model.onnx").write_bytes(b"next")
-    (winner / "profile" / "schedule_result.json").write_text("{}", encoding="utf-8")
-    rows = [
-        {"vid": "r2-01", "round": 2, "parent_vid": "r1-01",
-         "change_sig": "sig-2", "makespan_cycles": 700,
-         "outcome": "success"},
-        {"vid": "r2-02", "round": 2, "parent_vid": "r1-01",
-         "change_sig": "sig-fast-but-unsafe", "makespan_cycles": 600,
-         "outcome": "accuracy_fail"},
-        {"vid": "r2-03", "round": 2, "parent_vid": "r1-01",
-         "change_sig": "sig-equal", "makespan_cycles": 800,
-         "outcome": "success"},
-    ]
-    (art / "history.jsonl").write_text(
-        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
-
-    result = promote(art)
-    assert result["promoted"] is True and result["vid"] == "r2-01"
-    incumbent = json.loads((base / "incumbent.json").read_text(encoding="utf-8"))
-    assert incumbent["parent_vid"] == "r1-01"
-    assert incumbent["makespan_cycles"] == 700
-    assert (art / "shadow" / "model.py").read_text(encoding="utf-8") == "next"
-
-    repeated = promote(art)
-    assert repeated == {"promoted": False, "vid": "r2-01",
-                        "makespan_cycles": 700}
+    (art / "base").mkdir(parents=True)
+    anchor = {"baseline_makespan_cycles": 1000, "target_cycles": 500,
+              "accuracy_budget": 0.05}
+    (art / "base" / "origin_anchor.json").write_text(json.dumps(anchor),
+                                                    encoding="utf-8")
+    assert expected_base(art) == (None, 1000)
+    assert json.loads((art / "base" / "origin_anchor.json").read_text(
+        encoding="utf-8")) == anchor
 
 
 def test_gate_continues_after_non_target_success(tmp_path):
@@ -441,7 +375,7 @@ def test_gate_continues_after_non_target_success(tmp_path):
     }) + "\n", encoding="utf-8")
     result = decide(art, max_rounds=5, idle_round_cap=3)
     assert result["decision"] == "loop"
-    assert "promoted incumbent" in result["reason"]
+    assert "frontier points" in result["reason"]
 
     (art / "history.jsonl").write_text(json.dumps({
         "vid": "r1-01", "outcome": "success", "makespan_cycles": 500,
@@ -525,14 +459,13 @@ def test_gate_idle_exhausted_exits_to_report(tmp_path):
     assert "3" in out["reason"]
 
 
-def test_gate_promotion_resets_idle_evidence_from_the_old_base(tmp_path):
-    art = _idle_ws(tmp_path, {r: [] for r in (1, 2, 3)})
-    out = decide(art, max_rounds=10, idle_round_cap=3,
-                 incumbent_promoted=True)
+def test_gate_decision_has_no_promotion_surface(tmp_path):
+    """v8: the gate's decision output carries no incumbent_promotion facts —
+    the promote step is gone and idle evidence is never reset."""
+    art = _idle_ws(tmp_path, {r: [] for r in (1, 2)})
+    out = decide(art, max_rounds=10, idle_round_cap=3)
+    assert "incumbent_promoted" not in out
     assert out["decision"] == "loop"
-    assert out["idle_rounds"] == 3
-    assert out["incumbent_promoted"] is True
-    assert "prior zero-proposal rounds describe the old base" in out["reason"]
 
 
 def test_gate_idle_below_cap_loops(tmp_path):
@@ -695,11 +628,11 @@ def test_watch_final_check_stderr_lands_in_watchdog_log(tmp_path):
 
 def test_v7_scripts_are_in_the_shared_set():
     for name in ("watch_variant.py", "pid_lib.py", "check_verdict.py",
-                 "shadow_pkgs_csv.py"):
+                 "shadow_pkgs_csv.py", "frontier_snapshot.py"):
         assert (_SCRIPTS / name).is_file(), name
     for gone in ("watch_variant.sh", "resolve_profile_mode.sh",
                  "placeholder_profiler.py", "check_bottleneck.py",
-                 "healed_files.py"):
+                 "healed_files.py", "promote_incumbent.py"):
         assert not (_SCRIPTS / gone).exists(), gone
 
 

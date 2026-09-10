@@ -4,15 +4,17 @@
 # Runs INSIDE the po_propose node (the implement → recheck → repair loop's
 # measurement step). For each variants/<vid>/ with a DONE marker and no
 # verdict.json:
-#   1. file-layer declaration check against the CURRENT incumbent shadow;
+#   1. file-layer declaration check against the origin baseline shadow
+#      (v8: shadow/ never moves — it is always the origin tree);
 #   2. profile the variant onnx — the raw schedule_result.json and the single
 #      mfu_bottleneck_report.md are already under variants/<vid>/profile/
 #      (v7: mfu is the ONE profiling path). The gate reads parallel_cycles
 #      directly from the raw JSON; no derived profiling files exist.
-#   3. latency gate via scripts/check_verdict.py —makespan (v7 §6.2: the
+#   3. latency gate via scripts/check_verdict.py —makespan (the
 #      ONE latency-line predicate; this script and the probe emit gate call
 #      it, neither re-implements the comparison). pass means the variant is
-#      strictly faster than the current incumbent; origin target is disclosure.
+#      strictly faster than the frozen origin line; origin target is
+#      disclosure.
 #
 # Writes variants/<vid>/verdict.json, appends rounds/<RRR>/verdicts.jsonl and
 # the L0 history row through the typed history builder. Reconciliation pass:
@@ -177,10 +179,10 @@ if trace.is_file():
         raise SystemExit(2)
 attempt = {"round": v["round"],
            "measured_makespan_cycles": v["makespan_cycles"],
-           "incumbent_makespan_cycles": v["base_makespan_cycles"],
+           "admission_line_makespan_cycles": v["base_makespan_cycles"],
            "target_cycles": v["target_cycles"],
            "gap_cycles": v["makespan_cycles"] - v["base_makespan_cycles"],
-           "reason": "makespan did not improve current incumbent"}
+           "reason": "makespan did not improve the frozen origin line"}
 attempts = doc.setdefault("attempts", [])
 attempts.append(attempt)   # never value-deduplicated: see header comment
 doc["vid"] = vid
@@ -312,7 +314,7 @@ PYEOF
   write_verdict "$vid" "$verdict"
   NEW_COUNT=$((NEW_COUNT + 1)); record_outcome_count "$outcome"
   if [ "$outcome" = "latency_improved" ]; then PASS_COUNT=$((PASS_COUNT + 1)); fi
-  echo "verdict $vid: $outcome (makespan $var_ms vs incumbent $BASE_MS; target $TARGET_CYCLES)" >&2
+  echo "verdict $vid: $outcome (makespan $var_ms vs origin line $BASE_MS; target $TARGET_CYCLES)" >&2
 done
 
 # ── reconciliation: verdict.json present but history row missing ──────────────

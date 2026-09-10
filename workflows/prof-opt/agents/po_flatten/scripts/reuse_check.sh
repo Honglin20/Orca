@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# reuse_check.sh — po_flatten reuse gate (idempotent entry, v7).
+# reuse_check.sh — po_flatten reuse gate (idempotent entry, v8).
 #
 # Verifies, in order:
 #   1. single-writer lock: no OTHER live run owns this workspace
@@ -11,11 +11,12 @@
 #   2. fresh_start=1 -> wipe the ENTIRE reusable workspace (everything under
 #      $ORCA_ARTIFACTS_DIR except .run_lock) and report NO_REUSE so the node
 #      rebuilds from scratch.
-#   3. BASELINE.lock (v7 schema: version / model_path / py_files_sha256 —
+#   3. BASELINE.lock (v8 schema: version 3 / model_path / py_files_sha256 —
 #      the ckpt anchor is deleted) matches the current key inputs. Failure
 #      -> exit 3, two distinguishable states: unreadable/corrupt lock = REAL
-#      error; readable-but-mismatched (or a lock that predates the v7
-#      schema) = rebuild via fresh_start.
+#      error; readable-but-mismatched (or a lock that predates the v8
+#      schema — a v7 workspace with promotion history) = rebuild via
+#      fresh_start.
 #   4. shadow tree + project_manifest.md + readiness/readiness.json exist and
 #      readiness is all-pass -> REUSE (skip the workflow steps).
 #
@@ -150,9 +151,10 @@ except Exception as exc:
     sys.exit(0)
 
 why = []
-if lock.get("version") != 2:
-    why.append(f"lock schema version {lock.get('version')!r} != 2 — the "
-               f"workspace predates the v7 lock; rebuild with fresh_start")
+if lock.get("version") != 3:
+    why.append(f"lock schema version {lock.get('version')!r} != 3 — the "
+               f"workspace predates the v8 lock (no promotion exists, the "
+               f"base never moves); rebuild with fresh_start")
 if lock.get("model_path") != model_path:
     why.append(f"model_path changed: lock={lock.get('model_path')!r} now={model_path!r}")
 

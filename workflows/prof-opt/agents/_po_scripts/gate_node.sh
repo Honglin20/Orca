@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# gate_node.sh — deterministic promotion + decision script-node wrapper.
-# Promotion may advance the current base and writes incumbent_promotion.json.
-# gate_decide.py then reads the workspace only (history terminal rows,
-# round_state current, every round's proposals.json for the idle probe, the
-# frozen origin anchor); the knobs are the round cap and the idle-round cap
-# (workflow inputs). Before either step, the deployed script set's version stamp is
-# verified — a tampered or half-deployed workspace emits the finish-failed
-# disclosure payload, which matches NO explicit route and lands in the
-# catch-all (to: po_report) so the failure is disclosed, never guessed around.
+# gate_node.sh — frontier snapshot + pure-read decision script-node wrapper
+# (v8: the base never moves — there is no promotion).
+# frontier_snapshot.py refreshes base/frontier.json (the mechanical
+# Pareto/avoid/in-flight view the next propose round reads). gate_decide.py
+# then reads the workspace only (history terminal rows, round_state current,
+# every round's proposals.json for the idle probe, the frozen origin anchor);
+# the knobs are the round cap and the idle-round cap (workflow inputs).
+# Before either step, the deployed script set's version stamp is verified — a
+# tampered or half-deployed workspace emits the finish-failed disclosure
+# payload, which matches NO explicit route and lands in the catch-all
+# (to: po_report) so the failure is disclosed, never guessed around.
 set -euo pipefail
 
 ART="${ORCA_ARTIFACTS_DIR:?FATAL: ORCA_ARTIFACTS_DIR not set (gate_node.sh)}"
@@ -36,43 +38,36 @@ fi
 # against an old deployed set without this script only echoes this stderr line.
 python3 "$ART/scripts/archive_round_shadow.py" --artifacts "$ART" || echo "archive_round_shadow failed (non-zero; see stderr)" >&2
 
-# Accuracy-safe latency improvements that have completed training become the
-# next round's base before the pure decision script evaluates loop/report.
-promote_out=""
-promote_err="$ART/.incumbent_promotion.stderr"
-rm -f "$ART/incumbent_promotion.json" "$promote_err"
-if ! promote_out="$(python3 "$ART/scripts/promote_incumbent.py" --artifacts "$ART" 2>"$promote_err")"; then
-  promote_note="$(cat "$promote_err")"
-  rm -f "$promote_err"
+# Refresh the mechanical frontier/avoid/in-flight view BEFORE the decision:
+# the next propose round and the report read it as their number layer. A
+# torn workspace (missing anchor, unparseable rows) fails loud here — the
+# decision input is never silently stale. The root cause travels in the
+# payload (finish-failed must be self-describing, never log-only).
+frontier_err="$ART/.frontier_snapshot.stderr"
+rm -f "$frontier_err"
+if ! python3 "$ART/scripts/frontier_snapshot.py" --artifacts "$ART" \
+    >/dev/null 2>"$frontier_err"; then
+  frontier_note="$(cat "$frontier_err")"
+  rm -f "$frontier_err"
   python3 "$ART/scripts/emit_result.py" \
     --field decision=finish-failed --field round=0 --field target_cycles=0 \
     --field 'success_vids=[]' --field 'in_flight=[]' \
-    --field reason="incumbent promotion failed" \
-    --field "error=$promote_note"
+    --field reason="frontier snapshot failed" \
+    --field "error=$frontier_note"
   exit 0
 fi
-rm -f "$promote_err"
-printf '%s\n' "$promote_out" > "$ART/incumbent_promotion.json"
-promotion_arg=()
-if [ "$(python3 -c 'import json,sys; print(str(bool(json.loads(sys.argv[1]).get("promoted"))).lower())' "$promote_out")" = "true" ]; then
-  promotion_arg=(--incumbent-promoted)
-fi
+rm -f "$frontier_err"
 
 rc=0
 OUT="$(python3 "$ART/scripts/gate_decide.py" --artifacts "$ART" \
-  --max-rounds "$MAXR" --idle-round-cap "$IDLE_CAP" \
-  "${promotion_arg[@]}")" || rc=$?
+  --max-rounds "$MAXR" --idle-round-cap "$IDLE_CAP")" || rc=$?
 if [ "$rc" -eq 0 ]; then
   python3 "$ART/scripts/emit_result.py" --json "$OUT" \
-    --field "incumbent_promotion=$promote_out" \
-    --field 'incumbent_promotion_path=incumbent_promotion.json' \
     --field 'error='
 else
   python3 "$ART/scripts/emit_result.py" \
     --field decision=finish-failed --field round=0 --field target_cycles=0 \
     --field 'success_vids=[]' --field 'in_flight=[]' \
-    --field "incumbent_promotion=$promote_out" \
-    --field 'incumbent_promotion_path=incumbent_promotion.json' \
     --field reason="gate decision script failed" \
     --field "error=gate_decide exited rc=$rc (see stderr in the run log)"
 fi

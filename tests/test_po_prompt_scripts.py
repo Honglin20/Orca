@@ -79,10 +79,10 @@ def test_write_baseline_lock_anchor(tmp_path: Path):
               "--artifacts", str(tmp_path), "--model-path", "pkg/model.py"])
     assert r.returncode == 0, r.stderr
     lock = json.loads((tmp_path / "BASELINE.lock").read_text(encoding="utf-8"))
-    # v7 schema: version / model_path / py_files_sha256 (the ckpt anchor is
+    # v8 schema: version / model_path / py_files_sha256 (the ckpt anchor is
     # deleted — training always starts from a fixed-seed random init)
     assert set(lock) == {"version", "model_path", "py_files_sha256"}
-    assert lock["version"] == 2
+    assert lock["version"] == 3
     assert lock["model_path"] == "pkg/model.py"
     assert list(lock["py_files_sha256"]) == ["pkg/model.py"]
     digest = hashlib.sha256(
@@ -205,29 +205,33 @@ def test_write_done_marker_sha_pinned(tmp_path: Path):
 
 def test_append_impl_row_cli(tmp_path: Path):
     hist = tmp_path / "history.jsonl"
+    (tmp_path / "base").mkdir()
+    (tmp_path / "base" / "origin_anchor.json").write_text(json.dumps(
+        {"baseline_makespan_cycles": 15288, "target_cycles": 7000,
+         "accuracy_budget": 0.05}), encoding="utf-8")
+    env = {"ORCA_ARTIFACTS_DIR": str(tmp_path)}
     r = _run([sys.executable, str(_PO / "append_impl_row.py"),
               "--history", str(hist), "--vid", "r1-01",
-              "--round", "1", "--seq", "1", "--parent-vid", "null",
+              "--round", "1", "--seq", "1",
               "--change-sig", "activation:gelu->relu:b.0",
               "--probe-epochs", "1",
               "--target-modules", '["b.0"]',
-              "--predicted-delta-cycles", "-100",
-              "--base-at-proposal", '{"vid": null, "makespan_cycles": 15288}'])
+              "--predicted-delta-cycles", "-100"], env=env)
     assert r.returncode == 0, r.stderr
     rows = [json.loads(ln) for ln in
             hist.read_text(encoding="utf-8").splitlines()]
     assert rows[0]["implemented"] is True
-    assert "probe_max_steps" not in rows[0]      # v7: the knob fields are gone
-    assert rows[0]["base_at_proposal"]["makespan_cycles"] == 15288
+    assert rows[0]["absorbs"] == []              # v8: composition lineage
+    assert "probe_max_steps" not in rows[0]      # the knob fields are gone
+    assert "parent_vid" not in rows[0] and "base_at_proposal" not in rows[0]
     # terminal-skip path: implemented=False + the outcome row in one call
     r = _run([sys.executable, str(_PO / "append_impl_row.py"),
               "--history", str(hist), "--vid", "r1-02",
-              "--round", "1", "--seq", "2", "--parent-vid", "r1-01",
+              "--round", "1", "--seq", "2",
               "--change-sig", "norm:rm:b.1",
               "--probe-epochs", "1", "--target-modules", '["b.1"]',
               "--predicted-delta-cycles", "-50",
-              "--base-at-proposal", '{"vid": "r1-01", "makespan_cycles": 900}',
-              "--not-implemented", "--outcome", "variant_broken"])
+              "--not-implemented", "--outcome", "variant_broken"], env=env)
     assert r.returncode == 0, r.stderr
     rows = [json.loads(ln) for ln in
             hist.read_text(encoding="utf-8").splitlines()]
@@ -238,22 +242,21 @@ def test_append_impl_row_cli(tmp_path: Path):
     before = hist.read_text(encoding="utf-8")
     r = _run([sys.executable, str(_PO / "append_impl_row.py"),
               "--history", str(hist), "--vid", "r1-03",
-              "--round", "1", "--seq", "3", "--parent-vid", "null",
+              "--round", "1", "--seq", "3",
               "--change-sig", "x", "--probe-epochs", "1",
               "--target-modules", "not-json",
               "--predicted-delta-cycles", "-1",
-              "--base-at-proposal", '{"vid": null}'])
+              "--absorbs", '["r1-01"]'], env=env)
     assert r.returncode == 2
     assert hist.read_text(encoding="utf-8") == before
     # --outcome without --not-implemented is rejected: a silent outcome row on
     # an implemented=True vid would burn the sig's joint retry budget
     r = _run([sys.executable, str(_PO / "append_impl_row.py"),
               "--history", str(hist), "--vid", "r1-04",
-              "--round", "1", "--seq", "4", "--parent-vid", "null",
+              "--round", "1", "--seq", "4",
               "--change-sig", "y", "--probe-epochs", "1",
               "--target-modules", '["m"]', "--predicted-delta-cycles", "-1",
-              "--base-at-proposal", '{"vid": null}',
-              "--outcome", "variant_broken"])
+              "--outcome", "variant_broken"], env=env)
     assert r.returncode == 2 and "--not-implemented" in r.stderr
 
 

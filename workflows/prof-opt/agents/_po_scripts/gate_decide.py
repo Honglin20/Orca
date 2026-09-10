@@ -3,9 +3,9 @@
 
 Reads (never writes): history.jsonl (terminal rows), round_state current
 (the single round source), every round's proposals.json (the idle probe),
-the frozen origin anchor (base/origin_anchor.json — the target line never
-moves), and the wrapper's `incumbent_promoted` fact. The decision order is
-fixed (first match wins, v7 §8):
+and the frozen origin anchor (base/origin_anchor.json — the target line
+never moves). v8: the base tree never moves and no promotion exists — the
+decision order is fixed (first match wins):
 
     report   ANY accuracy-success vid also meets the frozen origin target — OR
              round >= max_rounds (hard cap, never loops; with no success the
@@ -14,10 +14,10 @@ fixed (first match wins, v7 §8):
              are all zero-proposal rounds (decision reason `idle_exhausted`:
              the search space is genuinely spent and idling would burn
              nothing but time)
-    loop     a new incumbent was promoted (old-base idle evidence resets), or
-             everything else — the ONLY other exit; there is no wall-clock
+    loop     everything else — the ONLY other exit; there is no wall-clock
              cap and no plateau early-exit (a plateau is answered by
-             rerouting proposals, not by stopping)
+             rerouting proposals via base/frontier.json's avoid list, not
+             by stopping)
 
 Idle counting: walking from the latest round backwards, a round counts as
 idle iff its proposals.json exists, parses, and holds an EMPTY `proposals`
@@ -26,8 +26,8 @@ streak stops at the first non-idle round — non-empty proposals, or a
 missing/unparseable proposals.json (an incomplete round is never evidence
 of an exhausted space).
 
-Exiting never disturbs in-flight work. A success that improves the incumbent
-but misses the origin target is promoted and the search continues.
+Exiting never disturbs in-flight work. A success that misses the origin
+target stays a frontier point and the search continues.
 best.json and the v5 mode/round-advance markers are not read (retired).
 
 stdout: single-line JSON {"decision", "round", "target_cycles",
@@ -88,8 +88,8 @@ def idle_streak(artifacts: Path, round_no: int) -> int:
     return streak
 
 
-def decide(artifacts: Path, max_rounds: int = 100, idle_round_cap: int = 5,
-           incumbent_promoted: bool = False) -> dict:
+def decide(artifacts: Path, max_rounds: int = 100,
+           idle_round_cap: int = 5) -> dict:
     round_no = current_round(artifacts)       # single source (round_state.py)
     anchor = _load_origin_anchor(artifacts)
     target = anchor["target_cycles"]
@@ -123,11 +123,6 @@ def decide(artifacts: Path, max_rounds: int = 100, idle_round_cap: int = 5,
         reason = (f"round {round_no} >= max_rounds {max_rounds} (hard cap, "
                   f"never loops) — no target-meeting success variant; the report awaits the "
                   f"in-flight terminal states")
-    elif incumbent_promoted:
-        decision = "loop"
-        reason = ("a new accuracy-safe incumbent was promoted at this gate — "
-                  "prior zero-proposal rounds describe the old base, so reset "
-                  "idle exhaustion and continue from the new incumbent")
     elif idle_round_cap > 0 and idle_rounds >= idle_round_cap:
         # the space is spent: the last N rounds each honestly reported zero
         # admissible proposals — idling further rounds burns nothing but time
@@ -139,18 +134,17 @@ def decide(artifacts: Path, max_rounds: int = 100, idle_round_cap: int = 5,
     elif success_vids:
         decision = "loop"
         reason = (f"accuracy-safe success row(s) {', '.join(success_vids)} "
-                  "improved the incumbent but have not reached the origin target — "
-                  "continue proposing from the promoted incumbent")
+                  "hold frontier points but have not reached the origin target — "
+                  "continue proposing (absorb the frontier, avoid the avoid list)")
     else:
         decision = "loop"
         reason = (f"no success row and round {round_no}/{max_rounds} "
                   f"(idle streak {idle_rounds}/{idle_round_cap}) — reroute "
-                  f"proposals (failed_sigs); no other exit")
+                  f"proposals (base/frontier.json avoid list); no other exit")
 
     return {"decision": decision, "round": round_no, "target_cycles": target,
             "success_vids": success_vids, "in_flight": in_flight,
-            "idle_rounds": idle_rounds,
-            "incumbent_promoted": incumbent_promoted, "reason": reason}
+            "idle_rounds": idle_rounds, "reason": reason}
 
 
 def main() -> int:
@@ -160,13 +154,10 @@ def main() -> int:
     ap.add_argument("--idle-round-cap", type=int, default=5,
                     help="consecutive zero-proposal rounds before idle exit "
                          "(<=0 disables the idle exit)")
-    ap.add_argument("--incumbent-promoted", action="store_true",
-                    help="ignore idle evidence produced against the prior base")
     ns = ap.parse_args()
 
     try:
-        result = decide(Path(ns.artifacts), ns.max_rounds, ns.idle_round_cap,
-                        ns.incumbent_promoted)
+        result = decide(Path(ns.artifacts), ns.max_rounds, ns.idle_round_cap)
     except (OSError, ValueError, KeyError) as exc:
         print(f"gate_decide: FAIL {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2

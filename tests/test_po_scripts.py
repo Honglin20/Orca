@@ -65,11 +65,11 @@ def _write_sig_history(hist: Path, sig: str, outcomes: list[str],
     goes through the write path."""
     for i, outcome in enumerate(outcomes, 1):
         vid = f"r1-{i:02d}"
-        row = {"vid": vid, "round": 1, "seq": i, "parent_vid": None,
+        row = {"vid": vid, "round": 1, "seq": i,
                "change_sig": sig, "probe_epochs": probe_epochs,
-               "target_modules": ["m"], "predicted_delta_cycles": -10,
+               "target_modules": ["m"], "absorbs": [],
+               "predicted_delta_cycles": -10,
                "implemented": True,
-               "base_at_proposal": {"vid": None, "makespan_cycles": 100},
                "version": 1, "ts": "2026-09-01T00:00:00+00:00"}
         if outcome == "latency_improved":
             row.update({"structural_check": "pass", "makespan_cycles": 100,
@@ -78,23 +78,23 @@ def _write_sig_history(hist: Path, sig: str, outcomes: list[str],
         elif outcome == "probe_insufficient":
             row.update({"outcome": "probe_insufficient", "stage": "train",
                         "max_retries_hit": True})
-        else:  # advanced / promoted (read-compat) + the L0 eliminations
+        else:  # the L0 eliminations + success rows
             row.update({"outcome": outcome})
         with open(hist, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(row) + "\n")
 
 
 @pytest.mark.parametrize("outcomes,blocked", [
-    (["promoted"], True),                      # v4 read-compat: still permanent
-    (["advanced"], True),                      # permanent: read-compat row
     (["unsupported_op"], True),                # permanent: structurally infeasible
+    (["promoted"], False),                     # v8: read-compat rows no longer block
+    (["advanced"], False),                     # (old workspaces die at the entry lock)
     (["latency_improved"], False),                 # process state never blocks
     (["accuracy_fail"], False),                # composed re-proposals use NEW sigs
     (["structural_mismatch"], False),          # joint budget allows one retry
     (["variant_broken"], False),               # the other class, same budget
     (["structural_mismatch", "variant_broken"], True),   # joint budget exhausted
     (["variant_broken", "variant_broken"], True),        # same class twice: exhausted
-    (["probe_insufficient"], True),            # v7: permanently consumed
+    (["probe_insufficient"], True),            # permanently consumed
 ])
 def test_history_dedup_branches(tmp_path: Path, outcomes, blocked):
     hist = tmp_path / "history.jsonl"
@@ -143,97 +143,104 @@ def test_history_cli_surface(tmp_path: Path):
     assert "--probe-max-steps" in stale.stderr
 
 
-# ── lineage gate: proposal parent eligibility ─────────────────────────────────
-# Parent rule (mechanical): the ONLY legal parent is the current incumbent —
-# a variant that PASSED the accuracy gate AND improved latency — or null for
-# the origin baseline. A variant that failed either gate (e.g.
-# latency_improved but accuracy_fail) is a lineage dead-end: append_impl_row
-# must reject it at the write path, before any history row lands.
+# ── lineage gate: v8 composition provenance ───────────────────────────────────
+# v8: the base tree never moves — there is no parent. Provenance is
+# composition (--absorbs): every absorbed vid must exist in history and must
+# not be the vid itself; a stale base/incumbent.json (pre-v8 workspace) is
+# rejected at the write path before any history row lands.
 
 _LINEAGE_ANCHOR_MS = 1000
 
 
 def _lineage_artifacts(tmp_path: Path, *,
-                       incumbent: dict | None) -> Path:
+                       stale_incumbent: bool = False) -> Path:
     art = tmp_path / "art"
     (art / "base").mkdir(parents=True)
     (art / "base" / "origin_anchor.json").write_text(json.dumps({
         "baseline_makespan_cycles": _LINEAGE_ANCHOR_MS,
         "latency_reduction_min": 0.5, "accuracy_budget": 0.1,
         "target_cycles": 501, "frozen_at_round": 0}), encoding="utf-8")
-    if incumbent is not None:
+    if stale_incumbent:
         (art / "base" / "incumbent.json").write_text(
-            json.dumps(incumbent), encoding="utf-8")
+            json.dumps({"vid": "r1-01", "makespan_cycles": 800}),
+            encoding="utf-8")
     return art
 
 
-def _append_impl(art: Path, hist: Path, parent_vid: str | None,
-                 base_at_proposal: dict) -> subprocess.CompletedProcess:
+def _seed_frontier_vid(art: Path, vid: str = "r1-01") -> None:
+    """One prior vid in history that a later round may absorb."""
+    row = {"vid": vid, "round": 1, "seq": 1, "change_sig": "sig:a",
+           "probe_epochs": 1, "target_modules": ["m"], "absorbs": [],
+           "implemented": True, "version": 1,
+           "ts": "2026-09-01T00:00:00+00:00"}
+    with open(art / "history.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row) + "\n")
+
+
+def _append_impl(art: Path, hist: Path,
+                 absorbs: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, str(_SCRIPTS / "append_impl_row.py"),
          "--history", str(hist), "--vid", "r2-01", "--round", "2",
          "--seq", "1",
-         "--parent-vid", "null" if parent_vid is None else parent_vid,
          "--change-sig", "sig:x", "--probe-epochs", "1",
          "--target-modules", '["m"]',
-         "--base-at-proposal", json.dumps(base_at_proposal)],
+         "--absorbs", json.dumps(absorbs)],
         capture_output=True, text=True, timeout=60,
         env={**os.environ, "ORCA_ARTIFACTS_DIR": str(art)})
 
 
-def test_lineage_gate_accepts_incumbent_parent(tmp_path: Path):
-    """incumbent r1-01（过精度门 + 时延更优）做 parent → 放行且行内谱系正确。"""
-    art = _lineage_artifacts(
-        tmp_path, incumbent={"vid": "r1-01", "makespan_cycles": 800,
-                             "parent_vid": None, "promoted_round": 1,
-                             "change_sig": "sig:a"})
+def test_lineage_gate_accepts_composition_provenance(tmp_path: Path):
+    """absorbs 指向 history 里真实存在的前沿 vid → 放行且行内组合谱系正确。"""
+    art = _lineage_artifacts(tmp_path)
+    _seed_frontier_vid(art, "r1-01")
     hist = art / "history.jsonl"
-    proc = _append_impl(art, hist, "r1-01",
-                        {"vid": "r1-01", "makespan_cycles": 800})
+    proc = _append_impl(art, hist, ["r1-01"])
     assert proc.returncode == 0, proc.stderr
     row = json.loads(hist.read_text(encoding="utf-8").splitlines()[-1])
-    assert row["parent_vid"] == "r1-01"
-    assert row["base_at_proposal"] == {"vid": "r1-01", "makespan_cycles": 800}
+    assert row["absorbs"] == ["r1-01"]
+    assert "parent_vid" not in row and "base_at_proposal" not in row
 
 
-def test_lineage_gate_rejects_accuracy_failed_parent(tmp_path: Path):
-    """r1-01 时延改善但 accuracy_fail（从未晋升，incumbent 缺位）→ 想认它当爹
-    必须在写层被拒，且不落任何 history 行（死端不可入谱）。"""
-    art = _lineage_artifacts(tmp_path, incumbent=None)
+def test_lineage_gate_rejects_unknown_absorbed_vid(tmp_path: Path):
+    """absorbs 引用 history 里不存在的 vid → 谱系凭空捏造，拒绝且不落行。"""
+    art = _lineage_artifacts(tmp_path)
     hist = art / "history.jsonl"
-    proc = _append_impl(art, hist, "r1-01",
-                        {"vid": "r1-01", "makespan_cycles": 800})
+    proc = _append_impl(art, hist, ["r9-99"])
     assert proc.returncode == 2
-    assert "lineage dead-end" in proc.stderr
+    assert "absent from history" in proc.stderr
     assert not hist.exists()
 
 
-def test_lineage_gate_rejects_stale_base_pointer(tmp_path: Path):
-    """parent vid 对但 base_at_proposal 还指 origin 锚 → 谱系谎言，拒绝。"""
-    art = _lineage_artifacts(
-        tmp_path, incumbent={"vid": "r1-01", "makespan_cycles": 800,
-                             "parent_vid": None, "promoted_round": 1,
-                             "change_sig": "sig:a"})
+def test_lineage_gate_rejects_self_absorption(tmp_path: Path):
+    art = _lineage_artifacts(tmp_path)
     hist = art / "history.jsonl"
-    proc = _append_impl(art, hist, "r1-01",
-                        {"vid": None, "makespan_cycles": _LINEAGE_ANCHOR_MS})
+    proc = _append_impl(art, hist, ["r2-01"])
     assert proc.returncode == 2
-    assert "base_at_proposal" in proc.stderr
+    assert "cannot absorb itself" in proc.stderr
     assert not hist.exists()
 
 
-def test_expected_base_prefers_incumbent_and_fails_loud_when_torn(tmp_path: Path):
-    """expected_base：incumbent 优先于锚；incumbent 撕裂必须 fail loud
-    （静默降级回锚点 = 把晋升过的事实抹掉）。"""
-    art = _lineage_artifacts(
-        tmp_path, incumbent={"vid": "r1-01", "makespan_cycles": 800})
-    assert history_lib.expected_base(art) == ("r1-01", 800)
-    (art / "base" / "incumbent.json").write_text("{broken", encoding="utf-8")
-    with pytest.raises(ValueError, match="unparseable"):
+def test_lineage_gate_rejects_stale_incumbent_workspace(tmp_path: Path):
+    """残留 base/incumbent.json = pre-v8 工作区 → 写层 fail loud，不静默采用。"""
+    art = _lineage_artifacts(tmp_path, stale_incumbent=True)
+    hist = art / "history.jsonl"
+    proc = _append_impl(art, hist, [])
+    assert proc.returncode == 2
+    assert "v8 has no promotion" in proc.stderr
+    assert not hist.exists()
+
+
+def test_expected_base_is_constant_at_the_origin_anchor(tmp_path: Path):
+    """expected_base：v8 恒返回 (None, 锚 makespan)；incumbent.json 存在即
+    fail loud（静默采用或忽略都等于撒谎）。"""
+    art = _lineage_artifacts(tmp_path)
+    assert history_lib.expected_base(art) == (None, _LINEAGE_ANCHOR_MS)
+    (art / "base" / "incumbent.json").write_text(
+        json.dumps({"vid": "r1-01", "makespan_cycles": 800}),
+        encoding="utf-8")
+    with pytest.raises(ValueError, match="v8 has no promotion"):
         history_lib.expected_base(art)
-    art_no_promo = _lineage_artifacts(tmp_path / "b", incumbent=None)
-    assert history_lib.expected_base(art_no_promo) == (
-        None, _LINEAGE_ANCHOR_MS)
 
 
 # ── gate_decide: loop continuation + anchor invariant ─────────────────────────
@@ -1827,16 +1834,16 @@ def test_reuse_check_rejects_fresh_foreign_lock(tmp_path: Path):
         == "other-live-run"   # not taken over, not refreshed
 
 
-def _write_baseline_lock(art: Path) -> None:
-    """A BASELINE.lock (v7 schema) whose py_files_sha256 anchors the CURRENT
-    shadow tree (what Step 3 of po_flatten writes)."""
+def _write_baseline_lock(art: Path, version: int = 3) -> None:
+    """A BASELINE.lock (v8 schema, version 3) whose py_files_sha256 anchors
+    the CURRENT shadow tree (what Step 3 of po_flatten writes)."""
     import hashlib
     shadow = art / "shadow"
     py = {str(p.relative_to(shadow)).replace("\\", "/"):
           hashlib.sha256(p.read_bytes()).hexdigest()
           for p in sorted(shadow.rglob("*.py"))}
     (art / "BASELINE.lock").write_text(
-        json.dumps({"version": 2, "model_path": "model.py",
+        json.dumps({"version": version, "model_path": "model.py",
                     "py_files_sha256": py}), encoding="utf-8")
 
 
@@ -2797,10 +2804,10 @@ def _recheck_workspace(tmp_path: Path) -> tuple[Path, dict]:
         "predicted_delta_cycles": -144}), encoding="utf-8")
     (vdir / "DONE").write_text("", encoding="utf-8")
     history_lib.append_implemented(
-        art / "history.jsonl", "r1-01", round=1, seq=1, parent_vid=None,
+        art / "history.jsonl", "r1-01", round=1, seq=1,
         change_sig="activation:gelu->relu:r1-01", probe_epochs=1,
-        target_modules=["act"], predicted_delta_cycles=-144,
-        base_at_proposal={"vid": None, "makespan_cycles": base_ms})
+        target_modules=["act"], absorbs=[],
+        predicted_delta_cycles=-144)
     (art / "rounds" / "001").mkdir(parents=True)
     (art / "contracts.json").write_text(json.dumps(
         {"interpreter": {"sys_executable": sys.executable}}), encoding="utf-8")
@@ -2823,9 +2830,10 @@ def test_run_latency_recheck_mfu_fail_loud_matrix(tmp_path: Path):
     assert not (art / "variants" / "r1-01" / "verdict.json").exists()
 
 
-def test_run_latency_recheck_uses_incumbent_not_origin_target(tmp_path: Path):
-    """A strict incumbent improvement passes even when target is independent;
-    equality with the incumbent fails and consumes one repair attempt."""
+def test_run_latency_recheck_uses_origin_line_not_origin_target(tmp_path: Path):
+    """A strict improvement over the frozen origin line passes even when the
+    target is independent; equality with the origin line fails and consumes
+    one repair attempt (v8: there is no incumbent — the line never moves)."""
     art, env = _recheck_workspace(tmp_path)
     proc = subprocess.run(["bash", str(_RECHECK_SH)],
                           capture_output=True, text=True, timeout=300, env=env)
@@ -2850,29 +2858,33 @@ def test_run_latency_recheck_uses_incumbent_not_origin_target(tmp_path: Path):
     assert check.returncode == 0, check.stderr
     assert json.loads(check.stdout)["ok"] is True
 
-    # Promoting an equal-latency incumbent flips the same measurement to fail;
-    # the frozen origin target remains unchanged.
-    anchor_before = (art / "base" / "origin_anchor.json").read_text(encoding="utf-8")
-    (art / "base" / "incumbent.json").write_text(json.dumps({
-        "vid": "r0-01", "makespan_cycles": verdict["makespan_cycles"],
-    }), encoding="utf-8")
-    base_raw = next((art / "base" / "profile").glob("*/schedule_result.json"))
-    base_doc = json.loads(base_raw.read_text(encoding="utf-8"))
-    base_doc["parallel_cycles"] = verdict["makespan_cycles"]
-    base_raw.write_text(json.dumps(base_doc), encoding="utf-8")
-    (art / "variants" / "r1-01" / "verdict.json").unlink()
+    # An equal-latency origin line flips the same measurement to fail. The
+    # anchor is frozen, so the equal case is a SEPARATE workspace whose anchor
+    # was pinned at the variant's measured makespan from the start (v8: there
+    # is no incumbent to promote — the line never moves mid-run).
+    art2, env2 = _recheck_workspace(tmp_path / "equal")
+    raw2 = next((art2 / "variants" / "r1-01" / "profile")
+                .glob("*/schedule_result.json"))
+    var_ms2 = json.loads(raw2.read_text(encoding="utf-8"))["parallel_cycles"]
+    anchor_path = art2 / "base" / "origin_anchor.json"
+    anchor2 = json.loads(anchor_path.read_text(encoding="utf-8"))
+    anchor2["baseline_makespan_cycles"] = var_ms2
+    anchor_path.write_text(json.dumps(anchor2), encoding="utf-8")
     proc2 = subprocess.run(["bash", str(_RECHECK_SH)],
-                           capture_output=True, text=True, timeout=300, env=env)
+                           capture_output=True, text=True, timeout=300, env=env2)
     assert proc2.returncode == 0, proc2.stderr
-    verdict2 = json.loads((art / "variants" / "r1-01" / "verdict.json")
+    verdict2 = json.loads((art2 / "variants" / "r1-01" / "verdict.json")
                           .read_text(encoding="utf-8"))
     assert verdict2["outcome"] == "latency_fail"
-    assert (art / "base" / "origin_anchor.json").read_text(
-        encoding="utf-8") == anchor_before
-    # the failed measurement consumed one repair attempt (the script's ledger)
-    trace = json.loads((art / "variants" / "r1-01" / "repair_trace.json")
+    # the failed measurement consumed one repair attempt (the script's ledger;
+    # its admission line is the frozen base profile's raw parallel_cycles)
+    trace = json.loads((art2 / "variants" / "r1-01" / "repair_trace.json")
                        .read_text(encoding="utf-8"))
+    base_ms2 = json.loads(next((art2 / "base" / "profile")
+                               .glob("*/schedule_result.json"))
+                          .read_text(encoding="utf-8"))["parallel_cycles"]
     assert trace["repair_count"] == 1
+    assert trace["attempts"][0]["admission_line_makespan_cycles"] == base_ms2
 
 
 # ── admission clause single source (v7 C8: stable ack, text in ONE place) ─────
@@ -3137,18 +3149,22 @@ def test_archive_round_shadow_missing_proposals_and_round0(tmp_path: Path):
     assert list(empty.iterdir()) == []
 
 
-def test_gate_node_mounts_shadow_archive_between_verify_and_promote():
-    """挂点（C1）：``bash -n`` 通过 + 挂点行位于 deploy ``--verify`` 块之后、
-    incumbent promote 块之前（gate 语义：留档先于基线推进）。"""
+def test_gate_node_mounts_shadow_archive_and_frontier_between_verify_and_decide():
+    """挂点（C1/v8）：``bash -n`` 通过 + shadow 留档与 frontier 快照都位于
+    deploy ``--verify`` 块之后、gate_decide 之前（gate 语义：留档与派生视图
+    先于纯读决策）。v8 无 promote——脚本不得再引用 promote_incumbent。"""
     gate = _SCRIPTS / "gate_node.sh"
     proc = subprocess.run(["bash", "-n", str(gate)],
                           capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stderr
     text = gate.read_text(encoding="utf-8")
     i_verify = text.index("deploy_scripts.sh\" --verify")
-    i_archive = text.index("archive_round_shadow.py")
-    i_promote = text.index("promote_incumbent.py")
-    assert i_verify < i_archive < i_promote
+    i_archive = text.index("archive_round_shadow.py", i_verify)
+    i_frontier = text.index("frontier_snapshot.py", i_verify)
+    i_decide = text.index("gate_decide.py", i_frontier)
+    assert i_verify < i_archive < i_frontier < i_decide
+    assert "promote_incumbent" not in text
+    assert "incumbent_promotion" not in text
     # 意外崩溃不阻断 gate（挂点自带 || 兜底，stderr 可见）
     assert 'echo "archive_round_shadow failed (non-zero; see stderr)" >&2' \
         in text

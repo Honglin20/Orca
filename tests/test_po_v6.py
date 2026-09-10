@@ -410,7 +410,7 @@ def test_gate_success_row_routes_report_even_at_cap(tmp_path):
     assert out["round"] == 2 and out["target_cycles"] == 501
     assert set(out) == {"decision", "round", "target_cycles",
                         "success_vids", "in_flight", "idle_rounds",
-                        "incumbent_promoted", "reason"}
+                        "reason"}
 
 
 def test_gate_round_cap_routes_report_without_success(tmp_path):
@@ -465,10 +465,9 @@ def test_gate_missing_origin_anchor_still_fails_loud(tmp_path):
 
 def _impl(hist: Path, vid: str, sig: str, *, probe_epochs: int = 1) -> None:
     history_lib.append_implemented(
-        hist, vid, round=1, seq=1, parent_vid=None, change_sig=sig,
-        probe_epochs=probe_epochs, target_modules=["m"],
-        predicted_delta_cycles=-100,
-        base_at_proposal={"vid": None, "makespan_cycles": 1000})
+        hist, vid, round=1, seq=1, change_sig=sig,
+        probe_epochs=probe_epochs, target_modules=["m"], absorbs=[],
+        predicted_delta_cycles=-100)
 
 
 def test_append_terminal_success_row_semantics(tmp_path):
@@ -787,7 +786,7 @@ def test_final_budget_lower_better_direction(tmp_path):
     assert json.loads(proc2.stdout) == {"within_budget": True}
 
 
-def test_final_budget_missing_record_and_retired_promote(tmp_path):
+def test_final_budget_missing_record(tmp_path):
     art = tmp_path / "ws"
     _write_anchor(art)
     missing = _run_cli([sys.executable, str(_SCRIPTS / "verdict_decide.py"),
@@ -795,11 +794,6 @@ def test_final_budget_missing_record_and_retired_promote(tmp_path):
                         "--vid", "r1-01"])
     assert missing.returncode == 2
     assert "final_acc" in missing.stderr
-
-    promote = _run_cli([sys.executable, str(_SCRIPTS / "verdict_decide.py"),
-                        "promote", "--artifacts", str(art),
-                        "--vid", "r1-01"])
-    assert promote.returncode != 0              # retired subcommand
 
 
 # ── deploy: the three new scripts ride the manifest + gate_node roundtrip ─────
@@ -819,7 +813,8 @@ def test_deploy_covers_new_scripts_and_gate_node_roundtrip(tmp_path):
     stamp = json.loads((art / "scripts" / ".VERSION").read_text(encoding="utf-8"))
     assert len(stamp["manifest"]) == 64          # the new set is stamped
 
-    # gate_node: deploy --verify passes, then the v6 decision passthrough
+    # gate_node: deploy --verify passes, the frontier snapshot refreshes, then
+    # the v8 decision passthrough (no promotion facts in the payload)
     _write_anchor(art)
     (art / "rounds" / "001").mkdir(parents=True)
     (art / "history.jsonl").write_text(json.dumps(
@@ -831,50 +826,49 @@ def test_deploy_covers_new_scripts_and_gate_node_roundtrip(tmp_path):
     payload = json.loads(gate.stdout)
     assert payload["decision"] == "loop" and payload["error"] == ""
     assert payload["target_cycles"] == 501 and payload["success_vids"] == []
-    assert payload["incumbent_promotion"]["promoted"] is False
-    assert payload["incumbent_promotion_path"] == "incumbent_promotion.json"
+    assert "incumbent_promotion" not in payload
+    frontier = json.loads((art / "base" / "frontier.json")
+                          .read_text(encoding="utf-8"))
+    assert frontier["anchor"]["target_cycles"] == 501
+    assert frontier["avoid"] == [{"vid": "r1-01", "change_sig": None,
+                                  "outcome": "latency_fail"}]
 
-    # Promotion runs before routing and fails loud instead of silently letting
-    # gate_decide report a target-met row whose variant artifacts are missing.
-    (art / "history.jsonl").write_text(json.dumps(
-        {"vid": "r1-01", "round": 1, "outcome": "success",
-         "makespan_cycles": 400}) + "\n", encoding="utf-8")
+    # The frontier snapshot runs BEFORE routing and fails loud instead of
+    # letting gate_decide decide over a torn workspace (v8: the snapshot is
+    # the next round's decision input — it must never be silently stale).
+    (art / "base" / "origin_anchor.json").write_text("{torn", encoding="utf-8")
     broken = _run_cli([_BASH, str(_SCRIPTS / "gate_node.sh"),
                        "--max-rounds", "5"], env=env)
     assert broken.returncode == 0, broken.stderr
     broken_payload = json.loads(broken.stdout)
     assert broken_payload["decision"] == "finish-failed"
-    assert broken_payload["reason"] == "incumbent promotion failed"
-    assert "cannot promote r1-01" in broken_payload["error"]
+    assert broken_payload["reason"] == "frontier snapshot failed"
+    # the root cause travels IN the payload (self-describing, never log-only)
+    assert "origin anchor" in broken_payload["error"]
 
-    # A completed non-target success promotes first; the three empty rounds
-    # were searched against the old base and therefore cannot trigger idle exit.
-    variant = art / "variants" / "r1-01"
-    (variant / "shadow").mkdir(parents=True)
-    (variant / "onnx").mkdir()
-    (variant / "profile").mkdir()
-    (variant / "shadow" / "model.py").write_text("new", encoding="utf-8")
-    (variant / "onnx" / "model.onnx").write_bytes(b"onnx")
-    (variant / "profile" / "schedule_result.json").write_text("{}", encoding="utf-8")
-    (art / "history.jsonl").write_text(json.dumps(
-        {"vid": "r1-01", "round": 1, "outcome": "success",
-         "makespan_cycles": 700, "change_sig": "sig-1",
-         "parent_vid": None}) + "\n", encoding="utf-8")
+    # v8: idle evidence is never reset — a non-target success does NOT rescue
+    # idle_round_cap consecutive zero-proposal rounds (there is no promotion).
     for round_no in (1, 2, 3):
         round_dir = art / "rounds" / f"{round_no:03d}"
         round_dir.mkdir(parents=True, exist_ok=True)
         (round_dir / "proposals.json").write_text(json.dumps({
             "round": round_no, "proposals": [],
-            "exhausted_rationale": ["old base exhausted"],
+            "exhausted_rationale": ["space spent"],
         }), encoding="utf-8")
-    reset = _run_cli([_BASH, str(_SCRIPTS / "gate_node.sh"),
-                      "--max-rounds", "5", "--idle-round-cap", "3"], env=env)
-    assert reset.returncode == 0, reset.stderr
-    reset_payload = json.loads(reset.stdout)
-    assert reset_payload["decision"] == "loop"
-    assert reset_payload["incumbent_promoted"] is True
-    assert reset_payload["incumbent_promotion"]["promoted"] is True
-    assert "prior zero-proposal rounds describe the old base" in reset_payload["reason"]
+    (art / "base" / "origin_anchor.json").write_text(json.dumps({
+        "baseline_makespan_cycles": 1000,
+        "latency_reduction_min": 0.5, "accuracy_budget": 0.1,
+        "target_cycles": 501, "frozen_at_round": 0}), encoding="utf-8")
+    (art / "history.jsonl").write_text(json.dumps(
+        {"vid": "r1-01", "round": 1, "outcome": "success",
+         "makespan_cycles": 700, "change_sig": "sig-1",
+         "gap": 0.1, "final_acc": 0.9}) + "\n", encoding="utf-8")
+    idle = _run_cli([_BASH, str(_SCRIPTS / "gate_node.sh"),
+                     "--max-rounds", "5", "--idle-round-cap", "3"], env=env)
+    assert idle.returncode == 0, idle.stderr
+    idle_payload = json.loads(idle.stdout)
+    assert idle_payload["decision"] == "report"
+    assert "idle_exhausted" in idle_payload["reason"]
 
 
 # ── P1: repair_trace budget boundary (4 admissible / 5 blocked / 6 rejected) ───
@@ -1021,7 +1015,10 @@ def _emit_ws(tmp_path: Path, *, outcome: str = "latency_improved",
     }.items():
         (candidates / name).write_text(sentinel + "\ncontent\n", encoding="utf-8")
     (rd / "architecture_decision.md").write_text(
-        "[subagent:architecture-selector v1 ASC1D1]\ncontent\n", encoding="utf-8")
+        "[subagent:architecture-selector v1 ASC1D1]\ncontent\n"
+        "## absorbs\nnone (the frontier is empty in round 1)\n"
+        "## avoids\nnone (the avoid list is empty in round 1)\n",
+        encoding="utf-8")
     (rd / "proposals.json").write_text(json.dumps({
         "round": 1, "filtered_count": 0,
         "exhausted_rationale": [],
@@ -1029,8 +1026,7 @@ def _emit_ws(tmp_path: Path, *, outcome: str = "latency_improved",
                        "change_sig": "sig:r1-01", "target_modules": ["m"],
                        "target_pattern_id": "low-mfu-matmul",
                        "rationale": "why", "change_spec": "edit",
-                       "parent_vid": None,
-                       "base_at_proposal": {"vid": None, "makespan_cycles": 1000},
+                       "absorbs": [],
                        "predicted_delta_cycles": delta,
                        "prediction_basis": "predictor",
                        "edited_files": ["pkg/model.py"],
@@ -1066,8 +1062,6 @@ def _emit_ws(tmp_path: Path, *, outcome: str = "latency_improved",
                                    makespan_cycles=800, latency_gate="fail",
                                    pred_actual_ratio=None,
                                    outcome="latency_fail")
-        (rd / "direction.json").write_text(json.dumps(
-            {"round": 1, "failed_sigs": ["sig:r1-01"]}), encoding="utf-8")
     return art
 
 
@@ -1311,11 +1305,88 @@ def test_emit_gate_repair_trace_and_analysis_and_direction_rules(tmp_path):
         proc = _check_emit(art)
         assert proc.returncode == 1 and "## latency" in proc.stderr
 
-    # the latency_fail path must land failed_sigs in direction.json
+    # v8: no hand-written direction file exists — the rerouting signal is the
+    # mechanically derived avoid list (frontier_snapshot), so the latency_fail
+    # path emits without any direction.json
     art = _emit_ws(tmp_path / "d", outcome="latency_fail")
-    (art / "rounds" / "001" / "direction.json").unlink()
+    assert not (art / "rounds" / "001" / "direction.json").exists()
+    assert _check_emit(art).returncode == 0
+
+
+def test_emit_gate_composition_lineage_negative_paths(tmp_path):
+    """v8 组合谱系闸的闸齿（emit 门新增检查的负路径全矩阵）：decision 文档
+    缺节拒 / 引用不存在的历史 vid 拒 / absorbs 自引用拒 / 引用存在且行-提案
+    对称时放行。"""
+    # 缺 ## avoids 节 → 拒
+    art = _emit_ws(tmp_path / "no-sec")
+    (art / "rounds" / "001" / "architecture_decision.md").write_text(
+        "[subagent:architecture-selector v1 ASC1D1]\ncontent\n"
+        "## absorbs\nnone\n", encoding="utf-8")
     proc = _check_emit(art)
-    assert proc.returncode == 1 and "direction.json" in proc.stderr
+    assert proc.returncode == 1 and "## avoids" in proc.stderr
+
+    # 两节齐全但引用了不存在的历史 vid → 拒（provenance 不可凭空捏造）
+    art = _emit_ws(tmp_path / "fake-ref")
+    (art / "rounds" / "001" / "architecture_decision.md").write_text(
+        "[subagent:architecture-selector v1 ASC1D1]\ncontent\n"
+        "## absorbs\nfuses the r9-99 stride schedule\n"
+        "## avoids\nnone\n", encoding="utf-8")
+    proc = _check_emit(art)
+    assert proc.returncode == 1 and "no history row" in proc.stderr \
+        and "r9-99" in proc.stderr
+
+    # absorbs 命名 vid 自身 → 拒
+    art = _emit_ws(tmp_path / "self")
+    doc = json.loads((art / "rounds" / "001" / "proposals.json")
+                     .read_text(encoding="utf-8"))
+    doc["proposals"][0]["absorbs"] = ["r1-01"]
+    (art / "rounds" / "001" / "proposals.json").write_text(
+        json.dumps(doc), encoding="utf-8")
+    proc = _check_emit(art)
+    assert proc.returncode == 1 and "cannot absorb itself" in proc.stderr
+
+    # 引用存在 + 行-提案 absorbs 对称 → 放行（真实组合谱系；avoids 引用
+    # avoid 清单里的 vid 也合法——引用存在即可）
+    art = _emit_ws(tmp_path / "ok-ref")
+    hist = art / "history.jsonl"
+    history_lib.append_implemented(
+        hist, "r0-01", round=0, seq=1, change_sig="sig:r0-01",
+        probe_epochs=1, target_modules=["m"], absorbs=[])
+    history_lib.append_implemented(
+        hist, "r0-02", round=0, seq=2, change_sig="sig:r0-02",
+        probe_epochs=1, target_modules=["m"], absorbs=[])
+    history_lib.append_terminal(hist, "r0-02", outcome="accuracy_fail",
+                                gap=0.4, stopped_at_epoch=3,
+                                over_budget_streak=3)
+    history_lib.append_implemented(
+        hist, "r1-01", round=1, seq=1, change_sig="sig:r1-01",
+        probe_epochs=1, target_modules=["m"], absorbs=["r0-01"])
+    doc = json.loads((art / "rounds" / "001" / "proposals.json")
+                     .read_text(encoding="utf-8"))
+    doc["proposals"][0]["absorbs"] = ["r0-01"]
+    (art / "rounds" / "001" / "proposals.json").write_text(
+        json.dumps(doc), encoding="utf-8")
+    (art / "rounds" / "001" / "architecture_decision.md").write_text(
+        "[subagent:architecture-selector v1 ASC1D1]\ncontent\n"
+        "## absorbs\nfuses r0-01's stride schedule into the new block\n"
+        "## avoids\nsteers around r0-02's failed norm removal\n",
+        encoding="utf-8")
+    proc = _check_emit(art)
+    assert proc.returncode == 0, proc.stderr
+
+    # 行-提案不对称（proposal 说吸收 r0-01，history 行仍是 []）→ 拒
+    art2 = _emit_ws(tmp_path / "asym")
+    history_lib.append_implemented(
+        art2 / "history.jsonl", "r0-01", round=0, seq=1,
+        change_sig="sig:r0-01", probe_epochs=1, target_modules=["m"],
+        absorbs=[])
+    doc2 = json.loads((art2 / "rounds" / "001" / "proposals.json")
+                      .read_text(encoding="utf-8"))
+    doc2["proposals"][0]["absorbs"] = ["r0-01"]
+    (art2 / "rounds" / "001" / "proposals.json").write_text(
+        json.dumps(doc2), encoding="utf-8")
+    proc2 = _check_emit(art2)
+    assert proc2.returncode == 1 and "does not match the proposal" in proc2.stderr
 
 
 # ── P2: flatten→probe wiring smoke + check_probe_emit v6 (§6.2) ───────────────
@@ -1579,7 +1650,8 @@ def test_probe_emit_rejects_torn_verdict(tmp_path):
         f"{os.getpid()}\n", encoding="utf-8")
     proc = _check_probe(art)
     assert proc.returncode == 1
-    assert "torn workspace" in proc.stderr and "not below incumbent" in proc.stderr
+    assert "torn workspace" in proc.stderr \
+        and "not below the frozen origin line" in proc.stderr
 
     # verdict file gone entirely -> same failure class
     art2 = _probe_ws(tmp_path / "b", verdict=False, liveness={})
@@ -2276,9 +2348,9 @@ def test_probe_emit_watchdog_liveness_negative_branches(tmp_path):
 # ── §13.2 scenario smokes: script-level sequences over the real scripts ──────
 
 def test_scenario_single_variant_convergence_loop(tmp_path):
-    """§13.2-1: ONE vid iterates until it improves the current incumbent.
+    """§13.2-1: ONE vid iterates until it improves the frozen origin line.
     The recheck's repair ledger counts each miss, no second vid ever
-    appears, and the rerouting signal (direction.json) stays absent — the
+    appears, and no hand-written direction file exists in v8 — the
     elimination path belongs to the >= 5 budget, not this round."""
     art = _recheck_ws(tmp_path, target=500)
     _recheck_variant(art, "r1-01", 1100)
@@ -2298,7 +2370,7 @@ def test_scenario_single_variant_convergence_loop(tmp_path):
     trace = json.loads((vd / "repair_trace.json").read_text(encoding="utf-8"))
     assert trace["repair_count"] == 1 and len(trace["attempts"]) == 1
 
-    out = _remeasure(1000)                      # equal incumbent still fails
+    out = _remeasure(1000)                      # equal origin line still fails
     assert out["latency_improved_count"] == 0
     trace = json.loads((vd / "repair_trace.json").read_text(encoding="utf-8"))
     assert trace["repair_count"] == 2
@@ -2315,6 +2387,7 @@ def test_scenario_single_variant_convergence_loop(tmp_path):
     assert set(latest) == {"r1-01"}
     assert latest["r1-01"]["outcome"] == "latency_improved"
     assert not (art / "rounds" / "001" / "direction.json").exists()
+    assert not (art / "base" / "incumbent.json").exists()
 
 
 def test_scenario_two_cards_two_variants_parallel_block_release(tmp_path):

@@ -103,8 +103,8 @@ terminal row in ANY version makes the vid judged).
 | 7 | no final winner AND `round_state current`'s round ≥ `max_rounds` (the hard cap ended the loop without a target-meeting winner) | failed | gate |
 | 8 | otherwise (no final winner, nothing in flight or torn, below the cap — the loop ended without any exit condition leaving a disk trace) | failed | gate |
 
-An accuracy-success variant that misses the origin target is an incumbent,
-not a final winner. Row 5's stage is `probe` because the winner's training and final eval were
+An accuracy-success variant that misses the origin target is a frontier
+point, not a final winner. Row 5's stage is `probe` because the winner's training and final eval were
 launched and judged by the probe pipeline's detached watchdogs — the
 `reason` must name the winner and its gap/makespan so the success is
 self-describing. Row 6 is the honest torn-launch terminal: a variant was
@@ -131,10 +131,11 @@ terminal record — torn launch").
   row's measured value); further ties by vid (lexicographic, pinned so
   the pick is deterministic). The winner object is `{"vid",
   "change_sig", "lineage"}`: `change_sig` from the winner's latest
-  history row; `lineage` = the parent chain walked backwards through
-  history (`parent_vid` links, oldest first, ending with the winner vid) —
-  parent links are read from history and the chain is walked back to the
-  origin baseline. **No target-meeting success row anywhere → `null` and a
+  history row; `lineage` = the winner's composition provenance — the
+  `absorbs` list from its latest history row (the frontier vids whose
+  proven mechanisms the design fuses; `[]` when it absorbed nothing; v8
+  has no promotion, so no parent chain exists).
+  **No target-meeting success row anywhere → `null` and a
   no-final-winner disclosure in `reason`** (the report references the
   dashboard for what was tried).
 - `baseline`: `ref_acc` = the baseline full-training anchor, three-state
@@ -175,9 +176,9 @@ terminal record — torn launch").
 
 The write-back source is the **WINNER's variant shadow**
 (`variants/<winner-vid>/shadow/` — the tree the implementer actually
-optimized; the global `shadow/` may hold the latest promoted incumbent)
-diffed against the user's original files at the same relative paths. User
-files are never modified; new files are written beside the originals.
+optimized; the global `shadow/` is the origin baseline tree and never
+moves) diffed against the user's original files at the same relative paths.
+User files are never modified; new files are written beside the originals.
 
 1. **Lock re-verification**: recompute, exactly as `BASELINE.lock` records
    them, the checksums of the user project files the lock covers
@@ -240,8 +241,8 @@ stdlib-only rendering — no external dependencies):
 - `rounds_makespan_trend.html` — line chart; x = round 1..R, y = that
   round's reference makespan: the round's best MEASURED makespan (minimum
   `makespan_cycles` over the round's history rows that carry one) or, when
-  the round measured nothing, the round's base makespan (any row of the
-  round's `base_at_proposal.makespan_cycles`).
+  the round measured nothing, the frozen origin baseline makespan
+  (`base/origin_anchor.json` `baseline_makespan_cycles`).
 - `verdict_distribution.html` — bar chart; latest-version outcome → count
   over all vids in history.
 - **Pinned, no judgement calls**: no numeric directory under `rounds/`
@@ -316,8 +317,8 @@ streaming judge's exercise disclosure; a variant whose watchdog produced
 `variants/<vid>/eval/k_acc.json` (per-epoch checkpoints enabled) cites
 that k-th-ckpt eval as auxiliary evidence, and one that reached its
 terminal without it says so) · 胜出者 (vid, change signature,
-lineage chain, gap, makespan, within_budget; on a no-winner terminal the
-explicit "no success variant — no promotion" line referencing the
+composition lineage (absorbs), gap, makespan, within_budget; on a no-winner terminal the
+explicit "no success variant" line referencing the
 dashboard for what was tried) · **公平性说明** (one short paragraph:
 the baseline and every variant were trained FROM SCRATCH under the SAME
 `full_train_budget` value-level fingerprint (`contracts.json` — epochs /

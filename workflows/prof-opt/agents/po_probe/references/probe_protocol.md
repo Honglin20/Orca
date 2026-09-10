@@ -12,9 +12,10 @@ Budgets and lines used here — all read from disk, never from inputs:
   the variant renders the SAME template at the SAME full budget the
   baseline trained under — it differs from the baseline ONLY in structure.
   Never render a smaller epoch count, never tune a data/step cap here.
-- current incumbent = `base/incumbent.json` when present, otherwise the
-  origin baseline. `scripts/check_verdict.py` admits only a strict measured
-  improvement. The frozen origin target remains disclosure-only here.
+- admission line = `origin_anchor.baseline_makespan_cycles`, ALWAYS (v8: no
+  promotion exists — `base/incumbent.json` must not be present).
+  `scripts/check_verdict.py` admits only a strict measured improvement. The
+  frozen origin target remains disclosure-only here.
 - training device backend + count = `train_device.json` (resolved once at
   the entry node). Every card in use is owned by an `O_EXCL` lock under
   `devices/`; the ledger (`scripts/device_alloc.py`) is the ONLY
@@ -51,9 +52,10 @@ For each vid in the training set, run the ONE strict-improvement predicate
 python3 "$ORCA_ARTIFACTS_DIR/scripts/check_verdict.py" --vid <VID>
 ```
 
-Exit 0 (`{"vid", "makespan_cycles", "incumbent_makespan_cycles", "ok": true}`)
+Exit 0 (`{"vid", "makespan_cycles", "admission_line_makespan_cycles", "ok": true}`)
 → the verdict holds. A non-zero exit (missing/unparseable verdict, missing
-makespan, or no improvement over the incumbent) is a workspace-level failure: the node
+makespan, or no improvement over the frozen origin line) is a workspace-level
+failure: the node
 emits `status=failed` with the stderr quoted. No card is claimed, nothing
 launches.
 

@@ -14,12 +14,12 @@ macro-level model architectures that preserve the task's information path
 while removing a measured bottleneck. Prefer a new block design, routing
 scheme, resolution schedule, or attention/feature interaction over isolated
 operator deletions. Depth is frozen: never propose adding, removing,
-merging, or re-stacking blocks/stages — the incumbent's block/repeat count
+merging, or re-stacking blocks/stages — the frozen block/repeat count
 is not a tuning knob; innovate through wiring, operator organization, and
 information flow within the frozen stages. Write only the candidate path
 supplied by the caller. Include the
 architecture, affected source files, semantic invariant, bottleneck, expected
 hardware behavior, risks, and a concrete implementation sketch. The design
-base is always the current incumbent source (`shadow/`): prior variants that
-failed either gate are lineage dead-ends — reuse their lessons, never
+base is always the origin baseline source (`shadow/` — it never moves): failed
+variants are dead ends for their trees — reuse their lessons, never
 propose building on their trees.
