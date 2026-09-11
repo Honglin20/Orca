@@ -9,11 +9,16 @@
 //     占位语义由推送方 caption 披露，widget 只负责不造假渲染）；payload.color 指定
 //     per-row 状态色字段时按行着色（Cell 模式，同 ScatterChartWidget 惯例），
 //     缺席回退前沿/被支配双色（零回归）。
+//   - 2026-09-11（用户拍板：只想看前沿解）：行带 ``round`` 字段时点旁标 ``R{n}``
+//     （LabelList，无 round 不落字）；tooltip 改显 vid/round/status/x/y。
+//     prof-opt 推送方已停发 per-row color → 走前沿/被支配双色（前沿 = 绘图点
+//     几何非支配，accuracy_fail 也可在前沿上；状态语义归 tooltip）。
 
 import {
   CartesianGrid,
   Cell,
   ComposedChart,
+  LabelList,
   Legend,
   Line,
   ResponsiveContainer,
@@ -85,6 +90,11 @@ function isPlottable(value: unknown): boolean {
  * W-P3 数据准备（导出供测试）：x/y 任一不可绘的行整点剔除——不进散点、
  * 不进轴刻度、不参与前沿支配判定（画在 0 位的假点会伪造支配关系）。
  * §10.2 的 y=null 占位语义由推送方 caption 披露，widget 只负责不造假渲染。
+ *
+ * points **保留原行全部字段**（``...d`` 展开 + 数值化 x/y）：LabelList
+ * ``dataKey="round"`` 与 tooltip 的 vid/round/status 都从 Scatter 自身 data
+ * 取数——投影成裸 {x,y} 会让两条通道静默拿不到值（2026-09-11 review 修复）。
+ * 与 plottableRows 逐位对齐（per-row Cell 按索引落色）。
  */
 export function prepareParetoPoints(
   data: Record<string, unknown>[],
@@ -92,12 +102,13 @@ export function prepareParetoPoints(
   yKey: string
 ): {
   plottableRows: Record<string, unknown>[];
-  points: { x: number; y: number }[];
+  points: Array<Record<string, unknown> & { x: number; y: number }>;
 } {
   const plottableRows = data.filter(
     (d) => isPlottable(d[xKey]) && isPlottable(d[yKey])
   );
   const points = plottableRows.map((d) => ({
+    ...d,
     x: Number(d[xKey]),
     y: Number(d[yKey]),
   }));
@@ -114,6 +125,36 @@ export function perRowColor(
 ): string {
   const raw = row[colorKey];
   return typeof raw === "string" && raw !== "" ? raw : fallback;
+}
+
+/** 点旁 round 标签（prof-opt §10.2）：行带 ``round`` 时渲染 ``R{n}``；无 round
+ * （null/undefined/空串）不渲染——LabelList formatter 返回空串即不落字。 */
+export function roundLabel(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "";
+  return `R${value}`;
+}
+
+/** Tooltip 行模型：payload 首点即原始行（Scatter data 直通）。vid/round/status
+ * 缺席的字段不渲染（通用 widget，不猜字段）。 */
+export function paretoTooltipRows(props: {
+  payload?: ReadonlyArray<{ payload?: Record<string, unknown> }>;
+}): Array<[string, string]> {
+  const row = props.payload?.[0]?.payload;
+  if (!row) return [];
+  const out: Array<[string, string]> = [];
+  const vid = row.vid;
+  if (vid !== undefined && vid !== null && vid !== "") {
+    out.push(["vid", String(vid)]);
+  }
+  const round = roundLabel(row.round);
+  if (round) out.push(["round", String(row.round)]);
+  const status = row.status;
+  if (typeof status === "string" && status !== "") {
+    out.push(["status", status]);
+  }
+  if (isPlottable(row.x)) out.push(["x", String(row.x)]);
+  if (isPlottable(row.y)) out.push(["y", String(row.y)]);
+  return out;
 }
 
 export function ParetoChartWidget({ payload }: { payload: ChartPayload }) {
@@ -146,10 +187,10 @@ export function ParetoChartWidget({ payload }: { payload: ChartPayload }) {
   const frontIndices = findParetoFront(points, xDir, yDir);
   const dominatedData = points
     .filter((_, i) => !frontIndices.has(i))
-    .map((p) => ({ x: p.x, y: p.y }));
+    .map((p) => ({ ...p }));
   const frontData = points
     .filter((_, i) => frontIndices.has(i))
-    .map((p) => ({ x: p.x, y: p.y }));
+    .map((p) => ({ ...p }));
   // 前沿连线数据：按 x 排序（阶梯状 Pareto front line）。recharts Line 走 chart-level data
   // 不便（ComposedChart 多 series 共享轴），用 per-series data；真实浏览器（playwright）下渲染，
   // happy-dom 单测下可能不出现（playwright 9d 集成测试补验证）。
@@ -187,10 +228,28 @@ export function ParetoChartWidget({ payload }: { payload: ChartPayload }) {
             />
             <ZAxis range={[40, 200]} />
             <Tooltip
-              contentStyle={tooltipStyle}
+              // 自定义 content 下 contentStyle/labelStyle/itemStyle 不生效，
+              // 样式直接落在 tooltip 容器/行上；cursor 仍由 recharts 消费。
               cursor={tooltipCursor}
-              labelStyle={tooltipTextStyle}
-              itemStyle={tooltipTextStyle}
+              content={(props) => {
+                const rows = paretoTooltipRows(
+                  props as {
+                    payload?: ReadonlyArray<{
+                      payload?: Record<string, unknown>;
+                    }>;
+                  }
+                );
+                if (rows.length === 0) return null;
+                return (
+                  <div style={tooltipStyle} data-testid="pareto-tooltip">
+                    {rows.map(([k, v]) => (
+                      <div key={k} style={tooltipTextStyle}>
+                        {k}: {v}
+                      </div>
+                    ))}
+                  </div>
+                );
+              }}
             />
             <Legend wrapperStyle={LEGEND_STYLE} />
             {colorKey ? (
@@ -201,11 +260,16 @@ export function ParetoChartWidget({ payload }: { payload: ChartPayload }) {
                   const c = perRowColor(d, colorKey);
                   return <Cell key={i} fill={c} stroke={c} />;
                 })}
+                <LabelList dataKey="round" position="top" formatter={roundLabel} />
               </Scatter>
             ) : (
               <>
-                <Scatter name="Dominated" data={dominatedData} fill={NEUTRAL} fillOpacity={0.5} />
-                <Scatter name="Pareto Front" data={frontData} fill={PALETTE[0]} fillOpacity={0.85} />
+                <Scatter name="Dominated" data={dominatedData} fill={NEUTRAL} fillOpacity={0.5}>
+                  <LabelList dataKey="round" position="top" formatter={roundLabel} />
+                </Scatter>
+                <Scatter name="Pareto Front" data={frontData} fill={PALETTE[0]} fillOpacity={0.85}>
+                  <LabelList dataKey="round" position="top" formatter={roundLabel} />
+                </Scatter>
               </>
             )}
             {sortedFront.length > 1 && (

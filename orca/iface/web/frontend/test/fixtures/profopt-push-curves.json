@@ -59,122 +59,129 @@
       ],
       "data": [
         {
+          "content": "[sentinel] baseline/business_logic.md\n",
+          "content_omitted": "",
           "doc": "business_logic.md",
           "path": "baseline/business_logic.md",
           "status": "baseline",
-          "updated_at": "2026-08-31T17:46:02+00:00",
+          "updated_at": "2026-09-11T01:04:08+00:00",
           "vid": "baseline"
         },
         {
+          "content": "[sentinel] base/information_analysis.md\n",
+          "content_omitted": "",
           "doc": "information_analysis.md",
           "path": "base/information_analysis.md",
           "status": "baseline",
-          "updated_at": "2026-08-31T17:46:02+00:00",
+          "updated_at": "2026-09-11T01:04:08+00:00",
           "vid": "baseline"
         },
         {
+          "content": "[sentinel] base/profile/mfu_bottleneck_report.md\n",
+          "content_omitted": "",
           "doc": "mfu_bottleneck_report.md",
           "path": "base/profile/mfu_bottleneck_report.md",
           "status": "baseline",
-          "updated_at": "2026-08-31T17:46:02+00:00",
+          "updated_at": "2026-09-11T01:04:08+00:00",
           "vid": "baseline"
         },
         {
-          "doc": "business_logic.md",
-          "path": "variants/r1-01/business_logic.md",
+          "content": "[sentinel] r1-01 assessment.md\n",
+          "content_omitted": "",
+          "doc": "assessment.md",
+          "path": "variants/r1-01/assessment.md",
           "status": "success",
-          "updated_at": "2026-08-31T17:46:02+00:00",
+          "updated_at": "2026-09-11T01:04:08+00:00",
           "vid": "r1-01"
         },
         {
-          "doc": "information_analysis.md",
-          "path": "variants/r1-01/information_analysis.md",
-          "status": "success",
-          "updated_at": "2026-08-31T17:46:02+00:00",
-          "vid": "r1-01"
-        },
-        {
-          "doc": "conformance.md",
-          "path": "variants/r1-01/conformance.md",
-          "status": "success",
-          "updated_at": "2026-08-31T17:46:02+00:00",
-          "vid": "r1-01"
-        },
-        {
+          "content": "[sentinel] r1-01 profile/mfu_bottleneck_report.md\n",
+          "content_omitted": "",
           "doc": "profile/mfu_bottleneck_report.md",
           "path": "variants/r1-01/profile/mfu_bottleneck_report.md",
           "status": "success",
-          "updated_at": "2026-08-31T17:46:02+00:00",
+          "updated_at": "2026-09-11T01:04:08+00:00",
           "vid": "r1-01"
         },
         {
-          "doc": "business_logic.md",
-          "path": "variants/r2-01/business_logic.md",
+          "content": "[sentinel] r2-01 assessment.md\n",
+          "content_omitted": "",
+          "doc": "assessment.md",
+          "path": "variants/r2-01/assessment.md",
           "status": "in-flight",
-          "updated_at": "2026-08-31T17:46:02+00:00",
+          "updated_at": "2026-09-11T01:04:08+00:00",
           "vid": "r2-01"
         },
         {
-          "doc": "business_logic.md",
-          "path": "variants/r3-01/business_logic.md",
-          "status": "latency_pass",
-          "updated_at": "2026-08-31T17:46:02+00:00",
+          "content": "[sentinel] r3-01 assessment.md\n",
+          "content_omitted": "",
+          "doc": "assessment.md",
+          "path": "variants/r3-01/assessment.md",
+          "status": "latency_improved",
+          "updated_at": "2026-09-11T01:04:08+00:00",
           "vid": "r3-01"
         },
         {
-          "doc": "conformance.md",
-          "path": "variants/r3-01/conformance.md",
-          "status": "latency_pass",
-          "updated_at": "2026-08-31T17:46:02+00:00",
-          "vid": "r3-01"
-        },
-        {
-          "doc": "business_logic.md",
-          "path": "variants/r4-01/business_logic.md",
+          "content": "[sentinel] r4-01 assessment.md\n",
+          "content_omitted": "",
+          "doc": "assessment.md",
+          "path": "variants/r4-01/assessment.md",
           "status": "latency_fail",
-          "updated_at": "2026-08-31T17:46:02+00:00",
+          "updated_at": "2026-09-11T01:04:08+00:00",
           "vid": "r4-01"
         },
         {
-          "doc": "business_logic.md",
-          "path": "variants/r5-01/business_logic.md",
+          "content": "[sentinel] r5-01 assessment.md\n",
+          "content_omitted": "",
+          "doc": "assessment.md",
+          "path": "variants/r5-01/assessment.md",
           "status": "success",
-          "updated_at": "2026-08-31T17:46:02+00:00",
+          "updated_at": "2026-09-11T01:04:08+00:00",
           "vid": "r5-01"
         },
         {
-          "doc": "conformance.md",
-          "path": "variants/r5-01/conformance.md",
+          "content": "[sentinel] r5-01 profile/mfu_bottleneck_report.md\n",
+          "content_omitted": "",
+          "doc": "profile/mfu_bottleneck_report.md",
+          "path": "variants/r5-01/profile/mfu_bottleneck_report.md",
           "status": "success",
-          "updated_at": "2026-08-31T17:46:02+00:00",
+          "updated_at": "2026-09-11T01:04:08+00:00",
           "vid": "r5-01"
         },
         {
+          "content": "[sentinel] rounds/001/analysis.md\n",
+          "content_omitted": "",
           "doc": "analysis.md",
           "path": "rounds/001/analysis.md",
           "status": "final",
-          "updated_at": "2026-08-31T17:46:02+00:00",
+          "updated_at": "2026-09-11T01:04:08+00:00",
           "vid": "round"
         },
         {
+          "content": "[sentinel] rounds/002/analysis.md\n",
+          "content_omitted": "",
           "doc": "analysis.md",
           "path": "rounds/002/analysis.md",
           "status": "final",
-          "updated_at": "2026-08-31T17:46:02+00:00",
+          "updated_at": "2026-09-11T01:04:08+00:00",
           "vid": "round"
         },
         {
+          "content": "[sentinel] rounds/003/analysis.md\n",
+          "content_omitted": "",
           "doc": "analysis.md",
           "path": "rounds/003/analysis.md",
           "status": "final",
-          "updated_at": "2026-08-31T17:46:02+00:00",
+          "updated_at": "2026-09-11T01:04:08+00:00",
           "vid": "round"
         },
         {
+          "content": "[sentinel] base/accuracy_rules_snapshot.json\n",
+          "content_omitted": "",
           "doc": "accuracy_rules_snapshot.json",
           "path": "base/accuracy_rules_snapshot.json",
           "status": "snapshot",
-          "updated_at": "2026-08-31T17:46:02+00:00",
+          "updated_at": "2026-09-11T01:04:08+00:00",
           "vid": "rules"
         }
       ],
@@ -186,44 +193,51 @@
       "y": ""
     },
     "prof-opt/pareto": {
-      "caption": "y=null = no measurable outcome yet (达线未训占位, or trained but still awaiting the baseline anchor); y falls back to the latest metric while no gap exists (lower-is-better holds for gap only)",
+      "caption": "color = geometric pareto front computed on the plotted points (accent = on the front, gray = dominated — an accuracy_fail point can sit on the front; per-point status/round in the tooltip); y=null = no measurable outcome yet (达线未训占位, or trained but still awaiting the baseline anchor); y falls back to the latest metric while no gap exists (lower-is-better holds for gap only); the baseline anchor (x=0) reads y=0 on the gap basis (baseline gap is 0 by definition) or the baseline's latest metric on the metric basis",
       "chart_type": "pareto",
-      "color": "color",
+      "color": "",
       "data": [
         {
-          "color": "#10b981",
+          "round": 1,
           "status": "success",
           "vid": "r1-01",
           "x": 20.0,
           "y": 0.02
         },
         {
-          "color": "#3b82f6",
+          "round": 2,
           "status": "in-flight",
           "vid": "r2-01",
           "x": -20.0,
           "y": 0.45
         },
         {
-          "color": "#94a3b8",
-          "status": "latency_pass",
+          "round": 2,
+          "status": "latency_improved",
           "vid": "r3-01",
           "x": 10.0,
           "y": null
         },
         {
-          "color": "#f97316",
+          "round": 2,
           "status": "latency_fail",
           "vid": "r4-01",
           "x": -15.0,
           "y": null
         },
         {
-          "color": "#10b981",
+          "round": 3,
           "status": "success",
           "vid": "r5-01",
           "x": 40.0,
           "y": 0.005
+        },
+        {
+          "round": 0,
+          "status": "baseline",
+          "vid": "baseline",
+          "x": 0,
+          "y": 0
         }
       ],
       "hue": "",
@@ -288,101 +302,102 @@
       ],
       "data": [
         {
+          "content": "[sentinel] baseline/business_logic.md\n",
+          "content_omitted": "",
           "doc": "business_logic.md",
           "path": "baseline/business_logic.md",
           "status": "baseline",
-          "updated_at": "2026-08-31T17:46:02+00:00",
+          "updated_at": "2026-09-11T01:04:08+00:00",
           "vid": "baseline"
         },
         {
+          "content": "[sentinel] base/information_analysis.md\n",
+          "content_omitted": "",
           "doc": "information_analysis.md",
           "path": "base/information_analysis.md",
           "status": "baseline",
-          "updated_at": "2026-08-31T17:46:02+00:00",
+          "updated_at": "2026-09-11T01:04:08+00:00",
           "vid": "baseline"
         },
         {
+          "content": "[sentinel] base/profile/mfu_bottleneck_report.md\n",
+          "content_omitted": "",
           "doc": "mfu_bottleneck_report.md",
           "path": "base/profile/mfu_bottleneck_report.md",
           "status": "baseline",
-          "updated_at": "2026-08-31T17:46:02+00:00",
+          "updated_at": "2026-09-11T01:04:08+00:00",
           "vid": "baseline"
         },
         {
-          "doc": "business_logic.md",
-          "path": "variants/r1-01/business_logic.md",
+          "content": "[sentinel] r1-01 assessment.md\n",
+          "content_omitted": "",
+          "doc": "assessment.md",
+          "path": "variants/r1-01/assessment.md",
           "status": "success",
-          "updated_at": "2026-08-31T17:46:02+00:00",
+          "updated_at": "2026-09-11T01:04:08+00:00",
           "vid": "r1-01"
         },
         {
-          "doc": "information_analysis.md",
-          "path": "variants/r1-01/information_analysis.md",
-          "status": "success",
-          "updated_at": "2026-08-31T17:46:02+00:00",
-          "vid": "r1-01"
-        },
-        {
-          "doc": "conformance.md",
-          "path": "variants/r1-01/conformance.md",
-          "status": "success",
-          "updated_at": "2026-08-31T17:46:02+00:00",
-          "vid": "r1-01"
-        },
-        {
+          "content": "[sentinel] r1-01 profile/mfu_bottleneck_report.md\n",
+          "content_omitted": "",
           "doc": "profile/mfu_bottleneck_report.md",
           "path": "variants/r1-01/profile/mfu_bottleneck_report.md",
           "status": "success",
-          "updated_at": "2026-08-31T17:46:02+00:00",
+          "updated_at": "2026-09-11T01:04:08+00:00",
           "vid": "r1-01"
         },
         {
-          "doc": "business_logic.md",
-          "path": "variants/r2-01/business_logic.md",
+          "content": "[sentinel] r2-01 assessment.md\n",
+          "content_omitted": "",
+          "doc": "assessment.md",
+          "path": "variants/r2-01/assessment.md",
           "status": "in-flight",
-          "updated_at": "2026-08-31T17:46:02+00:00",
+          "updated_at": "2026-09-11T01:04:08+00:00",
           "vid": "r2-01"
         },
         {
-          "doc": "business_logic.md",
-          "path": "variants/r3-01/business_logic.md",
-          "status": "latency_pass",
-          "updated_at": "2026-08-31T17:46:02+00:00",
+          "content": "[sentinel] r3-01 assessment.md\n",
+          "content_omitted": "",
+          "doc": "assessment.md",
+          "path": "variants/r3-01/assessment.md",
+          "status": "latency_improved",
+          "updated_at": "2026-09-11T01:04:08+00:00",
           "vid": "r3-01"
         },
         {
-          "doc": "conformance.md",
-          "path": "variants/r3-01/conformance.md",
-          "status": "latency_pass",
-          "updated_at": "2026-08-31T17:46:02+00:00",
-          "vid": "r3-01"
-        },
-        {
-          "doc": "business_logic.md",
-          "path": "variants/r4-01/business_logic.md",
+          "content": "[sentinel] r4-01 assessment.md\n",
+          "content_omitted": "",
+          "doc": "assessment.md",
+          "path": "variants/r4-01/assessment.md",
           "status": "latency_fail",
-          "updated_at": "2026-08-31T17:46:02+00:00",
+          "updated_at": "2026-09-11T01:04:08+00:00",
           "vid": "r4-01"
         },
         {
+          "content": "[sentinel] rounds/001/analysis.md\n",
+          "content_omitted": "",
           "doc": "analysis.md",
           "path": "rounds/001/analysis.md",
           "status": "final",
-          "updated_at": "2026-08-31T17:46:02+00:00",
+          "updated_at": "2026-09-11T01:04:08+00:00",
           "vid": "round"
         },
         {
+          "content": "[sentinel] rounds/002/analysis.md\n",
+          "content_omitted": "",
           "doc": "analysis.md",
           "path": "rounds/002/analysis.md",
           "status": "final",
-          "updated_at": "2026-08-31T17:46:02+00:00",
+          "updated_at": "2026-09-11T01:04:08+00:00",
           "vid": "round"
         },
         {
+          "content": "[sentinel] base/accuracy_rules_snapshot.json\n",
+          "content_omitted": "",
           "doc": "accuracy_rules_snapshot.json",
           "path": "base/accuracy_rules_snapshot.json",
           "status": "snapshot",
-          "updated_at": "2026-08-31T17:46:02+00:00",
+          "updated_at": "2026-09-11T01:04:08+00:00",
           "vid": "rules"
         }
       ],
@@ -394,37 +409,44 @@
       "y": ""
     },
     "prof-opt/pareto": {
-      "caption": "y=null = no measurable outcome yet (达线未训占位, or trained but still awaiting the baseline anchor); y falls back to the latest metric while no gap exists (lower-is-better holds for gap only)",
+      "caption": "color = geometric pareto front computed on the plotted points (accent = on the front, gray = dominated — an accuracy_fail point can sit on the front; per-point status/round in the tooltip); y=null = no measurable outcome yet (达线未训占位, or trained but still awaiting the baseline anchor); y falls back to the latest metric while no gap exists (lower-is-better holds for gap only); the baseline anchor (x=0) reads y=0 on the gap basis (baseline gap is 0 by definition) or the baseline's latest metric on the metric basis",
       "chart_type": "pareto",
-      "color": "color",
+      "color": "",
       "data": [
         {
-          "color": "#10b981",
+          "round": 1,
           "status": "success",
           "vid": "r1-01",
           "x": 20.0,
           "y": 0.02
         },
         {
-          "color": "#3b82f6",
+          "round": 2,
           "status": "in-flight",
           "vid": "r2-01",
           "x": -20.0,
           "y": 0.45
         },
         {
-          "color": "#94a3b8",
-          "status": "latency_pass",
+          "round": 2,
+          "status": "latency_improved",
           "vid": "r3-01",
           "x": 10.0,
           "y": null
         },
         {
-          "color": "#f97316",
+          "round": 2,
           "status": "latency_fail",
           "vid": "r4-01",
           "x": -15.0,
           "y": null
+        },
+        {
+          "round": 0,
+          "status": "baseline",
+          "vid": "baseline",
+          "x": 0,
+          "y": 0
         }
       ],
       "hue": "",

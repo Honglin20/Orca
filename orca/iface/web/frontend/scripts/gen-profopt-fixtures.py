@@ -17,7 +17,8 @@ socket would receive), and writes::
 Coverage intent of the synthetic workspace: baseline curve + success variant +
 in-flight variant (metric-fallback y) + 达线未训 variant (y=null placeholder)
 + eliminated latency_fail variant + rounds + rules snapshot — every §10.2
-status color and every §10.4 row group rides along in the captured payloads.
+point shape (front/gray coloring is the front end's; rows carry round/status)
+and every §10.4 row group rides along in the captured payloads.
 
 Usage (WSL, repo root):
     .venv/bin/python orca/iface/web/frontend/scripts/gen-profopt-fixtures.py
@@ -38,6 +39,11 @@ import push_curves  # noqa: E402
 
 _OUT = Path(__file__).resolve().parents[1] / "test" / "fixtures" / \
     "profopt-push-curves.json"
+
+# variant docs = the pusher's current _VARIANT_DOC_FILES whitelist names
+# (assessment.md / profile/mfu_bottleneck_report.md) — stale names would
+# silently drop every variant card from the docs manifest
+_DOCS2 = ("assessment.md", "profile/mfu_bottleneck_report.md")
 
 
 def _write(art: Path, rel: str, text: str) -> None:
@@ -83,35 +89,36 @@ def _seed(art: Path) -> None:
                 "base/accuracy_rules_snapshot.json",
                 "rounds/001/analysis.md", "rounds/002/analysis.md"):
         _write(art, rel, f"[sentinel] {rel}\n")
-    _DOCS4 = ("business_logic.md", "information_analysis.md",
-              "conformance.md", "profile/mfu_bottleneck_report.md")
+    # variant docs = the pusher's current _VARIANT_DOC_FILES whitelist names
+    # (assessment.md / profile/mfu_bottleneck_report.md) — stale names would
+    # silently drop every variant card from the docs manifest
     _variant(art, "r1-01", curve=[{"epoch": 1, "metric": 0.38},
                                    {"epoch": 2, "metric": 0.42}],
              train_status={"vid": "r1-01", "stage": "done"},
              shard={"vid": "r1-01", "status": "success", "gap": 0.02,
                     "metric": 0.42},
              verdict={"vid": "r1-01", "makespan_cycles": 800,
-                      "outcome": "latency_pass"}, docs=_DOCS4)
+                      "outcome": "latency_improved"}, docs=_DOCS2)
     _variant(art, "r2-01", curve=[{"epoch": 1, "metric": 0.45}],
              train_status={"vid": "r2-01", "stage": "training",
                            "ts": "2026-08-31T11:00:00+00:00"},
              shard={"vid": "r2-01", "status": "training", "gap": None,
                     "metric": 0.45},
              verdict={"vid": "r2-01", "makespan_cycles": 1200,
-                      "outcome": "latency_pass"},
-             docs=("business_logic.md",))
+                      "outcome": "latency_improved"},
+             docs=("assessment.md",))
     # 达线未训: admitted, training not started -> y=null placeholder (§10.2)
     _variant(art, "r3-01",
-             shard={"vid": "r3-01", "status": "latency_pass", "gap": None,
+             shard={"vid": "r3-01", "status": "latency_improved", "gap": None,
                     "metric": None},
              verdict={"vid": "r3-01", "makespan_cycles": 900,
-                      "outcome": "latency_pass"},
-             docs=("business_logic.md", "conformance.md"))
+                      "outcome": "latency_improved"},
+             docs=("assessment.md",))
     # eliminated variant — its docs STAY listed (web §3.3)
     _variant(art, "r4-01",
              verdict={"vid": "r4-01", "makespan_cycles": 1150,
                       "outcome": "latency_fail"},
-             docs=("business_logic.md",))
+             docs=("assessment.md",))
 
 
 def _advance(art: Path) -> None:
@@ -123,8 +130,8 @@ def _advance(art: Path) -> None:
              shard={"vid": "r5-01", "status": "success", "gap": 0.005,
                     "metric": 0.46},
              verdict={"vid": "r5-01", "makespan_cycles": 600,
-                      "outcome": "latency_pass"},
-             docs=("business_logic.md", "conformance.md"))
+                      "outcome": "latency_improved"},
+             docs=_DOCS2)
 
 
 def _run(art: Path, *extra: str) -> dict[str, dict]:
@@ -154,8 +161,18 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="profopt-fixture-") as td:
         art = Path(td) / "art"
         _seed(art)
+        # the round truth (history.jsonl rows, one per implemented vid) — the
+        # pareto point labels resolve from here, never from vid strings
+        def write_history(pairs: list[tuple[str, int]]) -> None:
+            _write(art, "history.jsonl", "".join(
+                _json({"vid": vid, "round": rnd, "seq": rnd,
+                       "outcome": "latency_improved"})
+                for vid, rnd in pairs))
+        history = [("r1-01", 1), ("r2-01", 2), ("r3-01", 2), ("r4-01", 2)]
+        write_history(history)
         live = _run(art)
         _advance(art)
+        write_history([*history, ("r5-01", 3)])
         final = _run(art, "--title", "(final)")
     expected = {"prof-opt/curves", "prof-opt/pareto", "prof-opt/docs"}
     missing = (expected - set(live)) | (expected - set(final))

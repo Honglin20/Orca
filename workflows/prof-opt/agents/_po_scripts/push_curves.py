@@ -11,11 +11,12 @@ label+title on every push -> the front end replaces the previous chart):
     disk — only the push is narrowed.
   * pareto ``prof-opt/pareto``  — every variant as one point (§10.2): x = the
     latency reduction vs the baseline makespan in % (negative = slower), y =
-    the final gap (or the latest metric while no gap exists yet), one
-    status-colored point per variant; a latency_improved variant that has not
-    started training keeps y=null (disclosed in the caption). C2: a distinct
-    ``baseline`` anchor point (x=0, dedicated color) pins the origin whenever
-    the baseline makespan anchor resolves.
+    the final gap (or the latest metric while no gap exists yet); the front
+    end colors geometric front vs dominated (no per-row status color —
+    status/round ride along for the tooltip, round is the point label); a
+    latency_improved variant that has not started training keeps y=null
+    (disclosed in the caption). C2: a ``baseline`` anchor point (x=0, round=0)
+    pins the origin whenever the baseline makespan anchor resolves.
   * table  ``prof-opt/docs``    — the analysis-docs manifest (§10.4, ``--docs``):
     rows of vid / doc / status / path relative to the artifacts root (+
     updated_at) plus the optional content channel (C3): rows also carry
@@ -62,6 +63,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from history_lib import HistoryError, read_rows  # noqa: E402
+
 _SOCK_TIMEOUT_SECONDS = 5.0  # hard per-op cap: connect / send / ack each <= 5s
 _DEFAULT_LABEL = "prof-opt/curves"
 _BASE_TITLE = "prof-opt training curves"
@@ -76,23 +80,9 @@ _TERMINAL_STAGES = {"killed", "done", "failed"}
 _TERMINAL_OUTCOMES = {"success", "accuracy_fail", "probe_insufficient",
                       "latency_fail"}
 
-# §10.2 status coloring: one CSS color per variant state (the payload's
-# per-row ``color`` field carries it; the front end renders it as-is)
-_STATUS_COLORS = {
-    "success": "#10b981",
-    "in-flight": "#3b82f6",
-    "latency_improved": "#94a3b8",   # 改善未训占位 (y=null)
-    "accuracy_fail": "#ef4444",
-    "latency_fail": "#f97316",
-    "probe_insufficient": "#a855f7",
-}
-_NEUTRAL_COLOR = "#64748b"
-# C2 baseline anchor color: sky-500 (#0ea5e9) — deliberately distinct from
-# every _STATUS_COLORS entry AND the neutral gray above, so the origin
-# reference reads as its own series instead of masquerading as a variant
-# state (the closest neighbors, in-flight #3b82f6 / probe_insufficient
-# #a855f7, are far enough in hue to stay distinguishable at plot size).
-_BASELINE_COLOR = "#0ea5e9"
+# §10.2 coloring lives on the FRONT END now (pareto front accent vs gray
+# dominated, computed from the plotted points); the rows carry the per-variant
+# ``status`` and ``round`` for the tooltip instead of a CSS color.
 
 # C3 content-channel budgets, measured in utf-8 BYTES of the raw content
 # BEFORE serialization. The aggregate cap keeps 0.5MB of headroom under the
@@ -257,16 +247,22 @@ def _baseline_makespan(artifacts: Path) -> float | None:
 def collect_pareto(artifacts: Path) -> list[dict[str, Any]]:
     """§10.2 one point per variant: x = latency reduction vs baseline (%,
     negative = slower), y = the final gap (or the latest metric while no gap
-    exists yet; null = the 达线未训 placeholder), status-colored. Variants
-    without a measured makespan have no x and are not plottable.
+    exists yet; null = the 达线未训 placeholder). Variants without a measured
+    makespan have no x and are not plottable.
+
+    Coloring is the front end's pareto-front dual (front accent vs gray
+    dominated, geometric over the plotted points); rows carry ``round`` (the
+    variant's latest history.jsonl round — the point label) and ``status``
+    (the tooltip). No per-row CSS color is sent.
 
     C2 baseline anchor: whenever the origin anchor resolves, one extra
-    ``vid="baseline"`` row pins the origin (x=0) so "relative to the
+    ``vid="baseline"`` row pins the origin (x=0, round=0) so "relative to the
     baseline" has a visible reference point at every stage. A missing anchor
     keeps the chart exactly as it was (no fabricated origin)."""
     base_ms = _baseline_makespan(artifacts)
     if base_ms is None:
         return []
+    rounds = _vid_rounds(artifacts)
     rows: list[dict[str, Any]] = []
     any_gap_basis = False
     variants_dir = artifacts / "variants"
@@ -282,11 +278,32 @@ def collect_pareto(artifacts: Path) -> list[dict[str, Any]]:
             any_gap_basis = any_gap_basis or state["gap"] is not None
             rows.append({"vid": state["vid"], "x": x, "y": y,
                          "status": state["status"],
-                         "color": _STATUS_COLORS.get(state["status"],
-                                                     _NEUTRAL_COLOR)})
+                         "round": rounds.get(state["vid"])})
     if not any(r["vid"] == "baseline" for r in rows):  # idempotent anchor
         rows.append(_baseline_anchor_row(artifacts, any_gap_basis))
     return rows
+
+
+def _vid_rounds(artifacts: Path) -> dict[str, int]:
+    """vid -> its latest history.jsonl round (the audit base is the single
+    truth for round numbers — vid strings are NOT parsed for them). A missing
+    history yields {} (rows carry round=null, the label just stays off). An
+    unparseable history degrades the same way with a stderr note — this is
+    the best-effort chart sidecar; the mechanical layer (frontier_snapshot)
+    is where a corrupt history fails loud."""
+    rounds: dict[str, int] = {}
+    try:
+        rows = read_rows(artifacts / "history.jsonl")
+    except HistoryError as exc:
+        sys.stderr.write(f"[push_curves] history unreadable, pareto round "
+                         f"labels skipped: {exc}\n")
+        return {}
+    for row in rows:
+        vid, rnd = row.get("vid"), row.get("round")
+        if isinstance(vid, str) and vid and isinstance(rnd, int) \
+                and not isinstance(rnd, bool):
+            rounds[vid] = rnd
+    return rounds
 
 
 def _baseline_anchor_row(artifacts: Path, any_gap_basis: bool) -> dict[str, Any]:
@@ -295,7 +312,7 @@ def _baseline_anchor_row(artifacts: Path, any_gap_basis: bool) -> dict[str, Any]
     is 0 by definition — dimension-consistent), else the baseline's latest
     metric from the same curve loader the variant y values use. A missing or
     empty baseline curve keeps y=null (disclosed in the caption) — never a
-    fabricated 0."""
+    fabricated 0. round=0: the origin anchor is frozen before round 1."""
     if any_gap_basis:
         y: float | None = 0
     else:
@@ -303,7 +320,7 @@ def _baseline_anchor_row(artifacts: Path, any_gap_basis: bool) -> dict[str, Any]
                             "baseline")
         y = curve[-1]["metric"] if curve else None
     return {"vid": "baseline", "x": 0, "y": y, "status": "baseline",
-            "color": _BASELINE_COLOR}
+            "round": 0}
 
 
 def collect_docs(artifacts: Path) -> list[dict[str, Any]]:
@@ -595,17 +612,21 @@ def main() -> int:
                 sys.stderr.write(f"[push_curves] audit append failed "
                                  f"(ignored): {exc}\n")
 
-    # chart 2 — full pareto (§10.2): every variant one status-colored point
+    # chart 2 — full pareto (§10.2): every variant one point, front-accented
     pareto_rows = collect_pareto(art)
     if pareto_rows:
         pushed["pareto"] = _push_best_effort(sock_path, node, session_id, {
             "chart_type": "pareto", "data": pareto_rows,
             "label": _PARETO_LABEL, "title": _PARETO_TITLE + suffix,
-            "x": "x", "y": "y", "color": "color", "hue": "", "value": "",
+            "x": "x", "y": "y", "color": "", "hue": "", "value": "",
             "pareto_x_direction": "max", "pareto_y_direction": "min",
             "x_label": "latency reduction vs baseline (%)",
             "y_label": "final gap / latest metric",
-            "caption": "y=null = no measurable outcome yet (达线未训占位, or "
+            "caption": "color = geometric pareto front computed on the "
+                       "plotted points (accent = on the front, gray = "
+                       "dominated — an accuracy_fail point can sit on the "
+                       "front; per-point status/round in the tooltip); "
+                       "y=null = no measurable outcome yet (达线未训占位, or "
                        "trained but still awaiting the baseline anchor); y "
                        "falls back to the latest metric while no gap exists "
                        "(lower-is-better holds for gap only); "

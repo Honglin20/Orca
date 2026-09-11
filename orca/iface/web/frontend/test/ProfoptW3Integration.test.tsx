@@ -12,8 +12,9 @@
 //   2. §6.3-1 幂等更新：live → (final) 二次推送（行集前进：+r5-01 / +rounds/003）
 //      → 面板按最新清单替换，不复制不残留
 //   3. §6.3-1 ParetoChartWidget（W-P3 修正回归）：y=null 占位点**不渲染**（不画在
-//      0 位 = §10.2 占位披露不失真）+ per-row 状态着色被消费 + caption 披露在场；
-//      无 color 字段的旧 payload 回退 dominated/front 双色（零回归）
+//      0 位 = §10.2 占位披露不失真）+ caption 披露在场；现行推送（无 per-row
+//      color）走前沿/被支配双色 + 点旁 round 标签（2026-09-11 用户拍板：只想看
+//      前沿解）；per-row color 通道保留给通用调用方（合成 payload 钉住）
 //   4. §6.3-2 只读：面板点选全文只发 GET artifacts 端点（web §5 无写入口）
 //
 // happy-dom 已知限制（chart.test.tsx 同款注释）：recharts ComposedChart 的散点
@@ -26,8 +27,10 @@ import { useWorkflowStore } from "@/stores/workflow-store";
 import { ProfOptDocsPanel } from "@/components/profopt/ProfOptDocsPanel";
 import { ParetoChartWidget } from "@/components/chart/widgets/ParetoChartWidget";
 import {
+  paretoTooltipRows,
   prepareParetoPoints,
   perRowColor,
+  roundLabel,
 } from "@/components/chart/widgets/ParetoChartWidget";
 import { ChartWidget } from "@/components/chart/ChartWidget";
 import { NEUTRAL } from "@/components/chart/chartTheme";
@@ -40,6 +43,15 @@ const liveDocs = raw.live["prof-opt/docs"] as unknown as ChartPayload;
 const liveLine = raw.live["prof-opt/curves"] as unknown as ChartPayload;
 const livePareto = raw.live["prof-opt/pareto"] as unknown as ChartPayload;
 const finalDocs = raw.final["prof-opt/docs"] as unknown as ChartPayload;
+
+/** legacy 行（C3 之前的推送形态）：行不带 content/content_omitted → 点选回退
+ * artifacts GET。现行推送方每行都带 content，legacy 行只能内联构造。 */
+function legacyDocsRow(payload: ChartPayload, path: string): ChartPayload {
+  const rows = (payload.data as Array<Record<string, unknown>>).map(
+    (r) => (r.path === path ? { vid: r.vid, doc: r.doc, status: r.status, path: r.path, updated_at: r.updated_at } : r)
+  );
+  return { ...payload, data: rows };
+}
 
 let _seq = 900;
 /** 真实 payload → chart 事件（与 chart socket → store 的现有事件形状一致）。 */
@@ -82,9 +94,9 @@ describe("W3-T1 联调：ProfOptDocsPanel 消费真实 push_curves 清单 payloa
     expect(screen.getByTestId("docs-group-baseline").textContent).toContain(
       "business_logic.md"
     );
-    // 达线未训变体（latency_pass）与淘汰变体（latency_fail）保留展示（web §3.3）
+    // 达线未训变体（latency_improved）与淘汰变体（latency_fail）保留展示（web §3.3）
     expect(screen.getByTestId("docs-variant-card-r3-01").textContent).toContain(
-      "latency_pass"
+      "latency_improved"
     );
     expect(screen.getByTestId("docs-variant-card-r4-01").textContent).toContain(
       "latency_fail"
@@ -141,25 +153,77 @@ describe("W3-T1 联调：ParetoChartWidget 修正回归（P4 上报缺陷）", (
       "x",
       "y"
     );
-    // live fixture: r1-01 / r2-01 可绘；r3-01（达线未训）与 r4-01（latency_fail
-    // 且无 gap/metric）y=null —— 原 Number(null)=0 会把它们画在 0 位
-    expect(points.map((p) => p.x)).toEqual([20, -20]);
-    expect(points.map((p) => p.y)).toEqual([0.02, 0.45]);
-    expect(plottableRows.map((r) => r.vid)).toEqual(["r1-01", "r2-01"]);
+    // live fixture: r1-01 / r2-01 / baseline 锚点可绘；r3-01（达线未训）与
+    // r4-01（latency_fail 且无 gap/metric）y=null —— 原 Number(null)=0 会把
+    // 它们画在 0 位。baseline 锚点在 gap basis 下 y=0，是合法可绘点。
+    expect(points.map((p) => p.x)).toEqual([20, -20, 0]);
+    expect(points.map((p) => p.y)).toEqual([0.02, 0.45, 0]);
+    expect(plottableRows.map((r) => r.vid)).toEqual([
+      "r1-01",
+      "r2-01",
+      "baseline",
+    ]);
   });
 
-  test("per-row 状态着色被消费：行色 = §10.2 状态色，缺色回退 NEUTRAL", () => {
-    const rows = livePareto.data!;
-    const byVid = new Map(
-      rows.map((r) => [String(r.vid), r as Record<string, unknown>])
+  test("现行推送不带 per-row color（前沿/灰双色归前端）+ round 随行（点旁标签）", () => {
+    const rows = livePareto.data! as Array<Record<string, unknown>>;
+    // 2026-09-11 契约：推送方停发 per-row color —— 着色 = 前端几何前沿判定
+    expect(livePareto.color).toBe("");
+    for (const r of rows) {
+      expect(r).not.toHaveProperty("color");
+    }
+    // round 解析自 history.jsonl（baseline 锚点恒 0），供点旁 R{n} 标签
+    const byVid = new Map(rows.map((r) => [String(r.vid), r]));
+    expect(byVid.get("r1-01")?.round).toBe(1);
+    expect(byVid.get("baseline")?.round).toBe(0);
+  });
+
+  test("perRowColor 通道保留（通用调用方）：行色被消费，缺色回退 NEUTRAL", () => {
+    expect(perRowColor({ vid: "x", color: "#10b981" }, "color")).toBe(
+      "#10b981"
     );
-    expect(perRowColor(byVid.get("r1-01")!, "color")).toBe("#10b981"); // success
-    expect(perRowColor(byVid.get("r2-01")!, "color")).toBe("#3b82f6"); // in-flight
-    expect(perRowColor(byVid.get("r3-01")!, "color")).toBe("#94a3b8"); // latency_pass
-    expect(perRowColor(byVid.get("r4-01")!, "color")).toBe("#f97316"); // latency_fail
     // 缺色回退：字段缺失与空串都不落「无色」点（与 isPlottable 的「缺」同口径）
     expect(perRowColor({ vid: "x" }, "color")).toBe(NEUTRAL);
     expect(perRowColor({ vid: "x", color: "" }, "color")).toBe(NEUTRAL);
+  });
+
+  test("round 标签 + tooltip 数据面接线：points 保留原行字段（round/vid/status）", () => {
+    // 纯函数级验证（happy-dom 不渲染散点逐点内容）：prepareParetoPoints 若把
+    // 行投影成裸 {x,y}，LabelList dataKey="round" 与 tooltip 将静默拿不到值
+    // （2026-09-11 review Critical 回归钉）。
+    const { points } = prepareParetoPoints(
+      [{ vid: "r1-01", round: 1, status: "success", x: "20", y: 0.02 }],
+      "x",
+      "y"
+    );
+    expect(points[0]).toMatchObject({
+      vid: "r1-01",
+      round: 1,
+      status: "success",
+      x: 20,
+      y: 0.02,
+    });
+    expect(roundLabel(null)).toBe("");
+    expect(roundLabel("")).toBe("");
+    expect(roundLabel(3)).toBe("R3");
+    expect(
+      paretoTooltipRows({
+        payload: [
+          { payload: { vid: "r1-01", round: 1, status: "success", x: 20, y: 0.02 } },
+        ],
+      })
+    ).toEqual([
+      ["vid", "r1-01"],
+      ["round", "1"],
+      ["status", "success"],
+      ["x", "20"],
+      ["y", "0.02"],
+    ]);
+    // 前沿/被支配两组继承原行字段（LabelList 两组都挂 round）
+    const dominated = paretoTooltipRows({
+      payload: [{ payload: { vid: "r2-01", round: 2, x: -20, y: 0.45 } }],
+    });
+    expect(dominated).toContainEqual(["vid", "r2-01"]);
   });
 
   test("isPlottable 意图全子句：null/undefined/空串/非有限数全部不可绘", () => {
@@ -180,8 +244,10 @@ describe("W3-T1 联调：ParetoChartWidget 修正回归（P4 上报缺陷）", (
     expect(points).toEqual([{ x: 6, y: 0.5 }]);
   });
 
-  test("color 字段在场 → 单散点系列（Legend=variants）+ caption 占位披露在场", async () => {
-    render(<ParetoChartWidget payload={livePareto} />);
+  test("color 字段在场（合成 payload）→ 单散点系列（Legend=variants）+ caption 占位披露在场", async () => {
+    render(
+      <ParetoChartWidget payload={{ ...livePareto, color: "color" }} />
+    );
     await waitFor(() => {
       expect(document.querySelector(".recharts-legend-item")).toBeTruthy();
     });
@@ -194,10 +260,8 @@ describe("W3-T1 联调：ParetoChartWidget 修正回归（P4 上报缺陷）", (
     expect(screen.getByTestId("chart-caption").textContent).toContain("null");
   });
 
-  test("无 color 字段（旧 payload）→ 回退 dominated/front 双色（零回归）", async () => {
-    const { color: _c, ...noColor } = livePareto;
-    void _c;
-    render(<ParetoChartWidget payload={noColor as ChartPayload} />);
+  test("现行推送（color=\"\"）→ 前沿/被支配双色（零回归）", async () => {
+    render(<ParetoChartWidget payload={livePareto} />);
     await waitFor(() => {
       expect(document.querySelector(".recharts-legend-item")).toBeTruthy();
     });
@@ -220,7 +284,9 @@ describe("W3-T2 只读验证（web §6.3-2 面板侧）", () => {
       } as Response)
     );
     vi.stubGlobal("fetch", fetchMock);
-    setupPanel(liveDocs);
+    // legacy 行（无 content/content_omitted）才走 artifacts GET 回退——
+    // 现行推送行内带正文，点选零请求（C3）
+    setupPanel(legacyDocsRow(liveDocs, "baseline/business_logic.md"));
     fireEvent.click(
       screen
         .getAllByTestId("doc-item")
