@@ -1,0 +1,384 @@
+# Report Format And Terminal-State Protocol
+
+The report node is the single terminal reporter: every path (success and
+every failure mode) converges here. **Zero cross-node output references** —
+the terminal state is derived ONLY from the workspace on disk. Paths are
+relative to the workspace root (`$ORCA_ARTIFACTS_DIR`) unless absolute. Angle-bracket
+placeholders (`<project-root>`) are
+runtime values from your node prompt's input anchors — substitute the actual
+values. Write-back is a fixed behavior, not an input: it runs on every
+success terminal; nothing you substitute controls it.
+
+Build the report with ONE python script you write at entry:
+`$ORCA_ARTIFACTS_DIR/report_builder.py` (English identifiers, `pathlib`,
+stdlib only — the optional live chart push may import the orchestrator's
+chart module when its env is present). The script implements this document
+mechanically, is safe to re-run (write-back is idempotent by the same-content
+rule), and prints the final single-line JSON on stdout. Your reply is that
+line verbatim.
+
+The report's FIRST section is the disclosure block carrying exactly
+FOUR fixed lines (plus the deployed scripts' version stamp
+`scripts/.VERSION` — provenance, no judgement):
+
+1. **Profiling source**: "mfu 实测 via 用户内网评测工具" — with the
+   profile configuration read from `contracts.json`'s `profile` block
+   (chip / precision / core_num) verbatim. Every cycles number in this
+   report was measured on that one path (no estimator, no fallback).
+2. **Training device backend**: `train_device.json` verbatim (backend /
+   device_count / resolved_by) — the backend every training ran on.
+3. **Chart daemon state**: the LAST line of `.chart_push.log` plus THIS
+   run's pushed dictionary (which charts were pushed, when). An offline
+   daemon or a failed push is WRITTEN DOWN here, never silent.
+4. **Facet capability matrix**: from `contracts.json`'s `facets` block —
+   whether the `features` / `loss` facets were available (and used by the
+   winner), plus the dry-run evidence path it records. An unavailable
+   facet narrowed the search space during the run; this line is where
+   that narrowing is disclosed, never hidden.
+
+## 0. Terminal harvest (wait, never kill — before the state table)
+
+The in-flight set = the baseline finalizer (when `baseline/finalizer.pid`
+names a live, attribution-checked pid) plus every variant whose LATEST
+`history.jsonl` row has `outcome == "latency_improved"` (no terminal row —
+`success` / `accuracy_fail` / `probe_insufficient` / `latency_fail` — in
+any version). For each member, ONE bounded poll (≤ 60 s):
+
+- baseline: wait for `baseline/train_final.json`; pid dead (or the pid
+  file absent — the launch was torn before its guardian came alive) →
+  stop waiting, the state table judges;
+- variant: read `variants/<vid>/train_status.json` `stage` — a terminal
+  stage (`killed` / `done` / `failed`) → stop waiting; `waiting` /
+  `training` → wait within the poll (a final-eval wait also records
+  `waiting` on disk; `final_eval_waiting` appears only in watchdog.log
+  lines, never in train_status.json).
+
+Anything still in flight when the polls top out → **park**: reply with a
+status message containing `do not call orca next` (name the awaited
+vids/stages and their `watchdog.log` paths) and re-enter next turn. You
+NEVER kill a live training to unblock yourself — it owns its card, the
+cost is paid, and its terminal row is what keeps it judgment-eligible.
+
+**The ONLY kill path is a platform-external stop** — the run is being torn
+down from outside and this node cannot re-enter. Then: kill the baseline
+training group (`baseline/train.pid`), the finalizer group, and every
+in-flight variant group (`variants/<vid>/train/train.pid`). Every kill is
+attribution-GUARDED: the pid's /proc cmdline must reference
+`train.rendered.sh` (training wrappers) or `--finalizer` (finalizer)
+before signalling — a dead, reused, or unrelated pid is skipped and named
+in the disclosure instead of killed. Record `"aborted at terminal"` for
+the `reason` (disclosed, never hidden). The harvested-kill disclosure does
+NOT change `status`/`stage`; the state table below still derives them from
+disk.
+
+## 0b. Card-release sweep (after the harvest, before the state table)
+
+A watchdog that died before its terminal action must not pin a card
+forever. The judgment is MECHANICAL — the ledger's own sweep subcommand
+owns the liveness verdicts and the release (never re-implemented in the
+builder):
+
+```bash
+python3 "$ORCA_ARTIFACTS_DIR/scripts/device_alloc.py" sweep \
+  --artifacts "$ORCA_ARTIFACTS_DIR"
+```
+
+stdout = `{"released": N, "locks": [{idx, vid, pid, liveness, action,
+note?}...]}` — one row per lock: **dead** → released (disclosed in the
+report); **alive** → kept, listed as held; **unknown** → kept with the
+"liveness unverifiable" note (never guess, never release a card an
+unconfirmable owner may still hold); an **unparseable** lock file → kept
+and surfaced. Fold the rows into the report's disclosure section
+verbatim.
+
+## 1. Terminal-state table (first match wins)
+
+Terminal rows are judged over ANY version row (a later row cannot erase a
+vid's terminal outcome; `read_latest` per vid is the entry point, and a
+terminal row in ANY version makes the vid judged).
+
+| # | disk condition | status | stage |
+|---|---|---|---|
+| 1 | `project_manifest.md` OR `shadow/` OR `BASELINE.lock` missing | failed | flatten |
+| 2 | `contracts.json` missing, or its recorded viability flag is false | failed | contract |
+| 3 | the early chain is incomplete (the current base profile `base/profile/mfu_bottleneck_report.md` or the origin baseline trainer `baseline/train.rendered.sh` is missing), OR `baseline_status.md` records the chain as failed, OR `baseline/train_final.json` exists with `status: failed`, OR the finalizer is dead (attribution-checked `baseline/finalizer.pid` names no live pid) with NO `train_final.json` on disk (an externally killed guardian) | failed | baseline |
+| 4 | `rounds/` has no numeric directory | failed | propose |
+| 5 | any vid has a `success` row and `makespan_cycles <= origin_anchor.target_cycles` (after Step 0's harvest every in-flight training is terminal) | success | probe |
+| 6 | no final winner AND some vid's latest row is `latency_improved` while its training left NO terminal record (no terminal row, `train_status.json` missing or non-terminal, watchdog dead/absent — a torn launch, not a wait) | failed | probe |
+| 7 | no final winner AND `round_state current`'s round ≥ `max_rounds` (the hard cap ended the loop without a target-meeting winner) | failed | gate |
+| 8 | otherwise (no final winner, nothing in flight or torn, below the cap — the loop ended without any exit condition leaving a disk trace) | failed | gate |
+
+An accuracy-success variant that misses the origin target is a frontier
+point, not a final winner. Row 5's stage is `probe` because the winner's training and final eval were
+launched and judged by the probe pipeline's detached watchdogs — the
+`reason` must name the winner and its gap/makespan so the success is
+self-describing. Row 6 is the honest torn-launch terminal: a variant was
+released to train but neither its watchdog nor its history ever recorded
+an outcome — attribute it, name the vid. Row 7 vs row 8 are close: the cap
+is re-derived from the current round versus the input cap, and only the
+gate's own run log knows the exact decision — say so in `reason` when the
+distinction matters.
+
+`reason` (one or two sentences): for success, the winner and its final
+budget verdict; for failures, what the matched row's condition shows
+(e.g. "baseline training failed at the final check: actual epochs <
+rendered", "round 4's variant r4-01 was released to train but left no
+terminal record — torn launch").
+
+## 2. Field assembly
+
+- `status` / `stage` / `reason`: from the table above (plus the harvest
+  disclosure when it fired).
+- **winner**: among vids with a `success` row whose measured makespan is at
+  or below `base/origin_anchor.json.target_cycles`, pick the smallest
+  `gap` from the success row; ties broken by the smallest
+  `makespan_cycles` in the vid's merged history snapshot (the latency
+  row's measured value); further ties by vid (lexicographic, pinned so
+  the pick is deterministic). The winner object is `{"vid",
+  "change_sig", "lineage"}`: `change_sig` from the winner's latest
+  history row; `lineage` = the winner's composition provenance — the
+  `absorbs` list from its latest history row (the frontier vids whose
+  proven mechanisms the design fuses; `[]` when it absorbed nothing; no
+  promotion exists, so no parent chain exists).
+  **No target-meeting success row anywhere → `null` and a
+  no-final-winner disclosure in `reason`** (the report references the
+  dashboard for what was tried).
+- `baseline`: `ref_acc` = the baseline full-training anchor, three-state
+  read of `baseline/baseline_full_acc.json`: `baseline/train_final.json`
+  missing → null + disclosure ("baseline training never reached a
+  terminal state" — includes the aborted-at-terminal case);
+  `train_final.status == "failed"` → null + attribution (quote its
+  `stage`); `done` → read `baseline_full_acc` from the file (never from
+  anywhere else). `makespan` = `base/origin_anchor.json`'s
+  `baseline_makespan_cycles` — the frozen ORIGINAL baseline; when the
+  anchor file is absent (pre-baseline terminal), use null and disclose that
+  the baseline profiling anchor was never frozen.
+- `final` (all from the WINNER's records; zeroed when there is no winner):
+  `acc` from `variants/<vid>/eval/final_acc.json`'s `final_acc` (0 when
+  absent); `makespan` from the winner's history snapshot
+  `makespan_cycles` (referenced, never re-measured; 0 when absent);
+  `gap` from the winner's `success` history row (0 when absent);
+  `within_budget` = the `within_budget` recorded in the eval record
+  (false when absent). Take the direction from `contracts.json`.
+- `rounds_completed`: `round_state current`'s round (the max numeric
+  directory under `rounds/`; 0 when none).
+- `proposals_total`: sum of `len(proposals)` over every
+  `rounds/<NNN>/proposals.json`.
+- `history_path`: absolute path of `history.jsonl`.
+- `write_back`: `{done, files, conflicts}` — `{false, [], []}` unless
+  section 3 ran. On terminals with NO winner, the zero-write-back form is
+  the honest outcome — the Write-Back section of the report states "no
+  success variant — nothing to write back" instead of implying a skip.
+- `charts_summary`: comma-joined chart file names, or the exact fixed string
+  `none (no rounds recorded)` — no free-form wording (section 4 pins when).
+- `artifacts`: absolute paths of the key products that exist: this report's
+  markdown, `history.jsonl`, `experiment_ledger.json`,
+  `dashboard.html`, the winner's `eval/final_acc.json` and final
+  checkpoint / onnx when present, the charts directory.
+- `error`: "" on success; the matched failure cause otherwise.
+
+## 3. Write-back (when status == success — write-back is a fixed behavior)
+
+The write-back source is up to THREE grouped pieces from the **WINNER's
+variant directory** (`variants/<winner-vid>/`): the variant shadow
+(`shadow/` — the model tree the implementer actually optimized; the global
+`shadow/` is the origin baseline tree and never moves) plus, for each facet
+the winner's proposal carried, that facet's variant copies
+(`variants/<winner-vid>/facets/`). A facet unavailable in
+`contracts.json`'s `facets` block simply contributes no piece. All pieces
+are diffed against the user's original files at the same relative paths.
+User files are never modified; new files are written beside the originals.
+
+1. **Lock re-verification**: recompute, exactly as `BASELINE.lock` records
+   them, the checksums of the user project files the lock covers
+   (lock schema: model_path + the shadow *.py checksum map).
+   - A structural-anchor mismatch (model path / the shadow checksum map) →
+     `done=false`, one conflict entry describing the anchor mismatch, NO
+     files written.
+   - A per-file checksum mismatch (the user changed that file during the
+     run) → conflict entry `<relpath>: original file changed during the run`,
+     that file is not written.
+2. **Facet drift re-verification** (same construct, one level up): for each
+   facet file recorded in `contracts.json`'s `facets.origin_hashes`,
+   recompute the user project file's sha256 and compare with the recorded
+   origin hash. Any mismatch (the user changed a facet file during the run)
+   → conflict entry `<relpath>: original facet file changed during the run`,
+   that file is not written — per file, exactly like the lock side above.
+3. **Diff and write**: for every file in the winner's shadow tree AND in the
+   winner's facet-copies tree, compare
+   with the user's file at the same relative path:
+   - content identical → nothing to write;
+   - original absent AND the relpath is listed in
+     `readiness/readiness.json`'s `shadow_synthesized` array (a file the
+     pipeline synthesized with no user original — e.g. a package
+     `__init__.py` from the bare-module copy form) → SKIP writing: it is
+     pipeline plumbing, not an optimization product. List it in the report's
+     Write-Back section informationally as
+     `<relpath>: shadow-synthesized, not an optimization product — skipped`
+     (NOT a conflict, NOT in `files`).
+   - content differs or the original is absent → write the variant content to
+     `<original dir>/<stem>_profiling_v2<suffix>` (keep the directory
+     structure; for a file with no original, place
+     `<name-stem>_profiling_v2<ext>` at the same relative directory under
+     <project-root>).
+   - Target exists with different content → conflict entry
+     `<target>: exists with different content (not overwritten)`; target
+     exists with identical content → count as written (idempotent).
+4. **Deletions**: files the lock covers whose path is ABSENT from the
+   winner's shadow tree → conflict entry `<relpath>: deleted in optimized
+   structure (not written back)`. (The structural levers only edit files in
+   place, so this normally never triggers — report it honestly if it ever
+   does.)
+5. **Verify**: after writing, re-read every written file and compare bytes
+   with its variant source (shadow or facet copy); a mismatch → delete that
+   partial file (it is ours), drop it from `files`, add a conflict entry
+   `<target>: write verification failed`.
+6. `done=true` iff at least one file was written OR there was nothing to write
+   (an empty diff after content-identical files AND shadow-synthesized skips
+   is still a completed write-back with `files=[]`); `done=false` when the
+   anchor check failed.
+
+## 4. Charts (history aggregation; best-effort, never blocks the report)
+
+Before rendering charts, invoke the two deterministic shared scripts:
+`experiment_ledger.py --artifacts <workspace>` and
+`dashboard_snapshot.py --artifacts <workspace>`. Their failure is NOT
+best-effort: an unreadable ledger or dashboard is a report-builder failure
+(the builder exits non-zero — never emit a report over a broken memory).
+Also finalize the live charts (the ONLY best-effort command in this node):
+`push_curves.py --artifacts <workspace> --title "(final)" --docs` — the
+terminal push so the final curve / pareto / analysis-docs manifest state is
+visible even if the daemon saw no mid-run poll; a successful push appends
+the `.chart_push.log` audit line.
+
+Write into `charts/`, one self-contained HTML file per chart (inline SVG,
+stdlib-only rendering — no external dependencies):
+
+- `rounds_makespan_trend.html` — line chart; x = round 1..R, y = that
+  round's reference makespan: the round's best MEASURED makespan (minimum
+  `makespan_cycles` over the round's history rows that carry one) or, when
+  the round measured nothing, the frozen origin baseline makespan
+  (`base/origin_anchor.json` `baseline_makespan_cycles`).
+- `verdict_distribution.html` — bar chart; latest-version outcome → count
+  over all vids in history.
+- **Pinned, no judgement calls**: no numeric directory under `rounds/`
+  (no rounds recorded) → skip BOTH charts and set `charts_summary` to the
+  exact fixed string `none (no rounds recorded)`. At least one numeric
+  `rounds/<NNN>/` directory → ALWAYS produce BOTH charts (never one, never
+  zero) — the deterministic fallbacks above decide the data points.
+- **Live push (best-effort)**: when the orchestrator chart env is present
+  (`ORCA_RUN_ID`, `ORCA_NODE`, `ORCA_SESSION_ID`, `ORCA_CHART_SOCK`), push
+  the same two charts through the orchestrator's chart render API —
+  `from orca.chart import render_chart`, lazy-imported inside a try/except
+  (it only resolves inside an Orca run):
+
+  ```python
+  render_chart(chart_type="line",   # "bar" for the verdict distribution
+               data=[{"round": 1, "makespan": 15288}, ...],  # flat records
+               label="po_rounds_makespan_trend", title="Rounds makespan trend",
+               x="round", y="makespan")
+  ```
+
+  All arguments are keyword-only; reusing the same `label` + `title`
+  replaces the previously pushed chart. Any import/push failure → one
+  stderr line and continue. Never let chart failure change the report JSON
+  beyond `charts_summary`.
+- `charts_summary` = comma-joined file names including `dashboard.html`
+  (+ `; live pushed` when the live push succeeded, `; live push unavailable`
+  otherwise).
+
+## 4b. Accuracy-rule merge (ALWAYS, before the markdown)
+
+Hand the workspace's `accuracy_rules.json` to its permanent home —
+regardless of the terminal status (a failed run's measured lessons are
+the most valuable ones):
+
+```bash
+python3 "$ORCA_ARTIFACTS_DIR/scripts/rules_pool.py" merge \
+  --artifacts "$ORCA_ARTIFACTS_DIR" --project-root "<project-root>"
+```
+
+It overwrites the project mirror `<project-root>/docs/profiling-v2/
+accuracy_rules.json` with the workspace rules (the mirror is the one
+permanent home — there is no cross-run pool). PROTECTED: an unparseable
+workspace file makes the merge refuse (exit 2, the mirror survives), and
+an EMPTY rule set overwriting a non-empty mirror requires an explicit
+`--allow-empty` the builder never passes. Any failure — including a
+refusal — is written into `reason` and the report continues; `status` is
+never changed by the merge.
+
+## 5. profiling_v2_report.md (human-readable, workspace root)
+
+The report uses EXACTLY these eleven `##` headings, in this order (the
+structural gate `scripts/check_report.py` validates the set and the
+disclosure tokens — write them as pinned):
+
+`## 披露` · `## 终态` · `## 逐轮表` · `## 训练结局披露` · `## 胜出者` ·
+`## 公平性说明` · `## 基线与最终` · `## 轮次结论` · `## 精度规则` ·
+`## 写回` · `## 面板与文档`
+
+Section content: 披露 (the four lines: profiling source with the
+contracts profile block, training device backend verbatim, chart daemon
+state from .chart_push.log + the pushed dictionary, facet capability
+matrix from the contracts facets block with its dry-run evidence path; +
+scripts .VERSION
+stamp — the first three lines carry the anchor tokens `mfu 实测`,
+`train_device`, `chart daemon`) · 终态
+(status/stage/reason, including the harvest disclosure when it fired) ·
+逐轮表 (round, proposals, verdict outcome counts, the round's
+variant and its fate, round best makespan) · **训练结局披露**
+(mechanical counts over every `variants/<vid>/
+train_status.json`: early-stopped (`killed`) vs natural completion
+(`done`) vs failed launches (`failed`/absent), each with its
+`stopped_at_epoch` and `over_budget_streak` where recorded — the
+streaming judge's exercise disclosure; a variant whose watchdog produced
+`variants/<vid>/eval/k_acc.json` (per-epoch checkpoints enabled) cites
+that k-th-ckpt eval as auxiliary evidence, and one that reached its
+terminal without it says so) · 胜出者 (vid, change signature,
+composition lineage (absorbs), gap, makespan, within_budget; on a no-winner terminal the
+explicit "no success variant" line referencing the
+dashboard for what was tried) · **公平性说明** (one short paragraph:
+the baseline and every variant were trained FROM SCRATCH under the SAME
+`full_train_budget` value-level fingerprint (`contracts.json` — epochs /
+seed / data); a variant that fell behind the accuracy budget was
+early-stopped by the streaming judge and can never be the winner; the
+winner completed the full rendered epochs and its final eval was judged
+against the baseline full-training anchor. **The epoch count cited here
+is `full_train_budget.epochs` read from `contracts.json` — the EFFECTIVE
+value the fingerprint carries, never the raw argparse count**) · 基线与最终
+(baseline makespan / full-training anchor; winner makespan /
+accuracy / gap / budget verdict — the baseline side reads
+`base/origin_anchor.json`) · **轮次结论** (one line per round distilled
+from that round's `rounds/<NNN>/analysis.md` — the latency lessons
+exactly as recorded at round end; then a two-to-three-line cross-round
+summary: which lever families delivered vs were falsified, and the
+predicted-vs-actual calibration drift; rounds whose analysis file is
+absent are skipped, never fabricated; FINALLY the FULL text of
+`base/history.md` is appended verbatim as the rounds-summary appendix —
+it is the mechanically derived per-round view, at most two sentences per
+round, already pushed to the web panel) · 精度规则 (the run's rule
+file summary: rule count, the highest-confidence harmful/benign patterns,
+the merge outcome and the mirror paths) · 写回 (written files,
+conflicts, deletions, informational skips of shadow-synthesized files; on
+a no-winner terminal: the explicit "no success variant — nothing to
+write back" line; on a written terminal: the three-piece grouping
+disclosure — the model file and the facet files it was measured with form
+ONE wiring group and must be adopted together) · **面板与文档** (point at `dashboard.html` /
+`dashboard.json` and the `profiling-v2/docs` analysis-docs manifest — the
+portable summary of curves, pareto, gap table, and every variant's
+analysis documents; reference the paths, never inline the content) ·
+**Enablement Note**: written files carry NEW names — switching the model
+import to the new file name is the user's one-time action; when facet
+files were written, rewiring the feature pipeline / loss import to those
+new names is part of the SAME one-time action (the model file alone, kept
+wired to the old feature pipeline, does not run); the original
+files are untouched.
+
+## 6. Emission
+
+The builder prints the single-line JSON (all fields of the node output
+schema, exact names). Validate before replying: the line parses as JSON and
+carries every schema field; fix the builder and re-run (fix-loop ≤ 3), then
+fail loud with a minimal valid JSON (`status=failed`, `stage=report`, filled
+`error`, empty collections, `baseline`/`final` zeroed) — never an unparseable
+reply.

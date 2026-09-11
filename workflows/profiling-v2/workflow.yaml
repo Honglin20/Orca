@@ -1,0 +1,424 @@
+name: profiling-v2
+description: "硬件 profiling 证据驱动的模型优化闭环，搜索空间 = 结构 / 特征 / loss 三面：每轮提出恰一个三面融合的有机设计（selector 把结构候选（特征 facet 可用时含特征候选）与 loss 判断融合为单一设计——三面要么互相成全，要么不捆绑；设计方向由业务逻辑与信息分析驱动，不设技术目录；蒸馏一切形式禁止——logits / 中间特征 / 关系型知识迁移不得出现在提案与实现中，提案必须携带 distillation_free_ack 显式声明）。唯一 profiling 方式 = mfu-analyzer 调用用户内网 mfu_benchmark 评测工具（芯片/精度/核数为显式 inputs；无环境嗅探、无本地估算、无静默降级；本地 E2E 走同一链路——仓库内 mfu_benchmark.py 是 CLI 形状替身，真机换真脚本，CLI 契约不变）。门不变：时延量纲 = 纯推理（mfu 对导出 ONNX 的实测 makespan，特征/预处理耗时不计入时延账——交付物携带特征管线即部署方自证途径），准入线恒 = 冻结 origin 锚基线（严格低于），精度 = gap ≤ 预算；出口 shape/语义焊死（变体导出 ONNX 输出必须与 origin 逐维一致，指标才算在同一答案上可比），输入 shape 允许随特征面变化。特征/loss facet 的可编辑性由 contract 节机械证明（定位有限文件集 → 复制进工作区 facets/ → ≥1 epoch 适配 dry-run 实测），不可用 facet 静默收窄搜索空间（不退出、不报错），但能力矩阵必须在 contracts.json 与报告首段披露——注意两个「静默」不同指：mfu 链的「无静默降级」指 profiling 永不降级替代，facet 的「静默收窄」指搜索空间按能力收窄且必须披露（静默 = 不中断，不 = 隐藏）。跨轮上下文有界不随轮数膨胀：数字层 = base/frontier.json（每轮 frontier_snapshot 刷新——吸收前沿已验证机制（absorbs 组合谱系）/避开失败方向（avoid 避坑清单）/在飞训练实时精度对比（in_flight）），总结层 = base/history.md（render_history.py 从 history.jsonl 机械渲染的派生视图，每轮 ≤2 句并推 web；真相唯一在 append-only 的 history.jsonl，绝不由 LLM 书写）。在用户项目旁的影子工作区内（base 恒冻结 origin 不晋升；facet 副本住 shadow 之外的 facets/ 与 variants/<vid>/facets/，影子四机制零接触），每轮设计经 variant-assessor 软对齐评估（范围含 facet 文件）→ 实现 → facet_check（出口焊死 + 变体特征管线接口比对）→ mfu 实测 → 原地修复直至达到冻结时延线（单变体收敛环）；基线完整训练后台非阻塞运行并推送精度曲线；变体达线即经设备账本（agent 读占用原文选卡 + O_EXCL 锁 claim --idx）占卡启动同预算完整训练、两条件存活确认后立即放行（异步训练流水线），detached watchdog 逐 epoch 与基线同深度对比、连续超预算自动早停（流式早停）；任一变体 success、轮数硬帽、或连续多轮零提案（idle 出环）即出环，report 无 kill 等全部在飞训练终态后按 gap 最优判 winner（并列取 makespan），首段固定披露 profiling 来源 / 训练设备后端 / chart daemon 状态 / facet 能力矩阵，附 history.md 全文作轮次总结附录，并对遗留死锁做卡释放兜底。实测精度教训按规则沉淀进项目镜像，供后续轮与后续 run 提案复用。准入条款：模型须可 opset17 静态 shape 导出（禁 dynamic_axes，动态 shape 模型不在范围）；训练须按给定轮数精确执行——自带 early-stopping 的项目不在本 workflow 范围。用户原文件全程只读，胜出设计最终以新文件名写回项目（模型件 + 可用的特征/loss facet 件配组写回，_profiling_v2 后缀、冲突不覆盖；三件须同组接线采纳——单取模型件而弃特征件不可运行）。"
+
+entry: po_flatten
+
+# ─────────────────────────────────────────────────────────────────────────────
+# inputs——三档标签：[ask]=业务决策必填 / [advanced]=罕见 override 可选 /
+# [default]=工程默认。seed 全 workflow 必有。
+#
+# 通用性原则：时延/精度达标线一律是"相对基线"的无量纲量，由用户按
+# 项目给定（[ask]），workflow 内不出现 dB / 百分比 / 绝对 cycles 等项目量纲。
+# 达标线与预算在基线建立时冻结为 origin 锚（不可变；修改需 fresh_start）。
+#
+# `$ORCA_ARTIFACTS_DIR`（入口注入）：`project_root` 非空绝对路径 →
+# `<project_root>/artifacts/profiling-v2/`（project-scoped，跨 run 复用 + 多 wf 隔离）。
+#
+# 时延量纲：全链统一整数 cycles（直接读取原始 schedule_result.json）。
+# profiling 配置（profile_chip / profile_precision / profile_core_num）是显式
+# inputs，由 po_contract 记入 contracts.json（值级指纹的一部分）——变更需
+# fresh_start=true（与达标线/精度预算同轨，origin 锚不可变）。
+#
+# 跨节点共享确定性脚本：入口节点每次进入都幂等部署到
+# `$ORCA_ARTIFACTS_DIR/scripts/` 并维护版本戳 .VERSION，其余节点一律经该
+# 路径执行（不直引 workflow 源目录）。
+# ─────────────────────────────────────────────────────────────────────────────
+inputs:
+  project_root:
+    type: string
+    description: "[ask] 用户 PyTorch 项目根目录绝对路径。结构优化的全部勘察 / 影子复制 / 训练评估连接都以它为源项目锚点（agent.md 经 {{ inputs.project_root }} 引用）；亦作工作区解析锚点——workflow 工作区固定在其 artifacts/profiling-v2/ 子树。必须用户给（绝对路径，否则启动失败）"
+    required: true
+  model_path:
+    type: string
+    description: "[ask] 目标模型定义文件路径（相对 project_root 或绝对）。结构优化的唯一修改对象：该文件及其本地依赖闭包被复制进影子工作区，一切结构修改只发生在影子副本，用户原文件全程只读。必须用户给"
+    required: true
+  latency_reduction_min:
+    type: number
+    description: "[ask] 时延达标线：相对原始基线 makespan 的最小降低比例（无量纲，0-1 开区间；如 0.5 = 最终时延至少降 50%）。达标线在基线建立时冻结为 origin 锚（base/origin_anchor.json 的 target_cycles），此后结构推进永不重锚。达标判定 = 变体实测 makespan ≤ target_cycles"
+    required: true
+  accuracy_budget:
+    type: number
+    description: "[ask] 精度预算：相对基线评估指标的最大可接受损失（无量纲，按指标方向归一；具体量纲由项目指标自带）。同样冻结进 origin 锚；watchdog 逐 epoch 流式判定与终局 final-budget 判定共用。必须用户给"
+    required: true
+  profile_chip:
+    type: string
+    description: "[ask] 用户内网评测工具的芯片参数（mfu_benchmark --chip）。显式给定，不做环境嗅探；与基线 profiling 一同冻结（记入 contracts.json，变更需 fresh_start）"
+    required: true
+    enum: ["6613", "1951"]
+  max_rounds:
+    type: integer
+    description: "[ask] 变体轮数硬帽（轮 = 变体）。全 workflow 唯一成本闸门——「愿意烧多少」的业务决策，必须用户给。达到后永不回边：无 success 变体时等在飞训练终态后收尾；无任何时间帽 / 平台早退（平台期的答案是换路径探索，不是停机）"
+    required: true
+  seed:
+    type: integer
+    description: "[default] 复现性种子（默认 0）。导出 / 从头训练随机初始化 / 预算渲染等 seed 消费环节全链固定此值，并记入 full_train_budget 值级指纹"
+    required: false
+    default: 0
+  profile_precision:
+    type: string
+    description: "[advanced] 用户内网评测工具的精度参数（mfu_benchmark --precision，默认 INT8）。记入 contracts.json 值级指纹，变更需 fresh_start"
+    required: false
+    default: "INT8"
+    enum: ["INT8", "INT16", "AMP"]
+  profile_core_num:
+    type: integer
+    description: "[advanced] 用户内网评测工具的并行核数（mfu_benchmark --core-num，默认 1）。记入 contracts.json 值级指纹，变更需 fresh_start"
+    required: false
+    default: 1
+    enum: [1, 2, 4]
+  idle_round_cap:
+    type: integer
+    description: "[advanced] 连续 N 轮零提案 → gate idle 出环收尾（默认 5）。防搜索空间真耗尽时空转；零提案轮本身合法（exhausted_rationale 留档），连续达帽即出环"
+    required: false
+    default: 5
+  fresh_start:
+    type: boolean
+    description: "[advanced] 丢弃工作区既有可复用状态、从零重建（默认 false）。结构锚（模型文件）、profiling 配置（chip/precision/core_num）或复用版本不匹配导致锁校验失败时的重置开关，修改达标线 / 精度预算同样需要它（origin 锚不可变）。true 会清空工作区内全部既有内容（仅保留 .run_lock）后重跑入口节点——会清空在飞训练工作区，先确认无在飞 run。注意：项目镜像不受影响（fresh_start 后 flatten 会重新回种）"
+    required: false
+    default: false
+  full_train_epoch_cap:
+    type: string
+    description: "[advanced] 完整训练轮数上限（默认空 = 不截断）。非空 = 实际轮数取 min(本值, 项目全量训练轮数)——基线完整训练与 winner 完整训练共用的唯一预算阀（生效值记入 contracts.json 的 full_train_budget 值级指纹），真机长训练的成本保护"
+    required: false
+    default: ""
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 节点形态：7 节点 = 6 个 agent + 1 个 script（po_gate）。agent 内确定性逻辑
+# 执行工作区 scripts/ 并 emit 单行 JSON；gate 先刷新机械前沿视图
+# （frontier_snapshot.py → base/frontier.json），再由纯读决策脚本计算路由。
+#
+# 单变体收敛环：po_propose 节点内一轮 = 一个变体（提案 → variant-assessor
+# 软对齐评估 → 实现 → 实测 → 原地修复 ≤5），达线即交 po_probe；不达线淘汰
+# ——latency_fail 终态行经 frontier_snapshot 机械派生为 avoid 避坑清单。
+#
+# 异步训练流水线：po_probe 先 device_alloc probe 看占用原文、agent 选卡、
+# claim --idx 占卡（O_EXCL），渲染 + detach 训练 wrapper 与 watchdog.py，
+# 两条件存活确认（pid 归属 + train.log 出现）后立即 emit；逐 epoch 判定 /
+# 流式早停 / 终局 eval / 释放卡全归 watchdog。满卡 = probe 保持节点等待
+# （同 run watchdog 终态释放是收敛保证）。
+#
+# 循环载体：DAG 回边 po_gate --loop--> po_propose（route 顺序敏感
+# first-match-wins；每节点 catch-all → po_report 兜底业务失败与 gate 的
+# finish-failed 披露）。回边下的防死循环 = gate 脚本内轮数硬帽 + idle 出环，
+# 双保险。出环不打断存量：success 行只截断后续提案轮，在飞训练不杀不撤，
+# 由 po_report 终态收割后统一判 winner。
+#
+# 基线非阻塞：po_baseline 在完整训练启动并确认存活后即完成（finalizer
+# detached 守护负责曲线 / 双锚 / 终检 / 终态标记）。
+#
+# 幂等前提：节点重执行 at-least-once——所有副作用幂等（reuse gate / 状态
+# 文件 / DONE marker / pid 守卫），路由 when 只引节点 output、不引 inputs
+# （引擎约束）。
+# ═════════════════════════════════════════════════════════════════════════════
+nodes:
+  # ── Agent 1: po_flatten（entry）────────────────────────────────────────────
+  #   影子工作区建立：勘察用户项目 → 写 project_manifest + .user_pkg → 把模型
+  #   定义闭包复制为可编辑影子副本（用户原文件只读）→ 部署跨节点共享脚本 →
+  #   解析训练设备后端（train_device.json）→ 结构锚锁（BASELINE.lock）+
+  #   单写者运行锁 → 三项就绪检查（可构造 / 可 opset17 静态导出 / 定义可
+  #   定位）+ stdlib 撞名预检 + 影子解析运行时断言。memory-verifier 子代理
+  #   复核 manifest 事实。flatten_passed=false → 路由 po_report（fail loud）。
+  #   facet 无涉：特征/loss facet 副本住工作区根 facets/（shadow 之外），
+  #   由 contract 节定位建立——本节点的影子/锁/枚举/断言机制不感知 facet。
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: po_flatten
+    kind: agent
+    agent: po_flatten
+    output_schema:
+      type: object
+      required: [flatten_passed, readiness_path, error, generated_artifacts]
+      properties:
+        flatten_passed: {type: boolean, description: "true=影子副本建立 + 三项就绪检查全过 + 校验门通过；false=失败 → 路由 po_report"}
+        readiness_path: {type: string, description: "readiness/readiness.json 路径；失败时空串"}
+        error: {type: string, description: "fail loud 时根因；成功→空串"}
+        generated_artifacts:
+          type: array
+          items: {type: string}
+          description: "相对 $ORCA_ARTIFACTS_DIR 的产物路径列表"
+      additionalProperties: false
+    routes:
+      - when: "po_flatten.output.flatten_passed != false"
+        to: po_contract
+      - to: po_report
+
+  # ── Agent 2: po_contract（三契约发现 + 实测 + 预算落盘）────────────────────
+  #   训练 / 评估 / 导出三契约的发现与实测验证：训练入口参数化判定（三档：
+  #   A 直接模板化 / B 生成适配入口——用户训练范式逐字移植仅参数化契约开关，
+  #   paradigm-verifier 保真复核，修一轮仍不过降 C / C 强耦合不可参数化）+
+  #   指标格式实测快跑（≥2 epochs，一跑双用：epoch 行格式 + ckpt 行为）+
+  #   best-effort 早停早拒（检出 early-stopping 机制 → viable=false 归因披露）
+  #   + metric pattern 锚定（数字组后须紧跟行尾/非数字界）；评估双 ckpt 联动
+  #   实测；导出脚本确定性钉死（无则按模型构造事实生成）+ onnx.load/shape 推证
+  #   实测；sitecustomize 合并披露与合并后 eval dry-run 重跑。预算落盘
+  #   contracts.json：profiling 三参数（chip/precision/core_num，值级指纹）、
+  #   proxy_budget（epoch-only：epochs=1）、full_train_budget（epochs/seed）、
+  #   ckpt 三态、early_stop 阈值分数、admission_clause_ack。产出
+  #   contracts.json + 三个 run 模板（训练单模板 + eval + export）。
+  #   facet 能力自检（机械证明，非 LLM 判断）：定位特征管线 / loss 定义的
+  #   可参数化文件集 → 复制进 facets/（shadow 之外，保持相对路径）→
+  #   ≥1 epoch 适配 dry-run（train + eval 双跑，证据
+  #   contract_work/facet_dryrun.json；eval 喂同一特征管线）→
+  #   contracts.json.facets 落盘能力矩阵（features / loss /
+  #   export_consumes_features / 文件清单 / origin_hashes / 证据路径）。
+  #   不可用 facet 静默收窄搜索空间（不退出不报错）但必须披露。run 模板按
+  #   消费面携带 <<facet_dir>> token（train：features 或 loss 任一可用；
+  #   eval：features 可用；export：export_consumes_features）。
+  #   viable=false → 路由 po_report（归因训练前置缺失）。
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: po_contract
+    kind: agent
+    agent: po_contract
+    output_schema:
+      type: object
+      required: [viable, contracts_path, error, generated_artifacts]
+      properties:
+        viable: {type: boolean, description: "三契约全部满足（含适配后满足）→ true；false=强耦合不可安全参数化 / 检出 early-stopping 不在范围等 → 路由 po_report"}
+        contracts_path: {type: string, description: "contracts.json 路径；viable=false 时空串"}
+        error: {type: string, description: "fail loud 时根因；成功→空串"}
+        generated_artifacts:
+          type: array
+          items: {type: string}
+          description: "相对 $ORCA_ARTIFACTS_DIR 的产物路径列表"
+      additionalProperties: false
+    routes:
+      - when: "po_contract.output.viable != false"
+        to: po_baseline
+      - to: po_report
+
+  # ── Agent 3: po_baseline（基线链 + 完整训练非阻塞 + finalizer 守护）─────────
+  #   节点内完成：①早期链（pristine 快照 + 影子导出 + mfu 唯一 profiling 链：
+  #   派发 mfu-analyzer 调用户内网评测工具 → 原始 schedule_result.json 用于
+  #   机械 latency gate + 单一 mfu_bottleneck_report.md 用于分析；无 placeholder
+  #   分支，rc 3 = 等待 analyzer 原始产物）②完整训练
+  #   launch（--device <idx>：节点先 device_alloc probe 读占用原文选卡，
+  #   chain 内 claim --idx；满卡 = stdout running 节点 park，下一轮重 probe）
+  #   ③finalizer 守护 launch（逐 epoch 增量曲线 + live 推送 + 双锚终检 +
+  #   终态标记 + 每轮 touch .run_lock 心跳）④存活确认（训练 pid + finalizer
+  #   pid + train.log 出现，/proc cmdline 归属校验）⑤三份分析文档并行产出
+  #   （business_logic / information_analysis / mfu 瓶颈报告，check_baseline_docs
+  #   门——两份分析文档的必需章节集随 facet 能力条件化：可用 facet 增对应
+  #   特征现状章节）+ 首推 docs manifest。executed = 早期链全过 + 双存活确认
+  #   + 三文档落盘（不含训练完成——非阻塞）。基线训练/eval 渲染恒用
+  #   origin facet（facet_dir 指工作区根 facets/）。
+  #   status=executed → po_propose；catch-all → po_report（stage=baseline）。
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: po_baseline
+    kind: agent
+    agent: po_baseline
+    output_schema:
+      type: object
+      required: [status, error, generated_artifacts]
+      properties:
+        status: {type: string, enum: [executed, failed], description: "executed=早期链全过 + 完整训练与 finalizer 双存活确认 + 三份分析文档落盘（不含训练完成——基线非阻塞，训练由 finalizer 守护收尾）；failed=任一步最终失败 → 路由 po_report"}
+        error: {type: string, description: "失败时根因（含失败步编号）；成功→空串"}
+        generated_artifacts:
+          type: array
+          items: {type: string}
+          description: "相对 $ORCA_ARTIFACTS_DIR 的产物路径列表"
+      additionalProperties: false
+    routes:
+      - when: "po_baseline.output.status == 'executed'"
+        to: po_propose
+      - to: po_report
+
+  # ── Agent 4: po_propose（多架构候选 → selector 三面融合 → 单变体验证）──
+  #   三个 architecture proposer 并行生成业务/硬件/SOTA 结构候选；
+  #   contracts.json.facets.features == true 时固定增派 feature-architect
+  #   产出特征面候选（确定性规则，非临时判断；facet 不可用时该候选与相关
+  #   指令整个缺席）。selector 把全部候选与 loss 判断（loss facet 可用时）
+  #   融合为恰一个三面有机设计（结构面恒在；特征/loss 按能力与设计需要
+  #   携带；三面要么互相成全要么不 bundle；蒸馏禁止，提案携带
+  #   distillation_free_ack）；只有 selector 产物进入
+  #   assessor/implementer/mfu。预测仅披露，实测严格优于冻结 origin 线才进入
+  #   probe；origin target 保持冻结。op_delta 不是契约字段，absorbs（组合谱系）+
+  #   source snapshot 记录来源。depth 冻结——禁增删/合并/重排 block 与重复次数
+  #   （结构突破非超参寻优）。实现后 facet_check（出口焊死 + 变体特征管线
+  #   接口比对）先于 impl 行与 DONE marker；recheck 对变体 facets 副本复跑
+  #   diff==facet_edited_files 等值门。上下文三件套有界不随轮数膨胀：
+  #   base/frontier.json（前沿吸收/avoid 避坑/在飞实时精度，数字层）；
+  #   base/history.md（render_history.py 从 history.jsonl 机械渲染的派生
+  #   总结视图，每轮 ≤2 句；LLM 不书写历史）+ accuracy rules。emit 门
+  #   （check_propose_emit.py：facet 声明确定性规则 + 行-提案短语等值 +
+  #   distillation_free_ack + history.md 新鲜度）通过后随门 best-effort 推送
+  #   docs manifest——每轮 round 文档即时上板（不等 report 终推）。
+  #   executed → po_probe；catch-all → po_report。
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: po_propose
+    kind: agent
+    agent: po_propose
+    output_schema:
+      type: object
+      required: [status, error, repair_count, generated_artifacts]
+      properties:
+        status: {type: string, enum: [executed, failed], description: "executed=内闭环完成（本轮变体淘汰属正常判定非失败）；failed=脚本链/子代理最终失败。failed ⇔ error 非空"}
+        error: {type: string, description: "fail loud 时根因；成功→空串（error 非空 ⇔ failed → 路由 po_report）"}
+        repair_count: {type: integer, minimum: 0, description: "本轮变体的时延修复次数（variants/<vid>/repair_trace.json 计数；零提案/结构性跳过轮 = 0）"}
+        generated_artifacts:
+          type: array
+          items: {type: string}
+          description: "相对 $ORCA_ARTIFACTS_DIR 的产物路径列表"
+      additionalProperties: false
+    routes:
+      - when: "po_propose.output.status == 'executed'"
+        to: po_probe
+      - to: po_report
+
+  # ── Agent 5: po_probe（资源分配 + 启动即放行）──────────────────────────────
+  #   节点入口先跑 deploy --verify → Step0 训练集推导（最新行 latency_improved 且
+  #   未终态的 vid）+ check_verdict.py 唯一改善谓词（不符 = 盘面撕裂 fail
+  #   loud，不重测）→ Step1 选卡（device_alloc probe 读后端 CLI 占用原文 →
+  #   agent 判断空闲卡 → claim --idx；已锁/满卡 = 保持节点等待，status 消息含
+  #   do not call orca next，每 turn 重 probe 一次）→ Step2 渲染 full_train_
+  #   budget 模板（--set device=<idx>；train 模板携带 <<facet_dir>> 时——
+  #   features/loss 任一 facet 可用——另供 --set facet_dir=
+  #   $ART/variants/<vid>/facets；shadow_pkgs 经 shadow_pkgs_csv.py）+
+  #   setsid 训练 wrapper（自写 pid/rc）+ detached watchdog（watchdog.py
+  #   --vid --device，自写 watchdog.pid/log）→ Step3 liveness 两条件（pid
+  #   归属 + train.log 出现，≤15 轮 ×30s；epoch-1 解析归 watchdog；失败重试
+  #   ≤2 → probe_insufficient 终态 + 释放卡）→ Step4 emit executed（不等
+  #   训练；含 device / epoch1_ok）。executed → po_gate；catch-all →
+  #   po_report。
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: po_probe
+    kind: agent
+    agent: po_probe
+    output_schema:
+      type: object
+      required: [status, error, device, epoch1_ok, generated_artifacts]
+      properties:
+        status: {type: string, enum: [executed, failed], description: "executed=（直通或启动路径）全部完成；failed → 路由 po_report"}
+        error: {type: string, description: "fail loud 时根因；成功→空串"}
+        device: {type: ["integer", "null"], description: "本次入口占到的训练设备 idx（devices/<idx>.lock；未启动任何训练时 null，多个 vid 时取最后占到的）"}
+        epoch1_ok: {type: boolean, description: "每个启动 vid 的存活证明均通过（两条件；未启动任何训练时 true）"}
+        generated_artifacts:
+          type: array
+          items: {type: string}
+          description: "相对 $ORCA_ARTIFACTS_DIR 的产物路径列表"
+      additionalProperties: false
+    routes:
+      - when: "po_probe.output.status == 'executed'"
+        to: po_gate
+      - to: po_report
+
+  # ── Script 6: po_gate（frontier + history 双快照 + 纯读现算决策）────────
+  #   决策前先验部署件版本戳（不符输出 finish-failed 披露 payload，经
+  #   catch-all 进 po_report）→ 刷新机械前沿视图 frontier_snapshot.py →
+  #   base/frontier.json（无晋升：base 树恒 origin，永不移动）→ 刷新机械
+  #   派生历史视图 render_history.py（stdout 必须 >/dev/null 重定向保持本
+  #   节点 stdout 纯 JSON；非零退出映射进 finish-failed payload）→ 读盘面
+  #   （history 终态行 + round_state current
+  #   + 各轮 proposals.json + origin 锚——不读任何上游节点 output）→ 确定性
+  #   脚本出 decision（顺序 first-match-wins）：report（任一 accuracy-success
+  #   vid 同时达到 origin target；出环不打断存量，由 report 终态收割；或
+  #   round ≥ max_rounds 轮数硬帽，永不回边；或从最新轮往回连续
+  #   idle_round_cap 轮零提案——idle_exhausted，防搜索空间耗尽后空转）/
+  #   loop（其余一切——唯一回边出口）。loop → 回边 po_propose（DAG 显式
+  #   容环）。
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: po_gate
+    kind: script
+    command: >-
+      bash "$ORCA_ARTIFACTS_DIR/scripts/gate_node.sh"
+      --max-rounds "{{ inputs.max_rounds }}"
+      --idle-round-cap "{{ inputs.idle_round_cap }}"
+    parse_json: true
+    timeout: 120
+    routes:
+      - when: "po_gate.output.json.decision == 'report'"
+        to: po_report
+      - when: "po_gate.output.json.decision == 'loop'"
+        to: po_propose
+      - to: po_report
+
+  # ── Agent 7: po_report（唯一终端 reporter：终态收割 + winner 判定）─────────
+  #   终态收割：无 kill 等在飞训练（基线 finalizer + 各变体 watchdog，每轮
+  #   询 ≤60s、不主动杀——训练已占独立卡、成本已付；平台外部停机场景例外
+  #   kill + "aborted at terminal" 披露）；全部终态后统一判定。零跨节点
+  #   output 引用：读工作区盘面（history/rounds/contracts/baseline/variants/
+  #   train_device/origin 锚/accuracy_rules）判终态与失败归因 → winner =
+  #   达到 origin target 的 success 变体中 gap 最优（并列 makespan 最优），
+  #   无最终达标变体则披露 frontier 进展 → 卡释放兜底（每把 devices/*.lock 查 owner pid，已死
+  #   → release；无法判定 → 披露 liveness unverifiable）→ profiling_v2_report.md
+  #   + 静态图 + finalize chart（live 终稿 "(final)" 推送 + 分析文档清单
+  #   --docs）→ 报告首段固定披露四行（profiling 来源 = mfu 实测 via 用户内网
+  #   评测工具 / 训练设备后端 / chart daemon 状态读 .chart_push.log 末行 +
+  #   本次推送 pushed 字典，离线/失败写明 / facet 能力矩阵——features/loss
+  #   各自可用与否 + dry-run 证据路径），并附 history.md 全文作轮次总结附录
+  #   → 终态调 rules_pool merge（源
+  #   unparseable 拒绝覆盖；失败写进 reason）→ success 时以 winner 的变体
+  #   影子 diff 写回最多三件配组（模型件 + 可用的特征/loss facet 件；新文件名
+  #   <原名>_profiling_v2、冲突不覆盖、写回前复验结构锚锁 + 按
+  #   contracts.json.facets.origin_hashes 复验用户项目 facet 文件未漂移，
+  #   漂移 → conflicts 条目不写；报告明示三件须同组接线采纳——单取模型件
+  #   而弃特征件不可运行）。
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: po_report
+    kind: agent
+    agent: po_report
+    output_schema:
+      type: object
+      required: [status, stage, reason, winner, baseline, final, rounds_completed, proposals_total, history_path, write_back, charts_summary, artifacts, error]
+      properties:
+        status: {type: string, enum: [success, failed], description: "终态：success=存在完整训练精度通过且达到冻结 origin target 的变体；failed=任一阶段失败或无最终达标变体"}
+        stage: {type: string, enum: [flatten, contract, baseline, propose, probe, gate, report], description: "终态来源阶段"}
+        reason: {type: string, description: "终态判定理由（含终态收割、winner 判定与 rules merge 结局披露）"}
+        winner:
+          description: "胜出变体（精度 success 且达到冻结 origin target，gap 最优，并列取 makespan 最优）；否则 null"
+          type: ["object", "null"]
+          required: [vid, change_sig, lineage]
+          properties:
+            vid: {type: string}
+            change_sig: {type: string}
+            lineage: {type: array, items: {type: string}, description: "winner 的组合谱系：其历史行 absorbs 清单（吸收了前沿哪些 vid 的机制；空 = 未吸收；无晋升链，base 恒 origin）"}
+        baseline:
+          type: object
+          required: [makespan, ref_acc]
+          properties:
+            makespan: {type: integer, description: "基线 makespan（cycles；origin 锚冻结的原始值）"}
+            ref_acc: {type: ["number", "null"], description: "基线完整训练终值锚（baseline_full_acc.json；train_final 未达 done 时 null+披露）"}
+        final:
+          type: object
+          required: [makespan, acc, gap, within_budget]
+          properties:
+            makespan: {type: integer, description: "winner 结构 makespan（引用其 history 行实测值，非重测；无 winner 时 0）"}
+            acc: {type: number, description: "winner 最终评估指标（variants/<vid>/eval/final_acc.json；无 winner 时 0）"}
+            gap: {type: number, description: "相对基线锚精度的差距（按方向归一；无 winner 时 0）"}
+            within_budget: {type: boolean, description: "winner 最终指标是否在预算内（无 winner 时 false）"}
+        rounds_completed: {type: integer, description: "已完成轮数", minimum: 0}
+        proposals_total: {type: integer, description: "全程提案总数", minimum: 0}
+        history_path: {type: string, description: "history.jsonl 路径"}
+        write_back:
+          type: object
+          required: [done, files, conflicts]
+          properties:
+            done: {type: boolean, description: "是否执行了写回"}
+            files: {type: array, items: {type: string}, description: "写回的新文件路径列表"}
+            conflicts: {type: array, items: {type: string}, description: "同名冲突未覆盖清单"}
+        charts_summary: {type: string, description: "图表产出摘要（live 终稿推送 + 静态图列表，best-effort）"}
+        artifacts:
+          type: array
+          items: {type: string}
+          description: "关键产物路径列表"
+        error: {type: string, description: "失败时根因；成功→空串"}
+      additionalProperties: false
+    routes:
+      - to: $end
+
+# ─────────────────────────────────────────────────────────────────────────────
+# outputs——全读 po_report.output（失败路径上其他节点可能未跑，引用其 output
+# 会解析失败；reporter 已从磁盘读填所需字段）。回边循环下同节点多次完成的
+# output 取「最近一次完成」版本——本 workflow 的路由与输出只依赖终态 reporter。
+# ─────────────────────────────────────────────────────────────────────────────
+outputs:
+  result: "{{ po_report.output }}"
+  status: "{{ po_report.output.status }}"
+  stage: "{{ po_report.output.stage }}"
+  reason: "{{ po_report.output.reason }}"
+  winner: "{{ po_report.output.winner }}"
+  baseline: "{{ po_report.output.baseline }}"
+  final: "{{ po_report.output.final }}"
+  rounds_completed: "{{ po_report.output.rounds_completed }}"
+  proposals_total: "{{ po_report.output.proposals_total }}"
+  history_path: "{{ po_report.output.history_path }}"
+  write_back: "{{ po_report.output.write_back }}"
+  artifacts: "{{ po_report.output.artifacts }}"
