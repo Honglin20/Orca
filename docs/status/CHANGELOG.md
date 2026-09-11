@@ -5,9 +5,9 @@
 
 ---
 
-## [2026-09-11] feat(prof-opt): origin-anchor 冻结确定性（chain 内联 + gate 保险）+ Web Log 换行/时长分钟化
+## [2026-09-11] feat(prof-opt): origin-anchor 冻结确定性 + 帕累托图前沿/灰 + Web Log 可读性
 
-用户实测两反馈：①po_propose step0 frontier_snapshot 报 origin anchor missing（baseline 漏写 anchor，失败隔一节点才爆）——冻结从 LLM 手动调 freeze_origin.sh（静默 exit 0 guard）改为 chain step 3 确定性内联 + `--accuracy-budget` 必填 + executed gate 加 anchor schema 保险，契约升级为 **executed ⇒ anchor 必在**；②Web Log 长行被裁 + 裸秒位数多——LogStream 动态行高换行 + `formatDuration`（≥60s → X.XXmin 两位）统一 4+2 处裸秒拼接，static 重建。顺手修活 HEAD 既有 `test_baseline_chain_*` ×2（mfu report 归位 early-chain 前置）。po 180 green + 前端 651 green + tars validate 零 warning。详见 [release note](../releases/2026-09-11-web-log-format-and-anchor-freeze.md)。
+用户实测三反馈：①po_propose step0 frontier_snapshot 报 origin anchor missing——冻结从 LLM 手动调 freeze_origin.sh（静默 exit 0 guard）改为 chain step 3 确定性内联 + `--accuracy-budget` 必填 + executed gate 加 anchor schema 保险，契约升级为 **executed ⇒ anchor 必在**；②帕累托图全红（accuracy_fail 状态色）且只想要前沿解——推送方停发 per-row 状态色，改发 `round`（history.jsonl 解析），前端走几何前沿/被支配双色 + 点旁 `R{n}` 标签 + vid/round/status tooltip；③Web Log 长行被裁 + 裸秒位数多——LogStream 动态行高换行 + `formatDuration`（≥60s → X.XXmin 两位）统一 6 处裸秒拼接。顺手：修活 HEAD 既有 `test_baseline_chain_*` ×2；fixture 生成器追上 `_VARIANT_DOC_FILES`/C3 content 漂移。reviewer 抓 1 Critical（points 投影丢原行字段 → 标签/tooltip 静默失效）已修。po 277 green + 前端 653 green + tars validate 零 warning。详见 [release note](../releases/2026-09-11-web-log-format-and-anchor-freeze.md)。
 
 ## [2026-09-10] feat(prof-opt): v8.1 po_propose 叙事层 history digest（commit `dff5456`）
 
