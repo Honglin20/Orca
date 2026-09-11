@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-09-11] feat(profiling-v2): 三面融合 workflow——隔离副本 + SPEC 闭环 + 双层实现（commit `5944b88`）
+
+从 prof-opt v8 隔离复制 `workflows/profiling-v2/`，搜索空间扩为结构/特征/loss 三面（selector 融合恰一个有机设计，蒸馏禁止，出口焊死，facet 不可用静默收窄但披露）。SPEC 经 spec-reviewer 两轮对抗 + 闭环复核（6 BLOCKER 全闭：facets 移出 shadow 保四套既有机制零改动、watchdog render_eval 补 facet_dir 防终局 eval 死锁、证伪删除「medium/high ⇒ 必带精度 facet」门改软指引 + distillation_free_ack + 一致性规则 R1-R5）；历史层从 LLM 叙事（history-curator/digest_stamp 退役）改机械派生 `render_history.py` → base/history.md（每轮 ≤2 句推 web）；新增 `facet_check.py`（出口焊死无条件 + 输入比对）与 `feature-architect` 提案者；test_pv2_* 81 green + po 回归 146 green 零恶化 + tars validate 0 warning。E2E 待有卡宿主。详见 [release note](../releases/2026-09-11-profiling-v2-tri-facet.md)。
+
 ## [2026-09-11] feat(prof-opt): 帕累托纵轴绝对精度 + 基线参照独立 + curves 图例交互（commit `f47e5eb`）
 
 用户看图反馈收口：帕累托 y 从 gap/metric 混轴改为**曲线最新 metric 绝对单口径**（在训点每 epoch 移动、训完定格，gap 不上图），基线锚点 `ref_row:true` 前端拆独立菱形参照系列（不参与支配/连线），y 方向翻 max；training curves 加图例点击 toggle + 悬停高亮（seriesVisual 三态）。坑：行字段 `ref` 撞 React 保留 prop（recharts 行字段展开到 SVG），必须 `ref_row`。reviewer 1 MAJOR（symbol/shape API 误判，终态已对）+ 4 minor 全修（含 findParetoFront 参照排除敏感断言）。po 119 green + 前端 77 green + tsc 零错误 + 真 daemon 冒烟 pass + tars validate ✓。详见 [release note](../releases/2026-09-11-profopt-pareto-absolute-metric-and-curves-interact.md)。

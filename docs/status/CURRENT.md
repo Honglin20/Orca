@@ -4,21 +4,22 @@
 
 ---
 
-**当前任务**：prof-opt v8（同基前沿探索）——实现/审查/提交完成，E2E 全链验证**待有卡宿主**
+**当前任务**：profiling-v2（三面融合：结构/特征/loss）——SPEC + 实现完成，**E2E 待有卡宿主**
 
-- 已完成：SPEC + 实现 + 282 green + tars validate 零 warning + code-reviewer 自检（3 major + 5 minor 全修，含 gate_node stdout 泄漏真 bug）；commits `1694e4b` + `291d7d4`
-- release note：`docs/releases/2026-09-10-profopt-v8-frontier.md`
-- **E2E 结论（run `prof-opt-20260910-130812-1af1ea`，tars skill + orca 真链）**：flatten 即 fail loud——本机 WSL 无 NPU/CUDA（torch 2.13.0+cpu），resolver enum npu|cuda 按设计无 CPU 回退；失败路径全链合规（诚实报告/零写回/web 面板）。**v8 轮环实战验证待有卡宿主重跑**（同 inputs，max_rounds=2 + epoch 帽 10；启动脚本 `.e2e_scratch/e2e_v8_launch.sh`，注意 WSL 需原生 claude：`~/miniconda3/bin/claude`）
-- 2026-09-11 追加：baseline chain 新增必填 `--accuracy-budget`（anchor 冻结内联进 chain，见 CHANGELOG 同日条目）——重跑 E2E 时无需改启动脚本（inputs 不变，agent 按 agent.md 传参）
-- 2026-09-11 二刷（用户看图反馈）：帕累托图 y 改**绝对精度单口径**（曲线最新 metric，gap 不上图）+ 基线 `ref_row` 拆独立菱形参照系列（不参与支配/连线）+ y 方向 max；training curves 加图例 toggle + 悬停高亮。坑：行字段名 `ref` 撞 React 保留 prop，必须 `ref_row`。po 119 green + 前端 76 green + 真 daemon 冒烟 pass；release note `docs/releases/2026-09-11-profopt-pareto-absolute-metric-and-curves-interact.md`
-- 已拍板（用户 2026-09-10）：①永不晋升 ②被支配变体照旧放行 ③历史 = 机械层 + frontier 派生快照
-- **v8.1 追加（2026-09-10，commit `dff5456`）**：po_propose 叙事层 history digest——`history-curator` 子代理每轮收尾重写 `base/history_digest.md`（跨轮因果，替代上轮 analysis.md 直读）+ `digest_stamp.py` 机械戳（Step 0 校新鲜 stale fail loud、emit gate 纳 seal 入磁盘契约）。实现+独立审查（1 MAJOR 3 minor 全修）+ 洁净三件套全过；po 全套件绿。release note：`docs/releases/2026-09-10-profopt-history-digest.md`。**随 v8 轮环 E2E 同车验证**
-- 注意：`playground/target/artifacts/prof-opt` 旧工作区 2026-09-10 11:33 被外部清除（非本会话）
+- commit `5944b88`（83 文件）；SPEC `docs/specs/profiling-v2-spec.md`；release note `docs/releases/2026-09-11-profiling-v2-tri-facet.md`
+- 流程留痕：SPEC（spec-reviewer 两轮对抗 + 闭环复核全闭环）→ 用户拍板跳过计划环节 → 双 coder-agent 并行（脚本层 3 轮内审 / 提示词层 2 轮内审）→ 编排者收三处跨层接缝（eval.sample_inputs/facet_builder 写入方、SPEC 同步、R4-R5 支配）
+- 验证：test_pv2_* 81 green（onnx/torch 真跑）+ po 回归 146 green 零恶化（混序双验）+ tars validate 0 error 0 warning + 提示词开发残留 grep 零命中
+- 核心语义：门不变（推理时延严格降 + gap≤预算）；facet 副本住 shadow 外（`facets/` + `variants/<vid>/facets/`，锁/枚举/断言/diff 零改动）；facet 能力 po_contract 机械证明（dry-run），不可用静默收窄但 contracts.json + report 披露；蒸馏禁止（distillation_free_ack）；history.md = 机械派生视图（curator/digest_stamp 退役）
+- **E2E 待有卡宿主**：同 v8 坑（本机 WSL 无 NPU/CUDA，flatten fail loud 属合规）；建议 inputs 与 v8 E2E 同款（`docs/status/CHANGELOG.md` 2026-09-10 条），workflow 名换 profiling-v2
+
+**v8 遗留（prof-opt，非阻塞）**：轮环 E2E 待有卡宿主（run `prof-opt-20260910-130812-1af1ea` flatten 即 fail loud 属合规；启动脚本 `.e2e_scratch/e2e_v8_launch.sh`，WSL 原生 claude `~/miniconda3/bin/claude`）
 
 **挂账小项（非阻塞，下次顺手）**：
+- profiling-v2：`check_report.py` 披露锚 token 三枚 vs 披露四行——facet 能力行未锚，未来加锚必须同步 po_report/agent.md "three anchor tokens"（跨层耦合，防单边漂移）
+- profiling-v2 E2E 后回收两处无害超集裁决：render in_flight 块带时延段 / watch_variant 供给条件 features∨loss
 - **in-session inline script 推 chart 自死锁**（跨平台既有）：架构级专项待立项
 - **CC hooks Windows 静默死**：需 python 化 + `sys.executable` 绝对路径注册
 - 三份 msvcrt 锁实现归并；Windows ScriptNode `$VAR` 不展开；前端 static 无强制重建机制（2026-09-11 已手动重建）
-- ~~HEAD 既有 pytest 失败 2 个~~：`test_baseline_chain_*` ×2 已于 2026-09-11 修活（`test_gate_node_sh_parses_after_quote_fix` 仍挂）
+- `test_gate_node_sh_parses_after_quote_fix` 仍挂（HEAD 既有，v2 环境实测现绿）
 - **测试卫生债**：部分 tests/iface/web 套件不隔离 ORCA_HOME
 - 仓库根 `_e2e_playground` MSYS 破损 symlink 阻断 Windows 全量 pytest
