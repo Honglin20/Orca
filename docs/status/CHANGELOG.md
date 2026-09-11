@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-09-11] feat(prof-opt): 帕累托纵轴绝对精度 + 基线参照独立 + curves 图例交互（commit `f47e5eb`）
+
+用户看图反馈收口：帕累托 y 从 gap/metric 混轴改为**曲线最新 metric 绝对单口径**（在训点每 epoch 移动、训完定格，gap 不上图），基线锚点 `ref_row:true` 前端拆独立菱形参照系列（不参与支配/连线），y 方向翻 max；training curves 加图例点击 toggle + 悬停高亮（seriesVisual 三态）。坑：行字段 `ref` 撞 React 保留 prop（recharts 行字段展开到 SVG），必须 `ref_row`。reviewer 1 MAJOR（symbol/shape API 误判，终态已对）+ 4 minor 全修（含 findParetoFront 参照排除敏感断言）。po 119 green + 前端 77 green + tsc 零错误 + 真 daemon 冒烟 pass + tars validate ✓。详见 [release note](../releases/2026-09-11-profopt-pareto-absolute-metric-and-curves-interact.md)。
+
 ## [2026-09-11] feat(prof-opt): origin-anchor 冻结确定性 + 帕累托图前沿/灰 + Web Log 可读性
 
 用户实测三反馈：①po_propose step0 frontier_snapshot 报 origin anchor missing——冻结从 LLM 手动调 freeze_origin.sh（静默 exit 0 guard）改为 chain step 3 确定性内联 + `--accuracy-budget` 必填 + executed gate 加 anchor schema 保险，契约升级为 **executed ⇒ anchor 必在**；②帕累托图全红（accuracy_fail 状态色）且只想要前沿解——推送方停发 per-row 状态色，改发 `round`（history.jsonl 解析），前端走几何前沿/被支配双色 + 点旁 `R{n}` 标签 + vid/round/status tooltip；③Web Log 长行被裁 + 裸秒位数多——LogStream 动态行高换行 + `formatDuration`（≥60s → X.XXmin 两位）统一 6 处裸秒拼接。顺手：修活 HEAD 既有 `test_baseline_chain_*` ×2；fixture 生成器追上 `_VARIANT_DOC_FILES`/C3 content 漂移。reviewer 抓 1 Critical（points 投影丢原行字段 → 标签/tooltip 静默失效）已修。po 277 green + 前端 653 green + tars validate 零 warning。详见 [release note](../releases/2026-09-11-web-log-format-and-anchor-freeze.md)。

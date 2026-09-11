@@ -10,6 +10,7 @@
 - release note：`docs/releases/2026-09-10-profopt-v8-frontier.md`
 - **E2E 结论（run `prof-opt-20260910-130812-1af1ea`，tars skill + orca 真链）**：flatten 即 fail loud——本机 WSL 无 NPU/CUDA（torch 2.13.0+cpu），resolver enum npu|cuda 按设计无 CPU 回退；失败路径全链合规（诚实报告/零写回/web 面板）。**v8 轮环实战验证待有卡宿主重跑**（同 inputs，max_rounds=2 + epoch 帽 10；启动脚本 `.e2e_scratch/e2e_v8_launch.sh`，注意 WSL 需原生 claude：`~/miniconda3/bin/claude`）
 - 2026-09-11 追加：baseline chain 新增必填 `--accuracy-budget`（anchor 冻结内联进 chain，见 CHANGELOG 同日条目）——重跑 E2E 时无需改启动脚本（inputs 不变，agent 按 agent.md 传参）
+- 2026-09-11 二刷（用户看图反馈）：帕累托图 y 改**绝对精度单口径**（曲线最新 metric，gap 不上图）+ 基线 `ref_row` 拆独立菱形参照系列（不参与支配/连线）+ y 方向 max；training curves 加图例 toggle + 悬停高亮。坑：行字段名 `ref` 撞 React 保留 prop，必须 `ref_row`。po 119 green + 前端 76 green + 真 daemon 冒烟 pass；release note `docs/releases/2026-09-11-profopt-pareto-absolute-metric-and-curves-interact.md`
 - 已拍板（用户 2026-09-10）：①永不晋升 ②被支配变体照旧放行 ③历史 = 机械层 + frontier 派生快照
 - **v8.1 追加（2026-09-10，commit `dff5456`）**：po_propose 叙事层 history digest——`history-curator` 子代理每轮收尾重写 `base/history_digest.md`（跨轮因果，替代上轮 analysis.md 直读）+ `digest_stamp.py` 机械戳（Step 0 校新鲜 stale fail loud、emit gate 纳 seal 入磁盘契约）。实现+独立审查（1 MAJOR 3 minor 全修）+ 洁净三件套全过；po 全套件绿。release note：`docs/releases/2026-09-10-profopt-history-digest.md`。**随 v8 轮环 E2E 同车验证**
 - 注意：`playground/target/artifacts/prof-opt` 旧工作区 2026-09-10 11:33 被外部清除（非本会话）
