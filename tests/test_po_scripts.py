@@ -2502,17 +2502,20 @@ def test_push_curves_top10_selection_strategy(tmp_path: Path):
 @_requires_unix_socket
 def test_push_curves_pareto_payload(tmp_path: Path):
     """§10.2 every variant one point: x = reduction vs the origin-anchor
-    baseline makespan (negative = slower), y = final gap (metric fallback,
-    null = the 达线未训 placeholder), directions pinned. 2026-09-11 coloring
-    flip: NO per-row color is sent (the front end colors geometric front vs
-    dominated); rows carry ``round`` (from history.jsonl, the audit base —
-    never parsed out of vid strings) + ``status`` for the tooltip."""
+    baseline makespan (negative = slower), y = the variant's latest
+    training-curve metric (ABSOLUTE, single basis — the gap never rides the
+    chart), directions pinned (y = max since 2026-09-11). NO per-row color is
+    sent (the front end colors geometric front vs dominated); rows carry
+    ``round`` (from history.jsonl, the audit base — never parsed out of vid
+    strings) + ``status`` for the tooltip; the baseline row carries
+    ``ref_row: true`` (the front end's reference-series split key)."""
     art = _po_ws(tmp_path)
     (art / "base").mkdir()
     (art / "base" / "origin_anchor.json").write_text(json.dumps(
         {"baseline_makespan_cycles": 1000, "target_cycles": 500,
          "accuracy_budget": 0.1}), encoding="utf-8")
-    _po_variant(art, "r1-01", curve=[{"epoch": 1, "metric": 0.38}],
+    _po_variant(art, "r1-01", curve=[{"epoch": 1, "metric": 0.38},
+                                     {"epoch": 2, "metric": 0.42}],
                 train_status={"vid": "r1-01", "stage": "done"},
                 shard={"vid": "r1-01", "status": "success", "gap": 0.02,
                        "metric": 0.42},
@@ -2552,30 +2555,36 @@ def test_push_curves_pareto_payload(tmp_path: Path):
     pareto = by_type["pareto"]
     assert pareto["label"] == "prof-opt/pareto"
     assert pareto["pareto_x_direction"] == "max"
-    assert pareto["pareto_y_direction"] == "min"
+    assert pareto["pareto_y_direction"] == "max"     # 2026-09-11: absolute metric, higher wins
     assert pareto["color"] == ""                         # front-end dual-color
     points = {row["vid"]: row for row in pareto["data"]}
-    # 全量变体一个点 + C2 baseline 锚点（anchor 在场必加原点参照；既有精确集
+    # 全量变体一个点 + C2 baseline 参照行（anchor 在场必加原点参照；既有精确集
     # 断言随 2026-09-07 C2 契约同步 +baseline，非静默）
     assert set(points) == {"r1-01", "r2-01", "r3-01", "baseline"}
     assert points["baseline"]["x"] == 0            # 原点 = 相对基线的 0 降幅
-    assert points["baseline"]["y"] == 0            # gap basis（r1-01 gap 非空）
+    assert points["baseline"]["y"] == 0.4          # absolute: 基线曲线末行 metric
     assert points["baseline"]["status"] == "baseline"
     assert points["baseline"]["round"] == 0        # origin anchor: frozen pre-round-1
+    assert points["baseline"]["ref_row"] is True   # front-end reference-series key
     assert points["r1-01"]["x"] == 20.0                  # 1 - 800/1000
-    assert points["r1-01"]["y"] == 0.02
+    # y = 曲线最新 metric（末行 0.42 = shard metric，生产中双写恒等）；gap(0.02) 不上图
+    assert points["r1-01"]["y"] == 0.42
     assert points["r1-01"]["status"] == "success"
     assert points["r1-01"]["round"] == 2                 # last-wins from history
     assert points["r2-01"]["x"] == -20.0                 # slower than baseline
-    assert points["r2-01"]["y"] == 0.45            # metric fallback (no gap)
+    assert points["r2-01"]["y"] == 0.45            # in-flight: 每 epoch 随 watchdog 移动
     assert points["r2-01"]["status"] == "in-flight"
     assert points["r2-01"]["round"] == 2
     assert points["r3-01"]["y"] is None                  # 达线未训占位
     assert points["r3-01"]["status"] == "latency_improved"
     assert points["r3-01"]["round"] == 3
+    assert "latest training-curve metric" in pareto["caption"]  # y 语义披露
+    assert "reference" in pareto["caption"]              # 参照语义披露
     assert "null" in pareto["caption"]                   # disclosed, not silent
     assert "front" in pareto["caption"]                  # coloring semantics disclosed
     assert all("color" not in row for row in pareto["data"])
+    assert [row["vid"] for row in pareto["data"]
+            if row.get("ref_row")] == ["baseline"]       # ref_row 唯一携带方
 
 
 @_requires_unix_socket
@@ -2664,18 +2673,20 @@ def test_push_curves_docs_manifest_whitelist_and_columns(tmp_path: Path):
 @_requires_unix_socket
 def test_push_curves_w3_joint_three_charts_idempotent(tmp_path: Path):
     """W3-T1 联调（web §6.3-1 后端侧）：一次 ``--docs`` 推送三图齐全——line
-    （§10.1 top-10）/ pareto（§10.2 全量 + C2 baseline 锚点，y=null 占位**保持
-    null 不伪造 0**——前端 W-P3 修正后按 null 剔除渲染，0 会让占位点画在 0 位）/
-    docs（§10.4 canonical 列）。R-10（2026-09-07 C3）：同工作区二次推送——三图
-    label+title 逐字一致 + line/pareto data 逐字一致（幂等替换）；docs 行集/
-    状态一致但**未变行 content 为空**（正文经前端事件历史合并，不重推）。"""
+    （§10.1 top-10）/ pareto（§10.2 全量 + C2 baseline 参照行，y=曲线最新 metric
+    绝对口径，y=null 占位**保持 null 不伪造 0**——前端 W-P3 修正后按 null 剔除
+    渲染，0 会让占位点画在 0 位）/ docs（§10.4 canonical 列）。R-10（2026-09-07
+    C3）：同工作区二次推送——三图 label+title 逐字一致 + line/pareto data 逐字
+    一致（幂等替换）；docs 行集/状态一致但**未变行 content 为空**（正文经前端
+    事件历史合并，不重推）。"""
     art = _po_ws(tmp_path)
     (art / "base").mkdir()
     (art / "base" / "origin_anchor.json").write_text(json.dumps(
         {"baseline_makespan_cycles": 1000}), encoding="utf-8")
     _po_variant(art, "r1-01", curve=[{"epoch": 1, "metric": 0.38}],
                 train_status={"vid": "r1-01", "stage": "done"},
-                shard={"vid": "r1-01", "status": "success", "gap": 0.02},
+                shard={"vid": "r1-01", "status": "success", "gap": 0.02,
+                       "metric": 0.38},
                 verdict={"vid": "r1-01", "makespan_cycles": 800,
                          "outcome": "latency_improved"},
                 docs=("assessment.md",))
@@ -2703,9 +2714,10 @@ def test_push_curves_w3_joint_three_charts_idempotent(tmp_path: Path):
         # §10.2: the 达线未训 placeholder survives as a real null (never 0)
         points = {row["vid"]: row for row in by_type["pareto"]["data"]}
         assert points["r2-01"]["y"] is None
-        assert points["r1-01"]["y"] == 0.02
-        # C2: the baseline anchor rides along (r1-01 gap non-null → y=0)
-        assert points["baseline"]["x"] == 0 and points["baseline"]["y"] == 0
+        assert points["r1-01"]["y"] == 0.38     # absolute: 曲线最新 metric（gap 不上图）
+        # C2: the baseline reference row rides along (absolute metric basis)
+        assert points["baseline"]["x"] == 0 and points["baseline"]["y"] == 0.4
+        assert points["baseline"]["ref_row"] is True
         # §10.4 canonical columns carried verbatim（C3 有意不动 columns）
         assert by_type["table"]["columns"] == ["vid", "doc", "status", "path",
                                                "updated_at"]
@@ -3280,10 +3292,11 @@ def test_gate_node_mounts_shadow_archive_and_frontier_between_verify_and_decide(
 # ── C2 (2026-09-07): pareto baseline anchor ───────────────────────────────────
 
 
-def test_pareto_baseline_anchor_gap_and_metric_basis(tmp_path: Path):
-    """C2 选项 b：gap basis（任一 variant gap 非空）→ 锚点 y=0；全体 metric
-    basis → 锚点 y=基线曲线末行 metric；曲线缺失 → y=None（禁退化成 0 谎报）；
-    无 anchor → 行数不变；重复调用 → 仍只 1 条 baseline 行（幂等）。"""
+def test_pareto_baseline_anchor_absolute_metric_basis(tmp_path: Path):
+    """C2（2026-09-11 absolute 翻新）：锚点 y 恒 = 基线曲线末行 metric（单一绝对
+    口径，与变体同族 loader；变体有无 gap 一律不影响）；行携带 ``ref_row:
+    true``；曲线缺失 → y=None（禁退化成 0 谎报）；无 anchor → 行数不变；重复
+    调用 → 仍只 1 条 baseline 行（幂等）。"""
     art = tmp_path / "art"
     (art / "base").mkdir(parents=True)
     (art / "base" / "origin_anchor.json").write_text(json.dumps(
@@ -3292,7 +3305,7 @@ def test_pareto_baseline_anchor_gap_and_metric_basis(tmp_path: Path):
     (art / "baseline" / "baseline_metrics.jsonl").write_text(
         '{"epoch": 1, "metric": 0.40}\n{"epoch": 2, "metric": 0.50}\n',
         encoding="utf-8")
-    # gap basis：r1-01 gap 非空
+    # 变体带 gap：gap 不影响锚点 y（absolute 单一口径）
     _po_variant(art, "r1-01",
                 shard={"vid": "r1-01", "status": "success", "gap": 0.02,
                        "metric": 0.38},
@@ -3301,7 +3314,8 @@ def test_pareto_baseline_anchor_gap_and_metric_basis(tmp_path: Path):
     rows = push_curves.collect_pareto(art)
     points = {r["vid"]: r for r in rows}
     assert points["baseline"]["x"] == 0
-    assert points["baseline"]["y"] == 0              # gap basis
+    assert points["baseline"]["y"] == 0.50           # 末行 metric（绝对口径）
+    assert points["baseline"]["ref_row"] is True     # 前端参照系列拆分键
     assert points["baseline"]["round"] == 0          # origin anchor round
     assert "color" not in points["baseline"]         # coloring is front-end's
     assert sum(1 for r in rows if r["vid"] == "baseline") == 1  # 幂等：仅 1 条
@@ -3309,7 +3323,7 @@ def test_pareto_baseline_anchor_gap_and_metric_basis(tmp_path: Path):
     rows_again = push_curves.collect_pareto(art)
     assert sum(1 for r in rows_again if r["vid"] == "baseline") == 1
 
-    # metric basis：全体 gap=None → y = 基线曲线末行 metric（0.50）
+    # 变体无 gap：锚点 y 读数不变（同一绝对口径）
     art2 = tmp_path / "art2"
     (art2 / "base").mkdir(parents=True)
     (art2 / "base" / "origin_anchor.json").write_text(json.dumps(
@@ -3324,7 +3338,7 @@ def test_pareto_baseline_anchor_gap_and_metric_basis(tmp_path: Path):
                 verdict={"vid": "r1-01", "makespan_cycles": 900,
                          "outcome": "latency_improved"})
     points2 = {r["vid"]: r for r in push_curves.collect_pareto(art2)}
-    assert points2["baseline"]["y"] == 0.50          # 末行 metric（同族 loader）
+    assert points2["baseline"]["y"] == 0.50          # 与带 gap 场景同一读数
 
     # 曲线缺失 → y=None（占位披露，不谎报 0）
     art3 = tmp_path / "art3"
@@ -3346,13 +3360,14 @@ def test_pareto_baseline_anchor_gap_and_metric_basis(tmp_path: Path):
 
 
 def test_pareto_baseline_anchor_caption_disclosure(tmp_path: Path):
-    """C2：caption 逐字追加 mixed-basis 披露句（锚点 y 的两种读法）。"""
+    """C2：caption 逐字披露 absolute y 语义 + 参照系列语义（替代旧 mixed-basis 句）。"""
     art = _po_ws(tmp_path)
     (art / "base").mkdir()
     (art / "base" / "origin_anchor.json").write_text(json.dumps(
         {"baseline_makespan_cycles": 1000}), encoding="utf-8")
     _po_variant(art, "r1-01",
-                shard={"vid": "r1-01", "status": "success", "gap": 0.02},
+                shard={"vid": "r1-01", "status": "success", "gap": 0.02,
+                       "metric": 0.42},
                 verdict={"vid": "r1-01", "makespan_cycles": 800,
                          "outcome": "latency_improved"})
     sock = tmp_path / "chart.sock"
@@ -3362,9 +3377,13 @@ def test_pareto_baseline_anchor_caption_disclosure(tmp_path: Path):
     thread.join(timeout=10)
     pareto = {m["payload"]["chart_type"]: m["payload"]
               for m in messages}["pareto"]
-    assert ("the baseline anchor (x=0) reads y=0 on the gap basis "
-            "(baseline gap is 0 by definition) or the baseline's latest "
-            "metric on the metric basis") in pareto["caption"]
+    assert ("y = each variant's latest training-curve metric "
+            "(absolute, single basis; in-flight points move every "
+            "epoch, terminal points freeze at their last epoch)") \
+        in pareto["caption"]
+    assert ("the diamond reference marker is the baseline anchor (x=0, its "
+            "own latest curve metric) — a reference, not a candidate: it "
+            "never joins the front or the front line") in pareto["caption"]
 
 
 # ── C3 (2026-09-07): docs content channel + per-run push state ────────────────

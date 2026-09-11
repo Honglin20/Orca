@@ -14,7 +14,9 @@
 //   3. §6.3-1 ParetoChartWidget（W-P3 修正回归）：y=null 占位点**不渲染**（不画在
 //      0 位 = §10.2 占位披露不失真）+ caption 披露在场；现行推送（无 per-row
 //      color）走前沿/被支配双色 + 点旁 round 标签（2026-09-11 用户拍板：只想看
-//      前沿解）；per-row color 通道保留给通用调用方（合成 payload 钉住）
+//      前沿解）；per-row color 通道保留给通用调用方（合成 payload 钉住）；
+//      2026-09-11 C2（用户拍板「基线不要混进去」）：ref 行拆独立 reference 系列，
+//      y 全体为绝对口径（曲线最新 metric，2026-09-11 翻新）
 //   4. §6.3-2 只读：面板点选全文只发 GET artifacts 端点（web §5 无写入口）
 //
 // happy-dom 已知限制（chart.test.tsx 同款注释）：recharts ComposedChart 的散点
@@ -27,7 +29,10 @@ import { useWorkflowStore } from "@/stores/workflow-store";
 import { ProfOptDocsPanel } from "@/components/profopt/ProfOptDocsPanel";
 import { ParetoChartWidget } from "@/components/chart/widgets/ParetoChartWidget";
 import {
+  findParetoFront,
+  isRefRow,
   paretoTooltipRows,
+  partitionRefPoints,
   prepareParetoPoints,
   perRowColor,
   roundLabel,
@@ -153,16 +158,55 @@ describe("W3-T1 联调：ParetoChartWidget 修正回归（P4 上报缺陷）", (
       "x",
       "y"
     );
-    // live fixture: r1-01 / r2-01 / baseline 锚点可绘；r3-01（达线未训）与
-    // r4-01（latency_fail 且无 gap/metric）y=null —— 原 Number(null)=0 会把
-    // 它们画在 0 位。baseline 锚点在 gap basis 下 y=0，是合法可绘点。
+    // live fixture: r1-01 / r2-01 / baseline 参照行可绘；r3-01（达线未训）与
+    // r4-01（latency_fail 且无 metric）y=null —— 原 Number(null)=0 会把它们画
+    // 在 0 位。2026-09-11 翻新：y 全体绝对口径（曲线最新 metric），baseline
+    // 参照行 y = 基线曲线末行 metric（0.5），r1-01 y=0.42 是 metric（gap 0.02 不上图）。
     expect(points.map((p) => p.x)).toEqual([20, -20, 0]);
-    expect(points.map((p) => p.y)).toEqual([0.02, 0.45, 0]);
+    expect(points.map((p) => p.y)).toEqual([0.42, 0.45, 0.5]);
     expect(plottableRows.map((r) => r.vid)).toEqual([
       "r1-01",
       "r2-01",
       "baseline",
     ]);
+  });
+
+  test("C2 参照拆分：isRefRow 严格布尔 + partitionRefPoints 把基线锚点拆出候选组", () => {
+    // 严格布尔：缺省/false/真值串都不是参照（通用 widget 不猜字段）。
+    // 键名必须是 ref_row：recharts 把行字段展开到 SVG 元素，ref 撞 React 保留 prop。
+    expect(isRefRow({ ref_row: true })).toBe(true);
+    expect(isRefRow({})).toBe(false);
+    expect(isRefRow({ ref_row: false })).toBe(false);
+    expect(isRefRow({ ref_row: "true" })).toBe(false);
+    // 拆分：ref 行只进参照组，行序原样保留（per-row Cell 索引对齐不破）
+    const rows = [
+      { vid: "r1-01", x: 20, y: 0.42 },
+      { vid: "baseline", ref_row: true, x: 0, y: 0.5 },
+      { vid: "r2-01", x: -20, y: 0.45 },
+    ];
+    const points = rows.map((r) => ({ ...r, x: Number(r.x), y: Number(r.y) }));
+    const { refRows, variantRows, refData, variantPoints } = partitionRefPoints(
+      rows,
+      points
+    );
+    expect(refRows.map((r) => r.vid)).toEqual(["baseline"]);
+    expect(variantRows.map((r) => r.vid)).toEqual(["r1-01", "r2-01"]);
+    expect(refData).toHaveLength(1);
+    expect(variantPoints.map((p) => p.vid)).toEqual(["r1-01", "r2-01"]);
+  });
+
+  test("C2 参照不参与支配：候选互不支配，基线并入则会挤掉 r2-01（敏感回归钉）", () => {
+    // 基线 (0, 0.5) 在 max/max 下支配 r2-01 (-20, 0.45)（x 更大且 y 更大，双严格）——
+    // 若实现误把 ref 行并入支配集，r2-01 会被挤出 Pareto Front（正是「基线混进去」
+    // 要防的读图语义）。实现侧 findParetoFront 只吃 variantPoints（partitionRefPoints
+    // 拆分）；第二段断言反例几何，钉住 exclusion 的必要性。
+    const variants = [
+      { x: 20, y: 0.42 },   // r1-01
+      { x: -20, y: 0.45 },  // r2-01
+    ];
+    expect([...findParetoFront(variants, "max", "max")].sort()).toEqual([0, 1]);
+    const withRef = [...variants, { x: 0, y: 0.5 }];
+    expect([...findParetoFront(withRef, "max", "max")].sort()).toEqual([0, 2]);
   });
 
   test("现行推送不带 per-row color（前沿/灰双色归前端）+ round 随行（点旁标签）", () => {
@@ -255,12 +299,13 @@ describe("W3-T1 联调：ParetoChartWidget 修正回归（P4 上报缺陷）", (
       document.querySelectorAll(".recharts-legend-item-text")
     ).map((el) => el.textContent);
     expect(legends).toContain("variants");
+    expect(legends).toContain("reference"); // C2：ref 行独立参照系列（两分支一致）
     expect(legends).not.toContain("Dominated"); // 状态着色路径，非 dominated/front 双色
     // §10.2 占位披露（y=null 语义）经 caption 显形，不静默
     expect(screen.getByTestId("chart-caption").textContent).toContain("null");
   });
 
-  test("现行推送（color=\"\"）→ 前沿/被支配双色（零回归）", async () => {
+  test("现行推送（color=\"\"）→ 前沿/被支配双色 + reference 参照系列（零回归）", async () => {
     render(<ParetoChartWidget payload={livePareto} />);
     await waitFor(() => {
       expect(document.querySelector(".recharts-legend-item")).toBeTruthy();
@@ -270,6 +315,7 @@ describe("W3-T1 联调：ParetoChartWidget 修正回归（P4 上报缺陷）", (
     ).map((el) => el.textContent);
     expect(legends).toContain("Dominated");
     expect(legends).toContain("Pareto Front");
+    expect(legends).toContain("reference"); // C2：基线锚点独立菱形系列
     expect(legends).not.toContain("variants");
   });
 });

@@ -11,12 +11,15 @@ label+title on every push -> the front end replaces the previous chart):
     disk — only the push is narrowed.
   * pareto ``prof-opt/pareto``  — every variant as one point (§10.2): x = the
     latency reduction vs the baseline makespan in % (negative = slower), y =
-    the final gap (or the latest metric while no gap exists yet); the front
-    end colors geometric front vs dominated (no per-row status color —
-    status/round ride along for the tooltip, round is the point label); a
-    latency_improved variant that has not started training keeps y=null
-    (disclosed in the caption). C2: a ``baseline`` anchor point (x=0, round=0)
-    pins the origin whenever the baseline makespan anchor resolves.
+    the variant's latest training-curve metric (ABSOLUTE, single basis —
+    in-flight points move every epoch, terminal points freeze at their last
+    epoch; the gap never rides the chart); the front end colors geometric
+    front vs dominated over the variant points (y direction = max = higher
+    metric wins) and draws the ``ref`` baseline row as a separate reference
+    series (never a candidate); a latency_improved variant that has not
+    started training keeps y=null (disclosed in the caption). C2: a
+    ``baseline`` reference row (x=0, round=0, ref_row=true) pins the origin
+    whenever the baseline makespan anchor resolves.
   * table  ``prof-opt/docs``    — the analysis-docs manifest (§10.4, ``--docs``):
     rows of vid / doc / status / path relative to the artifacts root (+
     updated_at) plus the optional content channel (C3): rows also carry
@@ -246,25 +249,30 @@ def _baseline_makespan(artifacts: Path) -> float | None:
 
 def collect_pareto(artifacts: Path) -> list[dict[str, Any]]:
     """§10.2 one point per variant: x = latency reduction vs baseline (%,
-    negative = slower), y = the final gap (or the latest metric while no gap
-    exists yet; null = the 达线未训 placeholder). Variants without a measured
-    makespan have no x and are not plottable.
+    negative = slower), y = the variant's latest training-curve metric
+    (ABSOLUTE, single basis — in-flight points move every epoch, terminal
+    points freeze at their last epoch; null = the 达线未训 placeholder).
+    Variants without a measured makespan have no x and are not plottable.
+    The gap never rides the chart — it stays the mechanical layer's truth
+    (verdict / ledger / frontier_snapshot).
 
     Coloring is the front end's pareto-front dual (front accent vs gray
-    dominated, geometric over the plotted points); rows carry ``round`` (the
-    variant's latest history.jsonl round — the point label) and ``status``
-    (the tooltip). No per-row CSS color is sent.
+    dominated, geometric over the plotted variant points, y direction = max
+    = higher metric wins); rows carry ``round`` (the variant's latest
+    history.jsonl round — the point label) and ``status`` (the tooltip). No
+    per-row CSS color is sent.
 
-    C2 baseline anchor: whenever the origin anchor resolves, one extra
-    ``vid="baseline"`` row pins the origin (x=0, round=0) so "relative to the
-    baseline" has a visible reference point at every stage. A missing anchor
-    keeps the chart exactly as it was (no fabricated origin)."""
+    C2 baseline reference: whenever the origin anchor resolves, one extra
+    ``vid="baseline"`` row pins the origin (x=0, round=0, ``ref_row=true``)
+    at the baseline's own latest curve metric — a reference marker, never a
+    candidate: the front end draws it as a separate series outside the
+    front/dominated split. A missing anchor keeps the chart exactly as it
+    was (no fabricated origin)."""
     base_ms = _baseline_makespan(artifacts)
     if base_ms is None:
         return []
     rounds = _vid_rounds(artifacts)
     rows: list[dict[str, Any]] = []
-    any_gap_basis = False
     variants_dir = artifacts / "variants"
     if variants_dir.is_dir():
         for vdir in sorted(variants_dir.iterdir()):
@@ -274,13 +282,11 @@ def collect_pareto(artifacts: Path) -> list[dict[str, Any]]:
             if state["makespan"] is None:
                 continue
             x = round((1.0 - state["makespan"] / base_ms) * 100.0, 4)
-            y = state["gap"] if state["gap"] is not None else state["metric"]
-            any_gap_basis = any_gap_basis or state["gap"] is not None
-            rows.append({"vid": state["vid"], "x": x, "y": y,
+            rows.append({"vid": state["vid"], "x": x, "y": state["metric"],
                          "status": state["status"],
                          "round": rounds.get(state["vid"])})
     if not any(r["vid"] == "baseline" for r in rows):  # idempotent anchor
-        rows.append(_baseline_anchor_row(artifacts, any_gap_basis))
+        rows.append(_baseline_anchor_row(artifacts))
     return rows
 
 
@@ -306,21 +312,21 @@ def _vid_rounds(artifacts: Path) -> dict[str, int]:
     return rounds
 
 
-def _baseline_anchor_row(artifacts: Path, any_gap_basis: bool) -> dict[str, Any]:
-    """C2 the baseline origin reference row (x=0). y follows the variant
-    rows' basis (option b): 0 when any variant plots a gap (the baseline gap
-    is 0 by definition — dimension-consistent), else the baseline's latest
-    metric from the same curve loader the variant y values use. A missing or
+def _baseline_anchor_row(artifacts: Path) -> dict[str, Any]:
+    """C2 the baseline reference row (x=0, ``ref_row=true``): y = the
+    baseline's latest curve metric from the same curve loader the variant y
+    values use (absolute, single basis with the variants). A missing or
     empty baseline curve keeps y=null (disclosed in the caption) — never a
-    fabricated 0. round=0: the origin anchor is frozen before round 1."""
-    if any_gap_basis:
-        y: float | None = 0
-    else:
-        curve = _load_curve(artifacts / "baseline" / "baseline_metrics.jsonl",
-                            "baseline")
-        y = curve[-1]["metric"] if curve else None
+    fabricated 0. round=0: the origin anchor is frozen before round 1. The
+    front end renders ref rows as a separate reference series outside the
+    front/dominated split. The key is ``ref_row`` (NOT ``ref``): recharts
+    spreads data-row fields onto the SVG elements, and a ``ref`` field
+    becomes React's reserved ref prop (render crash)."""
+    curve = _load_curve(artifacts / "baseline" / "baseline_metrics.jsonl",
+                        "baseline")
+    y: float | None = curve[-1]["metric"] if curve else None
     return {"vid": "baseline", "x": 0, "y": y, "status": "baseline",
-            "round": 0}
+            "round": 0, "ref_row": True}
 
 
 def collect_docs(artifacts: Path) -> list[dict[str, Any]]:
@@ -612,27 +618,30 @@ def main() -> int:
                 sys.stderr.write(f"[push_curves] audit append failed "
                                  f"(ignored): {exc}\n")
 
-    # chart 2 — full pareto (§10.2): every variant one point, front-accented
+    # chart 2 — full pareto (§10.2): every variant one point, y = absolute
+    # latest curve metric; the ref baseline row rides along as the reference
     pareto_rows = collect_pareto(art)
     if pareto_rows:
         pushed["pareto"] = _push_best_effort(sock_path, node, session_id, {
             "chart_type": "pareto", "data": pareto_rows,
             "label": _PARETO_LABEL, "title": _PARETO_TITLE + suffix,
             "x": "x", "y": "y", "color": "", "hue": "", "value": "",
-            "pareto_x_direction": "max", "pareto_y_direction": "min",
+            "pareto_x_direction": "max", "pareto_y_direction": "max",
             "x_label": "latency reduction vs baseline (%)",
-            "y_label": "final gap / latest metric",
-            "caption": "color = geometric pareto front computed on the "
-                       "plotted points (accent = on the front, gray = "
-                       "dominated — an accuracy_fail point can sit on the "
-                       "front; per-point status/round in the tooltip); "
-                       "y=null = no measurable outcome yet (达线未训占位, or "
-                       "trained but still awaiting the baseline anchor); y "
-                       "falls back to the latest metric while no gap exists "
-                       "(lower-is-better holds for gap only); "
-                       "the baseline anchor (x=0) reads y=0 on the gap basis "
-                       "(baseline gap is 0 by definition) or the baseline's "
-                       "latest metric on the metric basis",
+            "y_label": "latest training-curve metric (absolute)",
+            "caption": "y = each variant's latest training-curve metric "
+                       "(absolute, single basis; in-flight points move every "
+                       "epoch, terminal points freeze at their last epoch); "
+                       "y=null = no training metric yet (达线未训占位); "
+                       "color = geometric pareto front on the variant "
+                       "points (accent = on the front, gray = dominated — "
+                       "an accuracy_fail point can sit on the front; "
+                       "per-point status/round in the tooltip); the diamond "
+                       "reference marker is the baseline anchor (x=0, its "
+                       "own latest curve metric) — a reference, not a "
+                       "candidate: it never joins the front or the front "
+                       "line; variants without a measured makespan have no "
+                       "x and are not plotted",
         })
 
     # chart 3 — analysis-docs manifest (§10.4) + content channel (C3):

@@ -12,11 +12,12 @@
 // 故 SVG 断言用 waitFor 等待异步渲染完成。
 
 import { describe, expect, test, afterEach } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useWorkflowStore } from "@/stores/workflow-store";
 import { ChartRenderer } from "@/components/chart/ChartRenderer";
 import { ChartWidget } from "@/components/chart/ChartWidget";
 import { ChartGroup } from "@/components/chart/ChartGroup";
+import { seriesVisual } from "@/components/chart/widgets/LineChartWidget";
 import { PALETTE, getAxisTick, getCursor } from "@/components/chart/chartTheme";
 import { selectCharts } from "@/selectors";
 import type { ChartPayload, ChartType } from "@/components/chart/types";
@@ -241,6 +242,70 @@ describe("8 种 widget 各渲染对应 recharts class（SPEC §3.2）", () => {
     await waitFor(() => {
       expect(document.querySelector(".recharts-line path")).toBeTruthy();
     });
+  });
+
+  test("seriesVisual 三态（C4）：隐藏 > 悬停 > 常态（隐藏优先于悬停）", () => {
+    const hidden = new Set(["r1-01"]);
+    expect(seriesVisual("baseline", hidden, null)).toEqual({
+      isHidden: false,
+      isHovered: false,
+      dimmed: false,
+    });
+    expect(seriesVisual("r1-01", hidden, null)).toEqual({
+      isHidden: true,
+      isHovered: false,
+      dimmed: false,
+    });
+    expect(seriesVisual("baseline", hidden, "baseline")).toEqual({
+      isHidden: false,
+      isHovered: true,
+      dimmed: false,
+    });
+    // 隐藏优先于悬停：隐藏系列即使被悬停也不复活
+    expect(seriesVisual("r1-01", hidden, "r1-01")).toEqual({
+      isHidden: true,
+      isHovered: false,
+      dimmed: false,
+    });
+    // 他线悬停 → 本线变淡
+    expect(seriesVisual("baseline", hidden, "r1-01")).toEqual({
+      isHidden: false,
+      isHovered: false,
+      dimmed: true,
+    });
+  });
+
+  test("line(hue) → 图例点击 toggle：隐藏系列灰显，再点恢复（C4）", async () => {
+    const HUE_PAYLOAD: ChartPayload = {
+      chart_type: "line",
+      data: [
+        { epoch: 1, metric: 0.4, vid: "baseline" },
+        { epoch: 2, metric: 0.5, vid: "baseline" },
+        { epoch: 1, metric: 0.38, vid: "r1-01" },
+        { epoch: 2, metric: 0.42, vid: "r1-01" },
+      ],
+      x: "epoch",
+      y: "metric",
+      hue: "vid",
+      label: "g1",
+      title: "curves",
+    };
+    render(<ChartWidget payload={HUE_PAYLOAD} />);
+    await waitFor(() => {
+      expect(document.querySelectorAll(".recharts-legend-item").length).toBe(2);
+    });
+    const legendSpan = (name: string) =>
+      Array.from(document.querySelectorAll(".recharts-legend-item-text")).find(
+        (el) => el.textContent === name,
+      )!.querySelector("span") as HTMLElement;
+    // 常态：formatter span 不带灰显色
+    expect(legendSpan("r1-01").style.color).toBe("");
+    // 点击 → 隐藏 → formatter span 灰显（NEUTRAL）
+    fireEvent.click(legendSpan("r1-01"));
+    expect(legendSpan("r1-01").style.color).not.toBe("");
+    // 再点 → 恢复常态（C4 toggle 语义）
+    fireEvent.click(legendSpan("r1-01"));
+    expect(legendSpan("r1-01").style.color).toBe("");
   });
 
   test("bar → .recharts-bar path 存在", async () => {

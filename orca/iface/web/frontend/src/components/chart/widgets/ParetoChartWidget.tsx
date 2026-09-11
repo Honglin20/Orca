@@ -13,6 +13,11 @@
 //     （LabelList，无 round 不落字）；tooltip 改显 vid/round/status/x/y。
 //     prof-opt 推送方已停发 per-row color → 走前沿/被支配双色（前沿 = 绘图点
 //     几何非支配，accuracy_fail 也可在前沿上；状态语义归 tooltip）。
+//   - 2026-09-11（C2 参照独立标注，用户拍板「基线不要混进去」）：行带
+//     ``ref_row: true`` 的点（prof-opt 基线锚点）拆独立菱形系列（PALETTE[1]，
+//     图例 reference），不参与前沿支配计算、不进前沿连线、无 round 标注；支配
+//     计算只在候选点上做；ref 行仍计入轴 domain（x=0 原点在场）。键名用
+//     ``ref_row`` 不用 ``ref``（recharts 行字段展开 → React 保留 prop 冲突）。
 
 import {
   CartesianGrid,
@@ -47,8 +52,9 @@ import {
 import { computeNiceTicks, formatTick } from "../axisUtils";
 import { ChartCaption } from "../ChartCaption";
 
-/** 计算非支配前沿（Pareto front）。迁移自 AgentHarness，逐字保留。 */
-function findParetoFront(
+/** 计算非支配前沿（Pareto front）。迁移自 AgentHarness，逐字保留（2026-09-11
+ * 起导出供测试：C2「参照不参与支配」的敏感断言需要它，见 ProfoptW3Integration）。 */
+export function findParetoFront(
   points: { x: number; y: number }[],
   xDir: "max" | "min",
   yDir: "max" | "min",
@@ -84,6 +90,34 @@ function isPlottable(value: unknown): boolean {
     value !== "" &&
     Number.isFinite(Number(value))
   );
+}
+
+/** 参照行判别（prof-opt §10.2 C2）：行显式携带 ``ref_row: true`` 才是参照（基
+ * 线锚点）。严格布尔——缺省/非布尔一律是候选变体，通用 widget 不猜字段。参
+ * 照行独立成系列（菱形 + 图例 reference），不参与前沿支配计算，不进前沿连线。
+ * 键名必须是 ``ref_row`` 而非 ``ref``：recharts 把行字段展开到 SVG 元素上，
+ * ``ref`` 会变成 React 保留 ref prop（渲染崩）。 */
+export function isRefRow(row: Record<string, unknown>): boolean {
+  return row.ref_row === true;
+}
+
+/** C2 候选/参照拆分（导出供测试）：可绘行按 ``ref_row === true`` 分成参照组
+ * （基线锚点）与候选组；行/点各自保持原行序（per-row Cell 按索引落色的逐位
+ * 对齐不破）。参照组不参与支配计算，候选组是前沿/被支配双色的唯一输入。 */
+export function partitionRefPoints(
+  plottableRows: Record<string, unknown>[],
+  points: Array<Record<string, unknown> & { x: number; y: number }>,
+): {
+  refRows: Record<string, unknown>[];
+  variantRows: Record<string, unknown>[];
+  refData: Array<Record<string, unknown> & { x: number; y: number }>;
+  variantPoints: Array<Record<string, unknown> & { x: number; y: number }>;
+} {
+  const refRows = plottableRows.filter((d) => isRefRow(d));
+  const variantRows = plottableRows.filter((d) => !isRefRow(d));
+  const refData = points.filter((p) => isRefRow(p));
+  const variantPoints = points.filter((p) => !isRefRow(p));
+  return { refRows, variantRows, refData, variantPoints };
 }
 
 /**
@@ -181,14 +215,22 @@ export function ParetoChartWidget({ payload }: { payload: ChartPayload }) {
   // 不参与前沿支配判定（一个画在 0 位的假点会伪造支配关系）。
   const { plottableRows, points } = prepareParetoPoints(data, xKey, yKey);
 
+  // C2 参照行（基线锚点）拆出：独立系列渲染，不参与前沿支配判定与前沿连线；
+  // 但仍计入轴 domain（x=0 保证原点在场）。候选/参照各自保持原行序（per-row
+  // Cell 按索引落色的逐位对齐不破）。
+  const { variantRows, refData, variantPoints } = partitionRefPoints(
+    plottableRows,
+    points,
+  );
+
   const xConfig = computeNiceTicks(points.map((p) => p.x));
   const yConfig = computeNiceTicks(points.map((p) => p.y));
 
-  const frontIndices = findParetoFront(points, xDir, yDir);
-  const dominatedData = points
+  const frontIndices = findParetoFront(variantPoints, xDir, yDir);
+  const dominatedData = variantPoints
     .filter((_, i) => !frontIndices.has(i))
     .map((p) => ({ ...p }));
-  const frontData = points
+  const frontData = variantPoints
     .filter((_, i) => frontIndices.has(i))
     .map((p) => ({ ...p }));
   // 前沿连线数据：按 x 排序（阶梯状 Pareto front line）。recharts Line 走 chart-level data
@@ -255,8 +297,8 @@ export function ParetoChartWidget({ payload }: { payload: ChartPayload }) {
             {colorKey ? (
               // per-row 状态着色：单散点系列 + Cell 逐点落色（前沿语义保留在下方
               // 前沿连线，着色语义归推送方状态，不再用 dominated/front 双色覆盖）。
-              <Scatter name="variants" data={points} fill={NEUTRAL} fillOpacity={0.85}>
-                {plottableRows.map((d, i) => {
+              <Scatter name="variants" data={variantPoints} fill={NEUTRAL} fillOpacity={0.85}>
+                {variantRows.map((d, i) => {
                   const c = perRowColor(d, colorKey);
                   return <Cell key={i} fill={c} stroke={c} />;
                 })}
@@ -271,6 +313,19 @@ export function ParetoChartWidget({ payload }: { payload: ChartPayload }) {
                   <LabelList dataKey="round" position="top" formatter={roundLabel} />
                 </Scatter>
               </>
+            )}
+            {refData.length > 0 && (
+              // C2 参照系列（基线锚点）：菱形 + 暖琥珀，图例 reference——参照物
+              // 不是候选解，永不进入前沿/被支配双色的支配计算，无点旁 round 标注。
+              // （legendType 同形，图例 icon 不与候选点混。）
+              <Scatter
+                name="reference"
+                data={refData}
+                fill={PALETTE[1]}
+                shape="diamond"
+                legendType="diamond"
+                fillOpacity={0.9}
+              />
             )}
             {sortedFront.length > 1 && (
               <Line
