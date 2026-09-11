@@ -2503,7 +2503,10 @@ def test_push_curves_top10_selection_strategy(tmp_path: Path):
 def test_push_curves_pareto_payload(tmp_path: Path):
     """§10.2 every variant one point: x = reduction vs the origin-anchor
     baseline makespan (negative = slower), y = final gap (metric fallback,
-    null = the 达线未训 placeholder), status-colored, directions pinned."""
+    null = the 达线未训 placeholder), directions pinned. 2026-09-11 coloring
+    flip: NO per-row color is sent (the front end colors geometric front vs
+    dominated); rows carry ``round`` (from history.jsonl, the audit base —
+    never parsed out of vid strings) + ``status`` for the tooltip."""
     art = _po_ws(tmp_path)
     (art / "base").mkdir()
     (art / "base" / "origin_anchor.json").write_text(json.dumps(
@@ -2531,6 +2534,15 @@ def test_push_curves_pareto_payload(tmp_path: Path):
     _po_variant(art, "r4-01", curve=[{"epoch": 1, "metric": 0.5}],
                 train_status={"vid": "r4-01", "stage": "training"},
                 shard={"vid": "r4-01", "status": "training"})
+    # round truth lives in history.jsonl (r4-01 absent -> its round would be
+    # null if it ever plotted; a rerun row for r1-01 proves last-wins)
+    (art / "history.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in [
+            {"vid": "r1-01", "round": 1, "outcome": "latency_improved"},
+            {"vid": "r1-01", "round": 2, "outcome": "success"},
+            {"vid": "r2-01", "round": 2, "outcome": "latency_improved"},
+            {"vid": "r3-01", "round": 3, "outcome": "latency_improved"},
+        ]), encoding="utf-8")
     sock = tmp_path / "chart.sock"
     thread, messages = _chart_server(sock, replies=2)   # line + pareto
     proc = _push(art, sock)
@@ -2541,7 +2553,7 @@ def test_push_curves_pareto_payload(tmp_path: Path):
     assert pareto["label"] == "prof-opt/pareto"
     assert pareto["pareto_x_direction"] == "max"
     assert pareto["pareto_y_direction"] == "min"
-    assert pareto["color"] == "color"                    # per-row status color
+    assert pareto["color"] == ""                         # front-end dual-color
     points = {row["vid"]: row for row in pareto["data"]}
     # 全量变体一个点 + C2 baseline 锚点（anchor 在场必加原点参照；既有精确集
     # 断言随 2026-09-07 C2 契约同步 +baseline，非静默）
@@ -2549,18 +2561,21 @@ def test_push_curves_pareto_payload(tmp_path: Path):
     assert points["baseline"]["x"] == 0            # 原点 = 相对基线的 0 降幅
     assert points["baseline"]["y"] == 0            # gap basis（r1-01 gap 非空）
     assert points["baseline"]["status"] == "baseline"
-    assert points["baseline"]["color"] == "#0ea5e9"  # 独立锚点色（非状态色）
+    assert points["baseline"]["round"] == 0        # origin anchor: frozen pre-round-1
     assert points["r1-01"]["x"] == 20.0                  # 1 - 800/1000
     assert points["r1-01"]["y"] == 0.02
     assert points["r1-01"]["status"] == "success"
+    assert points["r1-01"]["round"] == 2                 # last-wins from history
     assert points["r2-01"]["x"] == -20.0                 # slower than baseline
     assert points["r2-01"]["y"] == 0.45            # metric fallback (no gap)
     assert points["r2-01"]["status"] == "in-flight"
+    assert points["r2-01"]["round"] == 2
     assert points["r3-01"]["y"] is None                  # 达线未训占位
     assert points["r3-01"]["status"] == "latency_improved"
+    assert points["r3-01"]["round"] == 3
     assert "null" in pareto["caption"]                   # disclosed, not silent
-    assert all(isinstance(row["color"], str) and row["color"].startswith("#")
-               for row in pareto["data"])
+    assert "front" in pareto["caption"]                  # coloring semantics disclosed
+    assert all("color" not in row for row in pareto["data"])
 
 
 @_requires_unix_socket
@@ -3287,7 +3302,8 @@ def test_pareto_baseline_anchor_gap_and_metric_basis(tmp_path: Path):
     points = {r["vid"]: r for r in rows}
     assert points["baseline"]["x"] == 0
     assert points["baseline"]["y"] == 0              # gap basis
-    assert points["baseline"]["color"] == "#0ea5e9"
+    assert points["baseline"]["round"] == 0          # origin anchor round
+    assert "color" not in points["baseline"]         # coloring is front-end's
     assert sum(1 for r in rows if r["vid"] == "baseline") == 1  # 幂等：仅 1 条
     # 重复调用仍只 1 条
     rows_again = push_curves.collect_pareto(art)
