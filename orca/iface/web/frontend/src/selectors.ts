@@ -77,6 +77,18 @@ export function formatElapsed(
   return `${m}m${s.toString().padStart(2, "0")}s`;
 }
 
+/**
+ * Log 摘要用时长格式化：≥60s → ``X.XXmin``（两位小数，裸秒位数太多不可读）；
+ * <60s → ``Ns`` / ``<1s``（与 formatElapsed 的 seconds 档一致）。
+ */
+export function formatDuration(seconds: number): string {
+  if (seconds < 1) return "<1s";
+  const rounded = Math.round(seconds);
+  // 取整可越过 60（59.6 → "60s" 撒谎）——越界即落分钟档
+  if (rounded < 60) return `${rounded}s`;
+  return `${(seconds / 60).toFixed(2)}min`;
+}
+
 export function selectAgents(state: WorkflowState): AgentRow[] {
   // SPEC web-attach §3 / M3 + web-perf P3 review 修订（2026-09-08）：**窗口态**（
   // ``serverOverview`` 在且尚未 ``load full``）overview 优先（信任服务端 fold）——
@@ -975,7 +987,7 @@ function eventDetail(
     case "workflow_started":
       return `workflow ${str(d.workflow_name)} started`;
     case "workflow_completed":
-      return `workflow completed (${num(d.elapsed)}s)`;
+      return `workflow completed (${formatDuration(num(d.elapsed))})`;
     case "workflow_failed":
       return `workflow FAILED: ${str(d.message)}`;
     case "workflow_cancelled":
@@ -995,7 +1007,7 @@ function eventDetail(
       if (elapsed == null) {
         return `node completed`;  // 未知耗时：省略括号，不显示 0s 假值
       }
-      return `node completed (${num(elapsed)}s)`;
+      return `node completed (${formatDuration(num(elapsed))})`;
     }
     case "node_failed":
       return `node FAILED: ${str(d.message)}`;
@@ -1040,9 +1052,9 @@ function eventDetail(
     case "retry_exhausted":
       return `retry exhausted (${num(d.attempts)})`;
     case "wait_started":
-      return `wait ${num(d.duration_seconds)}s (${str(d.reason)})`;
+      return `wait ${formatDuration(num(d.duration_seconds))} (${str(d.reason)})`;
     case "wait_completed":
-      return `wait done (${num(d.elapsed_seconds)}s)`;
+      return `wait done (${formatDuration(num(d.elapsed_seconds))})`;
     case "validator_started":
       return `validator started`;
     case "validator_passed":

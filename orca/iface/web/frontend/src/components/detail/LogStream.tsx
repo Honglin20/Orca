@@ -20,6 +20,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   List,
+  useDynamicRowHeight,
   useListRef,
   type RowComponentProps,
 } from "react-window";
@@ -55,14 +56,14 @@ function LogRow({
   return (
     <div
       style={style}
-      className={`flex items-center whitespace-nowrap px-2 font-mono text-xs ${
+      className={`flex px-2 py-0.5 font-mono text-xs leading-5 [word-break:break-word] whitespace-pre-wrap ${
         LEVEL_TEXT_COLOR[item.level]
       }`}
       data-testid={`log-row-${index}`}
     >
-      <span className="orca-text-faint">{item.seq}</span>
-      <span className="ml-2 orca-text-faint">{item.type}</span>
-      <span className="ml-2">{item.text}</span>
+      <span className="orca-text-faint shrink-0">{item.seq}</span>
+      <span className="ml-2 orca-text-faint shrink-0">{item.type}</span>
+      <span className="ml-2 min-w-0">{item.text}</span>
     </div>
   );
 }
@@ -73,6 +74,9 @@ export function LogStream() {
   const events = useWorkflowStore((s) => s.events);
   const nodes = useWorkflowStore((s) => s.nodes);
   const lines = useMemo(() => selectLog._from(events, nodes), [events, nodes]);
+
+  // 动态行高（换行行自测量；hook 置于早 return 之前 —— hook 顺序不变式）。
+  const rowHeight = useDynamicRowHeight({ defaultRowHeight: 24 });
 
   const [pinned, setPinned] = useState(true);
   // pendingJump：用户上滚时若新事件到达，记录待跳 index（按钮提示）；用户点跳最新→清。
@@ -132,7 +136,7 @@ export function LogStream() {
     >
       <List
         rowCount={lines.length}
-        rowHeight={28}
+        rowHeight={rowHeight}
         rowComponent={LogRow}
         rowProps={{ items: lines }}
         overscanCount={5}

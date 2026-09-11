@@ -16,6 +16,7 @@ import {
   docGroupOf,
   docRoundNoOf,
   EMPTY_EVENTS,
+  formatDuration,
   formatElapsed,
   selectAgents,
   selectCharts,
@@ -494,7 +495,8 @@ describe("selectors", () => {
     ]);
     const lines = selectLog(useWorkflowStore.getState());
     const nc = lines.find((l) => l.type === "node_completed");
-    expect(nc?.text).toContain("node completed (42.5s)");
+    // formatDuration：<60s 取整秒（43s 取代裸浮点 42.5s）
+    expect(nc?.text).toContain("node completed (43s)");
   });
 
   // ── 6. selectAgents：fold 后 agents 行模型 ──
@@ -535,6 +537,31 @@ describe("formatElapsed —— 亚秒 <1s", () => {
   });
   it("≥60s → NmNNs", () => {
     expect(formatElapsed(125, "seconds")).toBe("2m05s");
+  });
+});
+
+// ── formatDuration：Log/StatusLine 摘要时长（≥60s 转分钟两位小数，裸秒不可读）──
+describe("formatDuration —— 分钟两位小数", () => {
+  it("<1s → \"<1s\"；<60s → 整秒", () => {
+    expect(formatDuration(0)).toBe("<1s");
+    expect(formatDuration(0.4)).toBe("<1s");
+    expect(formatDuration(5)).toBe("5s");
+    expect(formatDuration(42.5)).toBe("43s");
+    expect(formatDuration(59.4)).toBe("59s");
+    // 取整越界（59.6 → 60）即落分钟档，不显示撒谎的 "60s"
+    expect(formatDuration(59.6)).toBe("0.99min");
+  });
+  it("≥60s → X.XXmin（两位小数，取代裸浮点秒）", () => {
+    expect(formatDuration(60)).toBe("1.00min");
+    expect(formatDuration(1234.56789)).toBe("20.58min");
+    expect(formatDuration(3600)).toBe("60.00min");
+  });
+  it("selectLog 摘要：长 workflow elapsed → 分钟格式", () => {
+    useWorkflowStore.getState().loadFromEvents([
+      ev("workflow_completed", { data: { workflow_name: "demo", elapsed: 1234.56789 } }),
+    ]);
+    const lines = selectLog(useWorkflowStore.getState());
+    expect(lines[0]?.text).toContain("workflow completed (20.58min)");
   });
 });
 

@@ -22,6 +22,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { WebEvent } from "@/types/events";
+import { formatDuration } from "@/selectors";
 
 // P1：emoji → lucide 组件（统一细线条）。foreach_item_* 走 fallback "·"。
 const ICONS: Partial<Record<WebEvent["type"], LucideIcon>> = {
@@ -59,9 +60,9 @@ function summarize(e: WebEvent): string {
     case "validator_failed":
       return `validator FAILED${d.message ? ": " + str(d.message) : ""}`;
     case "wait_started":
-      return `wait ${num(d.duration_seconds)}s (${str(d.reason)})`;
+      return `wait ${formatSeconds(num(d.duration_seconds))} (${str(d.reason)})`;
     case "wait_completed":
-      return `wait done (${num(d.elapsed_seconds)}s)`;
+      return `wait done (${formatSeconds(num(d.elapsed_seconds))})`;
     case "foreach_started":
       return `foreach: ${num(d.item_count)} items`;
     case "foreach_item_started":
@@ -81,6 +82,10 @@ function str(v: unknown): string {
 function num(v: unknown): number | string {
   const n = Number(v ?? 0);
   return Number.isFinite(n) ? n : String(v ?? "?");
+}
+// 时长统一走 selectors 的 formatDuration（Ns/<1s/X.XXmin）；num 的非数字回退原样透出
+function formatSeconds(v: number | string): string {
+  return typeof v === "number" ? formatDuration(v) : v;
 }
 
 /** 失败类状态行（validator_failed）：默认展开，凸显错误。 */
