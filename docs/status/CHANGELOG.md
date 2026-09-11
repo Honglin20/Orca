@@ -5,6 +5,10 @@
 
 ---
 
+## [2026-09-11] feat(prof-opt): origin-anchor 冻结确定性（chain 内联 + gate 保险）+ Web Log 换行/时长分钟化
+
+用户实测两反馈：①po_propose step0 frontier_snapshot 报 origin anchor missing（baseline 漏写 anchor，失败隔一节点才爆）——冻结从 LLM 手动调 freeze_origin.sh（静默 exit 0 guard）改为 chain step 3 确定性内联 + `--accuracy-budget` 必填 + executed gate 加 anchor schema 保险，契约升级为 **executed ⇒ anchor 必在**；②Web Log 长行被裁 + 裸秒位数多——LogStream 动态行高换行 + `formatDuration`（≥60s → X.XXmin 两位）统一 4+2 处裸秒拼接，static 重建。顺手修活 HEAD 既有 `test_baseline_chain_*` ×2（mfu report 归位 early-chain 前置）。po 180 green + 前端 651 green + tars validate 零 warning。详见 [release note](../releases/2026-09-11-web-log-format-and-anchor-freeze.md)。
+
 ## [2026-09-10] feat(prof-opt): v8.1 po_propose 叙事层 history digest（commit `dff5456`）
 
 用户提出每轮收尾由 history agent 总结、propose 看总结输出（原叙事窗口仅上一轮 analysis.md，跨轮"为什么"丢失）。落地为分层派生缓存：数字层仍机械（frontier.json），叙事层由 `history-curator` 子代理每轮收尾重写 `base/history_digest.md`（每个已关轮一个轮块 + Global lessons，零实测数字），`digest_stamp.py` 机械戳（sentinel/逐轮块/字节帽/sha，round 三态语义保 torn 中断轮可续跑）；下一轮 Step 0 校戳 stale fail loud，emit gate 把 seal 纳入磁盘契约，docs manifest 随轮上板。15 + 2 新用例，po 全套件绿（仅 HEAD 既有 2 失败），tars validate 零 warning + 双洁净脚本 rc=0 + 独立 reviewer 1 MAJOR 3 minor 全修。详见 [release note](../releases/2026-09-10-profopt-history-digest.md)。
