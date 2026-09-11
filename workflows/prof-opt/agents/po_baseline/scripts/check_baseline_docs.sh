@@ -13,6 +13,8 @@
 #   baseline/business_logic.md          business-logic-analyst, five sections
 #   base/information_analysis.md        information-analyst v2, four sections
 #   base/profile/mfu_bottleneck_report.md  mfu-analyzer v3, five sections
+# Plus the origin anchor: base/origin_anchor.json exists and is schema-valid
+# (the executed-gate belt for the chain's deterministic freeze).
 #
 # Findings -> stderr; exit 0 pass / 1 fail / 2 hard error.
 # Environment: ORCA_ARTIFACTS_DIR (required).
@@ -96,9 +98,48 @@ check_doc "base/profile/mfu_bottleneck_report.md" \
   "$MFU_SENTINEL" \
   "### 模型概况" "### MFU 损耗分解" "### 瓶颈根因" "### 算子级证据表（按显著性列行）" "### 评测异常与披露"
 
+# ── origin anchor (executed-gate belt; the chain freezes it deterministically,
+#    but `executed` must be IMPOSSIBLE without it — downstream readers
+#    (frontier_snapshot / gate / verdict) all fail loud on a missing anchor,
+#    a full node too late) ─────────────────────────────────────────────────────
+python3 - "$ART/base/origin_anchor.json" <<'PY' || fail=1
+import json, sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    doc = json.loads(path.read_text(encoding="utf-8"))
+except FileNotFoundError:
+    print("check_baseline_docs: FAIL base/origin_anchor.json missing — "
+          "the chain's origin-anchor freeze did not run; every downstream "
+          "gate/advance/verdict would fail loud a full node later", file=sys.stderr)
+    raise SystemExit(1)
+except json.JSONDecodeError as exc:
+    print(f"check_baseline_docs: FAIL base/origin_anchor.json unparseable: {exc}",
+          file=sys.stderr)
+    raise SystemExit(1)
+problems = []
+if not isinstance(doc, dict):
+    problems.append(f"not a JSON object (got {type(doc).__name__})")
+else:
+    for key in ("baseline_makespan_cycles", "target_cycles"):
+        value = doc.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            problems.append(f"invalid {key!r}: {value!r} (must be a "
+                            "non-negative integer)")
+    budget = doc.get("accuracy_budget")
+    if isinstance(budget, bool) or not isinstance(budget, (int, float)):
+        problems.append(f"invalid 'accuracy_budget': {budget!r} (must be numeric)")
+if problems:
+    for p in problems:
+        print(f"check_baseline_docs: FAIL base/origin_anchor.json: {p}",
+              file=sys.stderr)
+    raise SystemExit(1)
+PY
+
 if [ "$fail" -ne 0 ]; then
   echo "FAIL: check_baseline_docs" >&2
   exit 1
 fi
-echo "check_baseline_docs: PASS (three sentinels + all sections)" >&2
+echo "check_baseline_docs: PASS (three sentinels + all sections + origin anchor)" >&2
 exit 0

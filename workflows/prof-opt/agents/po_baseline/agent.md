@@ -33,10 +33,11 @@ this node different from a normal script driver:
    state) — the three documents they write are hard preconditions of
    `executed`, validated by `check_baseline_docs.sh`.
 
-You also own the ONE-TIME origin-anchor freeze: right after the chain's
-first profile succeeds, `base/origin_anchor.json` records the baseline
-makespan, the frozen latency target line, and the accuracy budget. The
-anchor is immutable for the workspace's lifetime — every later gate,
+You also relay the ONE-TIME origin-anchor freeze inputs: the chain
+deterministically freezes `base/origin_anchor.json` (baseline makespan,
+latency target line, accuracy budget) right after the first validated
+profile — you never run the freeze yourself and never touch the anchor.
+The anchor is immutable for the workspace's lifetime — every later gate,
 advance, and verdict reads it and never recomputes it.
 
 The chain script owns every deterministic decision (step order,
@@ -175,12 +176,13 @@ re-probes — same-run terminal states release cards, so the wait is
 convergent. A non-zero probe exit (backend CLI missing/failed) fails
 loud: without observation there is no honest card selection.
 
-### Step 1: Invoke The Chain + Freeze The Origin Anchor
+### Step 1: Invoke The Chain (it freezes the origin anchor)
 
 ```bash
 cd "$ORCA_ARTIFACTS_DIR"
 bash "$ORCA_AGENT_RESOURCES/scripts/run_baseline_chain.sh" \
   --latency-reduction-min "{{ inputs.latency_reduction_min }}" \
+  --accuracy-budget "{{ inputs.accuracy_budget }}" \
   --seed {{ inputs.seed }} \
   --device <IDX>
 ```
@@ -194,21 +196,12 @@ reason — re-probe (Step 0b), pick another card, re-invoke with the new
 `--device`. A render failure after the claim releases the lock
 explicitly — the chain owns this; never claim or release cards by hand.
 
-**After EVERY chain invocation that reports a non-failed state, run the
-anchor-freeze check** (mechanical, idempotent — once the anchor exists it is
-a no-op):
-
-```bash
-bash "$ORCA_AGENT_RESOURCES/scripts/freeze_origin.sh" \
-  {{ inputs.latency_reduction_min }} {{ inputs.accuracy_budget }}
-```
-
-The freeze writes `base/origin_anchor.json` exactly once: baseline makespan,
-`target_cycles = int(baseline x (1 - latency_reduction_min)) + 1`, and the
-accuracy budget. A non-zero exit means an illegal value range or an existing
-anchor with DIFFERENT content — the anchor is immutable; quote the stderr
-(it names the `fresh_start` remedy) in `error` and emit `status=failed`.
-Never edit or delete the anchor by hand.
+The chain freezes `base/origin_anchor.json` itself (deterministic, right
+after the first validated profile; idempotent) — a chain failure naming the
+freeze means an illegal value range or an existing anchor with DIFFERENT
+content: the anchor is immutable; quote the stderr (it names the
+`fresh_start` remedy) in `error` and emit `status=failed`. Never run the
+freeze by hand, never edit or delete the anchor.
 
 stdout is ALWAYS exactly one JSON line whose field set is EXACTLY the node
 output schema (three fields: `status` ∈ `executed | running | failed` —

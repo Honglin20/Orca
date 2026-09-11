@@ -26,7 +26,17 @@
 #                                       contracts.json), the agent dispatches
 #                                       mfu-analyzer, then re-invokes
 #   3 mfu report                 : validate the single analysis artifact
-#                                 base/profile/mfu_bottleneck_report.md
+#                                 base/profile/mfu_bottleneck_report.md, then
+#                                 deterministically freeze the origin anchor
+#                                 (freeze_origin.sh -- the ONE-TIME
+#                                 base/origin_anchor.json write: baseline
+#                                 makespan / latency target line / accuracy
+#                                 budget). `executed` therefore GUARANTEES the
+#                                 anchor exists — downstream readers
+#                                 (frontier_snapshot / gate / verdict) never
+#                                 see an anchorless workspace. Freeze failure
+#                                 (illegal value range / existing anchor with
+#                                 different content) fails loud at step 3.
 #   4 full-train launch          : claim the AGENT-CHOSEN training device
 #                                 (required --device <idx>: the node ran
 #                                 device_alloc probe, read the raw occupancy
@@ -70,11 +80,11 @@
 #                                 gate is check_baseline_docs.sh).
 #
 # The chain NEVER waits for the training to finish (non-blocking baseline):
-# `executed` = early chain passed + double liveness confirmed + the three
-# analysis documents on disk — training completion is the detached finalizer's
-# job, not this node's. Right before emitting executed the chain also pushes
-# the docs manifest (push_curves --docs, best-effort) so the web panel is
-# visible from the baseline stage on.
+# `executed` = early chain passed + the origin anchor frozen + double liveness
+# confirmed + the three analysis documents on disk — training completion is the
+# detached finalizer's job, not this node's. Right before emitting executed the
+# chain also pushes the docs manifest (push_curves --docs, best-effort) so the
+# web panel is visible from the baseline stage on.
 #
 # ── finalizer (this script re-invoked with --finalizer) ──────────────────────
 # Self-contained detached guardian (the node has emitted by now; nobody drives
@@ -126,8 +136,8 @@
 # is never a final node output. All logs to stderr/files.
 #
 # Usage:
-#   run_baseline_chain.sh --latency-reduction-min F --seed N \
-#                          --device <idx> [--finalizer]
+#   run_baseline_chain.sh --latency-reduction-min F --accuracy-budget F \
+#                          --seed N --device <idx> [--finalizer]
 # Environment: ORCA_ARTIFACTS_DIR (required). The profiling configuration
 # (chip / precision / core_num) is read from contracts.json's `profile`
 # block — recorded by the contract stage from the workflow inputs; a missing
@@ -141,10 +151,11 @@ set -uo pipefail
 ART="${ORCA_ARTIFACTS_DIR:?FATAL: ORCA_ARTIFACTS_DIR not set (run_baseline_chain.sh)}"
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
-TARGET=""; SEED="0"; DEVICE_IDX=""; FINALIZER=""
+TARGET=""; ACC_BUDGET=""; SEED="0"; DEVICE_IDX=""; FINALIZER=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --latency-reduction-min) TARGET="${2:?}"; shift 2 ;;
+    --accuracy-budget)   ACC_BUDGET="${2:?}"; shift 2 ;;
     --seed)              SEED="${2:?}"; shift 2 ;;
     --device)            DEVICE_IDX="${2:?}"; shift 2 ;;
     --finalizer)         FINALIZER="1"; shift ;;
@@ -154,6 +165,9 @@ done
 [ -n "$TARGET" ] || { echo "FATAL: --latency-reduction-min is required" >&2; exit 2; }
 python3 -c "import sys; r=float('$TARGET'); sys.exit(0 if 0.0 < r < 1.0 else 1)" \
   || { echo "FATAL: --latency-reduction-min must be a number in (0, 1), got '$TARGET'" >&2; exit 2; }
+[ -n "$ACC_BUDGET" ] || { echo "FATAL: --accuracy-budget is required (the origin-anchor freeze input; no default may be guessed)" >&2; exit 2; }
+python3 -c "import sys; r=float('$ACC_BUDGET'); sys.exit(0 if r >= 0.0 else 1)" \
+  || { echo "FATAL: --accuracy-budget must be a number >= 0, got '$ACC_BUDGET'" >&2; exit 2; }
 if [ -z "$FINALIZER" ]; then
   [ -n "$DEVICE_IDX" ] || {
     echo "FATAL: --device <idx> is required — run device_alloc.py probe first, read the raw occupancy output yourself, and pass the free card you chose (v7: card choice is the node agent's judgement; the chain only claims that idx atomically)" >&2
@@ -519,7 +533,7 @@ launch_finalizer() { # detach this script's --finalizer mode (own session);
   mkdir -p "$TRAIN_DIR"
   setsid bash -c 'echo $$ > "$1"; shift; exec "$@"' \
     bash "$FINALIZER_PID" "$SELF" --finalizer \
-    --latency-reduction-min "$TARGET" --seed "$SEED" \
+    --latency-reduction-min "$TARGET" --accuracy-budget "$ACC_BUDGET" --seed "$SEED" \
     </dev/null >>"$FINALIZER_LOG" 2>&1 &
   local i
   for i in 1 2 3 4 5 6 7 8 9 10; do
@@ -785,7 +799,7 @@ write_status() { # write_status <state-vector description...>
     echo "|---|---|---|---|"
     echo "| 1 | export + pristine snapshot | $1 | base/model.onnx + baseline/original_shadow/ |"
     echo "| 2 | profile (mfu only) | $2 | base/profile/ |"
-    echo "| 3 | mfu analysis report | $3 | base/profile/mfu_bottleneck_report.md |"
+    echo "| 3 | mfu analysis report + origin-anchor freeze | $3 | base/profile/mfu_bottleneck_report.md + base/origin_anchor.json |"
     echo "| 4 | full-train launch (non-blocking) | $4 | baseline/train.rendered.sh + train.pid |"
     echo "| 5 | finalizer launch | $5 | baseline/finalizer.pid + finalizer.log |"
     echo "| 6 | liveness confirmation | $6 | - |"
@@ -808,6 +822,7 @@ art = Path(".")
 generated = [rel for probe, rel in [
     ("base/model.onnx", "base/model.onnx"),
     ("base/profile", "base/profile/"),
+    ("base/origin_anchor.json", "base/origin_anchor.json"),
     ("baseline/original_shadow", "baseline/original_shadow/"),
     ("baseline/train.rendered.sh", "baseline/train.rendered.sh"),
     ("baseline/train.pid", "baseline/train.pid"),
@@ -852,6 +867,15 @@ step_export || { fail_step=1; fail_err="shadow export failed"; }
     fi
   fi; }
 [ "$fail_step" -eq 0 ] && { S2=done; step_profile_report || { fail_step=3; fail_err="mfu analysis report validation failed"; }; }
+# step 3b: the deterministic origin-anchor freeze (was the node agent's manual
+# duty — an agent turn that skipped it left an anchorless workspace that only
+# blew up a full node later at po_propose's frontier_snapshot). After the
+# profile products are validated the anchor MUST exist; freeze_origin.sh is
+# idempotent (existing anchor with identical content -> no-op).
+[ "$fail_step" -eq 0 ] && {
+  if ! bash "$(dirname "$SELF")/freeze_origin.sh" "$TARGET" "$ACC_BUDGET" >&2; then
+    fail_step=3; fail_err="origin-anchor freeze failed (see freeze_origin stderr above; an existing anchor with different content -> rebuild with fresh_start=true)"
+  fi; }
 [ "$fail_step" -eq 0 ] && { S3=done
   rc4=0; step_train_launch || rc4=$?
   if [ "$rc4" -eq 4 ]; then

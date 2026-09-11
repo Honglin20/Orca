@@ -863,8 +863,11 @@ _MFU_MD = ("[subagent:mfu-analyzer v3 MBA7K2]\n## MFU 时延瓶颈分析报告\n
 def _baseline_ws(tmp_path: Path, *, full_epochs: int = 2, probe_k: int = 1,
                  ckpt_per_epoch: bool = True, train_body: str | None = None,
                  with_docs: bool = True) -> Path:
-    """Deployed-layout workspace whose early chain (steps 1-3) products exist;
-    the chain therefore goes straight to the full-train + finalizer launches.
+    """Deployed-layout workspace whose early chain (steps 1-3) products exist
+    (incl. the mfu report — an early-chain precondition, never gated by
+    ``with_docs``); the chain therefore goes straight to the full-train +
+    finalizer launches. ``with_docs=False`` strips only the TWO training-
+    parallel analysis documents (business_logic / information_analysis).
     The train template's stdout IS the training log (epoch lines, matching the
     contracts extraction pattern); ckpt files land in <<out_dir>> per the
     ckpt_output_rule glob."""
@@ -890,11 +893,13 @@ def _baseline_ws(tmp_path: Path, *, full_epochs: int = 2, probe_k: int = 1,
         "serial_cycles": 700, "parallel_cycles": 500,
     }), encoding="utf-8")
     (art / "baseline").mkdir()
+    # the mfu report is an EARLY-chain precondition (step 3 validates it before
+    # the training launches) — it is never part of the with_docs=False state
+    (art / "base" / "profile" / "mfu_bottleneck_report.md").write_text(
+        _MFU_MD, encoding="utf-8")
     if with_docs:
         (art / "baseline" / "business_logic.md").write_text(_BL_MD, encoding="utf-8")
         (art / "base" / "information_analysis.md").write_text(_IX_MD, encoding="utf-8")
-        (art / "base" / "profile" / "mfu_bottleneck_report.md").write_text(
-            _MFU_MD, encoding="utf-8")
 
     rule = "{out_dir}/epoch_*.pth" if ckpt_per_epoch else "{out_dir}/model.pth"
     (art / "contracts.json").write_text(json.dumps({
@@ -957,7 +962,7 @@ def _chain_env(art: Path) -> dict:
 def _run_baseline_chain(art: Path, timeout: int = 120,
                         device: str = "0") -> subprocess.CompletedProcess:
     cmd = ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
-           "--seed", "0"]
+           "--accuracy-budget", "0.05", "--seed", "0"]
     if device is not None:
         cmd += ["--device", device]
     return subprocess.run(cmd, capture_output=True, text=True,
@@ -1202,6 +1207,59 @@ def test_baseline_chain_lock_excludes_other_claimants_while_training(tmp_path: P
     assert lock_path.is_file()   # not taken over under a live training
 
 
+def test_baseline_chain_executed_guarantees_origin_anchor(tmp_path: Path):
+    """The chain freezes base/origin_anchor.json deterministically after the
+    validated profile (step 3) — an agent turn can no longer skip it and leave
+    an anchorless workspace that only blows up at po_propose's
+    frontier_snapshot. `executed` ⇒ the anchor exists with the canonical
+    makespan and the frozen target line."""
+    art = _baseline_ws(tmp_path, full_epochs=1, probe_k=1, ckpt_per_epoch=True)
+    proc = _run_baseline_chain(art)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["status"] == "executed"
+    anchor = json.loads((art / "base" / "origin_anchor.json").read_text(
+        encoding="utf-8"))
+    # fixture schedule_result.json: parallel_cycles=500; lrm=0.5, budget=0.05
+    assert anchor["baseline_makespan_cycles"] == 500
+    assert anchor["target_cycles"] == int(500 * (1 - 0.5)) + 1
+    assert anchor["accuracy_budget"] == 0.05
+    artifacts = json.loads(proc.stdout)["generated_artifacts"]
+    assert any(a.endswith("base/origin_anchor.json") for a in artifacts)
+
+
+def test_baseline_chain_freeze_drift_fails_loud_at_step_3(tmp_path: Path):
+    """step 3b wiring: an EXISTING origin anchor with different content (e.g.
+    a fresh_start=false rebuild against a mutated anchor) must fail the chain
+    loud at step 3 — never silently proceed toward an anchorless/drifting
+    workspace that only blows up a full node later at po_propose."""
+    art = _baseline_ws(tmp_path, full_epochs=1, probe_k=1, ckpt_per_epoch=True)
+    (art / "base" / "origin_anchor.json").write_text(json.dumps({
+        "baseline_makespan_cycles": 999, "latency_reduction_min": 0.5,
+        "accuracy_budget": 0.05, "target_cycles": 500,
+        "frozen_at_round": 0,
+    }), encoding="utf-8")
+    proc = _run_baseline_chain(art)
+    payload = json.loads(proc.stdout)
+    assert payload["status"] == "failed"
+    assert "baseline step 3" in payload["error"]
+    assert "origin-anchor freeze failed" in payload["error"]
+    # the drifting anchor was NOT silently rewritten
+    anchor = json.loads((art / "base" / "origin_anchor.json").read_text(
+        encoding="utf-8"))
+    assert anchor["baseline_makespan_cycles"] == 999
+
+
+def test_baseline_chain_requires_accuracy_budget_arg(tmp_path: Path):
+    art = _baseline_ws(tmp_path)
+    env = _chain_env(art)
+    proc = subprocess.run(
+        ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
+         "--seed", "0", "--device", "0"],
+        capture_output=True, text=True, timeout=60, env=env)
+    assert proc.returncode == 2
+    assert "--accuracy-budget is required" in proc.stderr
+
+
 def test_baseline_chain_nonblocking_emit_and_finalizer_products(tmp_path: Path):
     """executed does NOT wait for the training: the chain emits while the
     training pid is still alive and train_final is absent; the detached
@@ -1295,23 +1353,23 @@ def test_baseline_chain_nonblocking_emit_and_finalizer_products(tmp_path: Path):
     assert json.loads(proc2.stdout)["status"] == "executed"
 
 
-def test_baseline_chain_running_until_all_three_docs_land(tmp_path: Path):
-    """ALL THREE baseline analysis documents are a HARD precondition of
-    executed (v7 §4.3): any missing one -> the agent-internal running line
-    NAMING what is missing; once all are on disk (and the finalizer
+def test_baseline_chain_running_until_parallel_analysis_docs_land(tmp_path: Path):
+    """The TWO training-parallel analysis documents are a HARD precondition
+    of executed (v7 §4.3; the mfu report is an EARLY-chain precondition and
+    never reaches this gate): any missing one -> the agent-internal running
+    line NAMING what is missing; once both are on disk (and the finalizer
     terminal), a re-invocation emits executed."""
     art = _baseline_ws(tmp_path, full_epochs=1, with_docs=False)
     proc = _run_baseline_chain(art)
     payload = json.loads(proc.stdout)
     assert payload["status"] == "running"
     for missing in ("baseline/business_logic.md",
-                    "base/information_analysis.md",
-                    "base/profile/mfu_bottleneck_report.md"):
+                    "base/information_analysis.md"):
         assert missing in payload["error"], payload["error"]
+    assert "mfu_bottleneck_report.md" not in payload["error"], payload["error"]
 
     # documents landing one at a time: still running until the LAST one
     (art / "baseline" / "business_logic.md").write_text(_BL_MD, encoding="utf-8")
-    (art / "base" / "information_analysis.md").write_text(_IX_MD, encoding="utf-8")
     # the dummy training may already have ended by now — the chain then
     # reports the transient step-6 "finalizer finalizing" line first. Re-invoke
     # (bounded; the finalizer's poll cycle is 10 s) until the docs gate
@@ -1325,12 +1383,11 @@ def test_baseline_chain_running_until_all_three_docs_land(tmp_path: Path):
         mid_doc = json.loads(mid.stdout)
         assert mid_doc["status"] == "running", mid_doc
         mid_err = mid_doc["error"]
-        if "mfu_bottleneck_report.md" in mid_err:
+        if "information_analysis.md" in mid_err:
             break
-    assert "mfu_bottleneck_report.md" in mid_err, mid_err
+    assert "information_analysis.md" in mid_err, mid_err
 
-    (art / "base" / "profile" / "mfu_bottleneck_report.md").write_text(
-        _MFU_MD, encoding="utf-8")
+    (art / "base" / "information_analysis.md").write_text(_IX_MD, encoding="utf-8")
     assert _wait_for(art / "baseline" / "train_final.json", timeout_s=60)
     proc2 = _run_baseline_chain(art)
     assert proc2.returncode == 0, proc2.stderr
@@ -1510,6 +1567,7 @@ def test_baseline_chain_mfu_mode_awaits_analyzer_then_reads_raw(tmp_path: Path):
     re-invoked chain validates them directly and proceeds to executed."""
     art, env = _mfu_baseline_ws(tmp_path)
     base_cmd = ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
+                "--accuracy-budget", "0.05",
                 "--seed", "0", "--device", "0"]
 
     first = subprocess.run(base_cmd, capture_output=True, text=True,
@@ -1558,6 +1616,7 @@ def test_baseline_chain_mfu_mode_report_without_raw_is_fatal_no_fallback(tmp_pat
 
     proc = subprocess.run(
         ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
+         "--accuracy-budget", "0.05",
          "--seed", "0", "--device", "0"],
         capture_output=True, text=True, timeout=60, env=env)
     payload = json.loads(proc.stdout)
@@ -1584,6 +1643,7 @@ def test_baseline_chain_invalid_raw_parallel_cycles_surfaces_in_error(tmp_path: 
 
     chain = subprocess.run(
         ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
+         "--accuracy-budget", "0.05",
          "--seed", "0", "--device", "0"],
         capture_output=True, text=True, timeout=60, env=env)
     payload = json.loads(chain.stdout)
@@ -1603,6 +1663,7 @@ def test_baseline_chain_device_argument_is_required_and_parks_when_locked(tmp_pa
     # missing --device -> rc 2 with the probe-first guidance
     proc = subprocess.run(
         ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
+         "--accuracy-budget", "0.05",
          "--seed", "0"],
         capture_output=True, text=True, timeout=60, env=env)
     assert proc.returncode == 2
@@ -1612,6 +1673,7 @@ def test_baseline_chain_device_argument_is_required_and_parks_when_locked(tmp_pa
     # non-numeric idx -> usage error
     proc_bad = subprocess.run(
         ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
+         "--accuracy-budget", "0.05",
          "--seed", "0", "--device", "gpu0"],
         capture_output=True, text=True, timeout=60, env=env)
     assert proc_bad.returncode == 2
@@ -1624,6 +1686,7 @@ def test_baseline_chain_device_argument_is_required_and_parks_when_locked(tmp_pa
     # the raw profile/report already exist so the run reaches step 4
     proc2 = subprocess.run(
         ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
+         "--accuracy-budget", "0.05",
          "--seed", "0", "--device", "0"],
         capture_output=True, text=True, timeout=60, env=env)
     # (no raw mfu products in this fixture -> the run may park at step 2
@@ -1637,8 +1700,12 @@ def test_baseline_chain_device_argument_is_required_and_parks_when_locked(tmp_pa
              "-o", str(art / "base" / "profile"), "--timeout", "60"],
             capture_output=True, text=True, timeout=120, env=env)
         assert bproc.returncode == 0, bproc.stderr
+        (art / "base" / "profile" / "mfu_bottleneck_report.md").write_text(
+            "[subagent:mfu-analyzer v3 MBA7K2]\n\n## MFU 时延瓶颈分析报告\n",
+            encoding="utf-8")
         proc2 = subprocess.run(
             ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
+             "--accuracy-budget", "0.05",
              "--seed", "0", "--device", "0"],
             capture_output=True, text=True, timeout=60, env=env)
     payload = json.loads(proc2.stdout)
@@ -1658,6 +1725,7 @@ def test_baseline_chain_profile_block_is_the_dispatch_source(tmp_path: Path):
     (art / "contracts.json").write_text(json.dumps(contracts), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
+         "--accuracy-budget", "0.05",
          "--seed", "0", "--device", "0"],
         capture_output=True, text=True, timeout=60, env=env)
     assert proc.returncode == 2
@@ -1683,6 +1751,7 @@ def test_baseline_chain_contract_field_guards_fail_loud(tmp_path: Path,
     (art / "contracts.json").write_text(json.dumps(contracts), encoding="utf-8")
     proc = subprocess.run(
         ["bash", str(_BASELINE_SH), "--latency-reduction-min", "0.5",
+         "--accuracy-budget", "0.05",
          "--seed", "0", "--device", "0"],
         capture_output=True, text=True, timeout=60, env=env)
     assert proc.returncode == 2, proc.stdout
@@ -1691,9 +1760,10 @@ def test_baseline_chain_contract_field_guards_fail_loud(tmp_path: Path,
 
 
 def test_check_baseline_docs_gate(tmp_path: Path):
-    """v7 §4.3: the THREE-document gate (sentinel + sections per doc). The
-    fixture documents pass; each violation class (doc missing, section
-    missing, section empty, wrong sentinel) fails naming what failed."""
+    """v7 §4.3: the THREE-document gate (sentinel + sections per doc) plus the
+    origin-anchor schema check. The fixture documents pass; each violation
+    class (doc missing, section missing, section empty, wrong sentinel, anchor
+    missing/invalid) fails naming what failed."""
     art = tmp_path / "art"
     (art / "baseline").mkdir(parents=True)
     (art / "base" / "profile").mkdir(parents=True)
@@ -1701,6 +1771,11 @@ def test_check_baseline_docs_gate(tmp_path: Path):
     (art / "base" / "information_analysis.md").write_text(_IX_MD, encoding="utf-8")
     (art / "base" / "profile" / "mfu_bottleneck_report.md").write_text(
         _MFU_MD, encoding="utf-8")
+    (art / "base" / "origin_anchor.json").write_text(json.dumps({
+        "baseline_makespan_cycles": 500, "latency_reduction_min": 0.5,
+        "accuracy_budget": 0.05, "target_cycles": 251,
+        "frozen_at_round": 0,
+    }), encoding="utf-8")
     env = dict(os.environ)
     env["ORCA_ARTIFACTS_DIR"] = str(art)
     sh = _REPO / "workflows" / "prof-opt" / "agents" / "po_baseline" / "scripts" / "check_baseline_docs.sh"
@@ -1710,6 +1785,23 @@ def test_check_baseline_docs_gate(tmp_path: Path):
                               timeout=30, env=env)
 
     assert run().returncode == 0, run().stderr
+
+    # anchor missing / unparseable / schema-invalid (each is named)
+    anchor = art / "base" / "origin_anchor.json"
+    saved = anchor.read_text(encoding="utf-8")
+    anchor.unlink()
+    proc = run()
+    assert proc.returncode == 1
+    assert "origin_anchor.json missing" in proc.stderr
+    anchor.write_text("{not json", encoding="utf-8")
+    proc = run()
+    assert proc.returncode == 1
+    assert "unparseable" in proc.stderr
+    anchor.write_text(json.dumps({"accuracy_budget": 0.05}), encoding="utf-8")
+    proc = run()
+    assert proc.returncode == 1
+    assert "baseline_makespan_cycles" in proc.stderr
+    anchor.write_text(saved, encoding="utf-8")
 
     # one of the three missing (each is named)
     (art / "base" / "information_analysis.md").unlink()
